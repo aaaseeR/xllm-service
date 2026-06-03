@@ -43,6 +43,7 @@ message InstanceMetaInfo {
   repeated uint32 ports = 10;
   string incarnation_id = 11;
   uint64 register_ts_ms = 12;
+  optional string backend_type = 13;
 }
 
 message KvCacheEvent {

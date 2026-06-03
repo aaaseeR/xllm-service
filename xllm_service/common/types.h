@@ -221,6 +221,8 @@ struct InstanceMetaInfo {
   // only used when the SLO Aware scheduling policy is enabled.
   InstanceType current_type = InstanceType::PREFILL;
 
+  std::string backend_type = "xllm";
+
   nlohmann::json serialize_to_json() const {
     nlohmann::json json_val;
     json_val["name"] = name;
@@ -237,6 +239,7 @@ struct InstanceMetaInfo {
     json_val["ports"] = ports;
     json_val["ttft_profiling_data"] = ttft_profiling_data;
     json_val["tpot_profiling_data"] = tpot_profiling_data;
+    json_val["backend_type"] = backend_type;
     return json_val;
   }
 
@@ -259,41 +262,35 @@ struct InstanceMetaInfo {
       ttft_profiling_data.clear();
       tpot_profiling_data.clear();
 
-      for (const auto& item :
-           json_value.at("cluster_ids").get<std::vector<uint64_t>>()) {
-        cluster_ids.push_back(item);
-      }
+      cluster_ids =
+          json_value.value("cluster_ids", std::vector<uint64_t>{});
+      k_cache_ids =
+          json_value.value("k_cache_ids", std::vector<uint64_t>{});
+      addrs = json_value.value("addrs", std::vector<std::string>{});
+      v_cache_ids =
+          json_value.value("v_cache_ids", std::vector<uint64_t>{});
+      dp_size = json_value.value("dp_size", 0);
+      device_ips =
+          json_value.value("device_ips", std::vector<std::string>{});
+      ports = json_value.value("ports", std::vector<uint16_t>{});
 
-      for (const auto& item :
-           json_value.at("k_cache_ids").get<std::vector<uint64_t>>()) {
-        k_cache_ids.push_back(item);
-      }
-
-      for (const auto& item :
-           json_value.at("addrs").get<std::vector<std::string>>()) {
-        addrs.push_back(item);
-      }
-
-      for (const auto& item :
-           json_value.at("v_cache_ids").get<std::vector<uint64_t>>()) {
-        v_cache_ids.push_back(item);
-      }
-
-      dp_size = json_value.at("dp_size").get<int32_t>();
-      device_ips = json_value.at("device_ips").get<std::vector<std::string>>();
-      ports = json_value.at("ports").get<std::vector<uint16_t>>();
-
-      for (const auto& item : json_value.at("ttft_profiling_data")) {
-        if (item.is_array() && item.size() == 2) {
-          ttft_profiling_data.emplace_back(item[0], item[1]);
+      if (json_value.contains("ttft_profiling_data")) {
+        for (const auto& item : json_value.at("ttft_profiling_data")) {
+          if (item.is_array() && item.size() == 2) {
+            ttft_profiling_data.emplace_back(item[0], item[1]);
+          }
         }
       }
 
-      for (const auto& item : json_value.at("tpot_profiling_data")) {
-        if (item.is_array() && item.size() == 3) {
-          tpot_profiling_data.emplace_back(item[0], item[1], item[2]);
+      if (json_value.contains("tpot_profiling_data")) {
+        for (const auto& item : json_value.at("tpot_profiling_data")) {
+          if (item.is_array() && item.size() == 3) {
+            tpot_profiling_data.emplace_back(item[0], item[1], item[2]);
+          }
         }
       }
+
+      backend_type = json_value.value("backend_type", std::string("xllm"));
 
       runtime_state = InstanceRuntimeState::ACTIVE;
       set_init_timestamp();

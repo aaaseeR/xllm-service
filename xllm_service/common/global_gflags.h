@@ -80,3 +80,11 @@ DECLARE_string(tool_call_parser);
 DECLARE_string(reasoning_parser);
 
 DECLARE_int32(readiness_check_interval_s);
+
+DECLARE_string(default_backend_type);
+
+DECLARE_int32(vllm_http_timeout_ms);
+
+DECLARE_bool(skip_pretokenize_for_vllm);
+
+DECLARE_string(internal_api_token);
