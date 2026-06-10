@@ -16,6 +16,8 @@ VLLM_LOG=/export/home/zhangyi.932/logs/vllm.log
 VLLM_PID=/export/home/zhangyi.932/logs/vllm.pid
 MASTER_LOG=/tmp/xllm-master.log
 MASTER_PID=/tmp/xllm-master.pid
+SIDECAR_LOG=/tmp/xllm-sidecar.log
+SIDECAR_PID=/tmp/xllm-sidecar.pid
 
 ETCD=127.0.0.1:2379
 VLLM_PORT=18000
@@ -78,9 +80,20 @@ else
     || die "master 启动失败，看 $MASTER_LOG"
 fi
 
-# ---- 3. 注册 vLLM 实例到集群 ------------------------------------------------
-say "3/4 注册 vLLM 实例 ($INSTANCE_ADDR) 到 xllm-service 集群"
-bash "$ROOT"/demo/register_vllm.sh "$INSTANCE_ADDR"
+# ---- 3. sidecar 自动注册 vLLM 实例 ------------------------------------------
+say "3/4 启动 sidecar 自动注册 vLLM 实例 ($INSTANCE_ADDR)"
+if [ -f "$SIDECAR_PID" ] && ps -p "$(cat $SIDECAR_PID)" >/dev/null 2>&1; then
+  ok "sidecar 已在跑 (pid=$(cat $SIDECAR_PID))"
+else
+  nohup env PYTHONPATH="$ROOT" python3 -m xllm_service.vllm_sidecar.sidecar \
+    --etcd-endpoints "$ETCD" \
+    --vllm-url "http://127.0.0.1:$VLLM_PORT" \
+    --register-addr "$INSTANCE_ADDR" \
+    > "$SIDECAR_LOG" 2>&1 &
+  echo $! > "$SIDECAR_PID"
+  ok "sidecar 起来了 (pid=$(cat $SIDECAR_PID))：自动注册 + 租约续租 + 健康门控"
+fi
+# 旧的手动注册方式仍可用作降级： bash demo/register_vllm.sh "$INSTANCE_ADDR"
 sleep 2
 # readiness gate：有实例后 master 才放开 HTTP 入口
 for i in $(seq 1 10); do

@@ -119,7 +119,9 @@ bash demo/demo_down.sh    # 停 master + vLLM（释放卡3），清理 etcd 注�
 - **为什么 vLLM 不用 tokenize/调度计算？** vLLM 自己做 tokenize 和 chat template，`schedule()` 对 vllm 集群
   跳过这些，只做实例选择（`--default_backend_type=vllm`）。
 - **为什么实例 type=DEFAULT 不是 MIX？** 单实例无 decode 时调度器只放行 DEFAULT；这是本次实测确认的约束。
-- **现在的注册是手动写 etcd，正式怎么做？** 下一步上 vLLM **sidecar**：自动注册 + 心跳 + 上报 metrics，
-  替代手动 `register_vllm.sh`。本 demo 用手动注册聚焦“转发链路已通”这一成果。
+- **实例怎么注册进来的？** vLLM 不会写 etcd/发心跳，由 **sidecar**（`xllm_service/vllm_sidecar/`）
+  代劳：探活 vLLM `/health` 通过后，用 **etcd 租约**写一条 InstanceMetaInfo（`backend_type=vllm`,
+  `type=DEFAULT`），健康期间续租；vLLM 挂掉或 sidecar 退出则撤销/租约过期，master 的 watcher 自动摘除。
+  零 C++ 改动。手动 `register_vllm.sh` 仍保留作降级/对照。本轮**只做存活注册**，负载指标/HTTP 心跳留作下一步。
 - **本轮范围**：单 vLLM 实例端到端（M1+M2）。未做：KV 事件桥/CacheAwareRouting、Disaggregated PD、
   多 backend 混合集群（P1）。
