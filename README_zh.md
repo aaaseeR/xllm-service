@@ -67,7 +67,9 @@ git submodule update
 #### 编译
 编译执行
 ```bash
-sh prepare.sh # 应用patch
+# prepare.sh 仅在缺失时安装 libcpprest-dev，然后应用 patch；
+# 需以 root 运行或前面加 sudo。NPU 基础镜像已自带，会自动跳过。
+sh prepare.sh
 mkdir -p build && cd build
 cmake .. && make -j 8
 ```

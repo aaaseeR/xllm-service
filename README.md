@@ -75,7 +75,9 @@ git submodule update
 #### Compilation
 compile xllm-service: 
 ```bash
-sh prepare.sh # apply patch
+# prepare.sh installs libcpprest-dev only if missing, then applies the patch;
+# run as root or prepend sudo. NPU base images already ship it and are skipped.
+sh prepare.sh
 mkdir -p build && cd build
 cmake .. && make -j 8
 ```
