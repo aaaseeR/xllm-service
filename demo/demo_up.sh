@@ -89,9 +89,10 @@ else
     --etcd-endpoints "$ETCD" \
     --vllm-url "http://127.0.0.1:$VLLM_PORT" \
     --register-addr "$INSTANCE_ADDR" \
+    --xllm-service-url "http://127.0.0.1:$HTTP_PORT" \
     > "$SIDECAR_LOG" 2>&1 &
   echo $! > "$SIDECAR_PID"
-  ok "sidecar 起来了 (pid=$(cat $SIDECAR_PID))：自动注册 + 租约续租 + 健康门控"
+  ok "sidecar 起来了 (pid=$(cat $SIDECAR_PID))：自动注册 + 租约续租 + 健康门控 + 心跳上报指标"
 fi
 # 旧的手动注册方式仍可用作降级： bash demo/register_vllm.sh "$INSTANCE_ADDR"
 sleep 2
