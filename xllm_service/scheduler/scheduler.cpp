@@ -71,10 +71,13 @@ Scheduler::Scheduler(const Options& options) : options_(options) {
                                    std::placeholders::_2);
   etcd_client_->add_watch(ETCD_XSERVICE_KEY_PREFIX, handle_xservice);
 
-  if (!etcd_client_->get(ETCD_MASTER_SERVICE_KEY, nullptr)) {
+  if (!options_.enable_peer_service() &&
+      !etcd_client_->get(ETCD_MASTER_SERVICE_KEY, nullptr)) {
     is_master_service_ = etcd_client_->set(
         ETCD_MASTER_SERVICE_KEY, options_.service_name(), kHeartbeatInterval);
-    LOG(INFO) << "Set current service as master!";
+    if (is_master_service_) {
+      LOG(INFO) << "Set current service as master!";
+    }
   }
 
   instance_mgr_ = std::make_shared<InstanceMgr>(
@@ -92,7 +95,10 @@ Scheduler::Scheduler(const Options& options) : options_(options) {
     lb_policy_ = std::make_unique<RoundRobin>(instance_mgr_);
   }
 
-  if (is_master_service_) {
+  if (options_.enable_peer_service()) {
+    LOG(INFO) << "Peer service mode enabled; skip master election and "
+                 "metrics/cache etcd upload paths.";
+  } else if (is_master_service_) {
     heartbeat_thread_ = std::make_unique<std::thread>(
         &Scheduler::update_master_service_heartbeat, this);
   } else {
@@ -149,6 +155,7 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   // update request metrics
   if (request->prompt.size() != 0) {
     instance_mgr_->update_request_metrics(request, RequestAction::SCHEDULE);
+    instance_mgr_->record_dispatch(request);
   }
 
   return true;
@@ -198,14 +205,16 @@ bool Scheduler::handle_instance_heartbeat(const proto::HeartbeatRequest* req) {
     return false;
   }
   global_kvcache_mgr_->record_updated_kvcaches(req->name(), req->cache_event());
-  instance_mgr_->record_load_metrics_update(req->name(), req->load_metrics());
-  instance_mgr_->update_latency_metrics(req->name(), req->latency_metrics());
+  instance_mgr_->record_load_metrics_update(
+      req->name(), req->incarnation_id(), req->load_metrics());
+  instance_mgr_->update_latency_metrics(
+      req->name(), req->incarnation_id(), req->latency_metrics());
   return true;
 }
 
 void Scheduler::handle_master_service_watch(const etcd::Response& response,
                                             const uint64_t& prefix_len) {
-  if (exited_ || response.events().empty()) {
+  if (options_.enable_peer_service() || exited_ || response.events().empty()) {
     return;
   }
 
@@ -244,18 +253,20 @@ void Scheduler::handle_xservice_watch(const etcd::Response& response,
       continue;
     }
 
-    if (deleted_service == options_.service_name()) {
+    if (deleted_service == ETCD_XSERVICE_KEY_PREFIX + options_.service_name()) {
       LOG(INFO) << "Current xllm_service registration expired, re-registering";
       register_current_service();
       continue;
     }
 
-    if (deleted_service == ETCD_MASTER_SERVICE_NAME) {
-      continue;
-    }
+    if (!options_.enable_peer_service()) {
+      if (deleted_service == ETCD_MASTER_SERVICE_KEY) {
+        continue;
+      }
 
-    if (!is_master_service_) {
-      continue;
+      if (!is_master_service_) {
+        continue;
+      }
     }
 
     LOG(INFO) << "Detected xllm_service offline: " << deleted_service;
@@ -290,6 +301,8 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
       LOG(ERROR) << "The request ID already exists. Requests with the same ID "
                     "are not allowed. "
                  << request->service_request_id;
+      instance_mgr_->record_request_finished(request);
+      instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
       return false;
     }
 
@@ -372,6 +385,8 @@ bool Scheduler::record_new_request(
       LOG(ERROR) << "The request ID already exists. Requests with the same ID "
                     "are not allowed. "
                  << request->service_request_id;
+      instance_mgr_->record_request_finished(request);
+      instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
       return false;
     }
 
@@ -432,6 +447,7 @@ void Scheduler::finish_request(const std::string& service_request_id,
   }
 
   if (request != nullptr) {
+    instance_mgr_->record_request_finished(request);
     if (error) {
       instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
     } else {
@@ -451,32 +467,45 @@ void Scheduler::clear_requests_on_failed_instance(
     const std::string& incarnation_id,
     InstanceType type) {
   std::vector<std::string> cleared_request_ids;
-  std::lock_guard<std::mutex> lock(request_mutex_);
-  for (auto it = requests_.begin(); it != requests_.end();) {
-    const bool clear_prefill =
-        ((type == InstanceType::DEFAULT || type == InstanceType::PREFILL) &&
-         it->second->routing.prefill_name == instance_name &&
-         it->second->prefill_incarnation_id == incarnation_id &&
-         !it->second->prefill_stage_finished);
-    const bool clear_decode =
-        (type == InstanceType::DECODE &&
-         it->second->routing.decode_name == instance_name &&
-         it->second->decode_incarnation_id == incarnation_id);
-    if (clear_prefill || clear_decode) {
-      auto service_request_id = it->second->service_request_id;
-      llm::RequestOutput req_output;
-      req_output.status = llm::Status(llm::StatusCode::CANCELLED,
-                                      "Instance is failed and deleted");
-      // call request callback
-      it->second->output_callback(req_output);
-      LOG(INFO) << "Clear request on failed instance: " << instance_name
-                << ", incarnation_id: " << incarnation_id
-                << ", service_request_id: " << service_request_id;
-      cleared_request_ids.emplace_back(service_request_id);
-      it = requests_.erase(it);
-    } else {
-      ++it;
+  std::vector<std::shared_ptr<Request>> cleared_requests;
+  {
+    std::lock_guard<std::mutex> lock(request_mutex_);
+    for (auto it = requests_.begin(); it != requests_.end();) {
+      const bool clear_default =
+          (type == InstanceType::DEFAULT &&
+           it->second->routing.prefill_name == instance_name &&
+           it->second->prefill_incarnation_id == incarnation_id);
+      const bool clear_prefill =
+          (type == InstanceType::PREFILL &&
+           it->second->routing.prefill_name == instance_name &&
+           it->second->prefill_incarnation_id == incarnation_id &&
+           !it->second->prefill_stage_finished);
+      const bool clear_decode =
+          (type == InstanceType::DECODE &&
+           it->second->routing.decode_name == instance_name &&
+           it->second->decode_incarnation_id == incarnation_id);
+      if (clear_default || clear_prefill || clear_decode) {
+        auto service_request_id = it->second->service_request_id;
+        llm::RequestOutput req_output;
+        req_output.status = llm::Status(llm::StatusCode::CANCELLED,
+                                        "Instance is failed and deleted");
+        // call request callback
+        it->second->output_callback(req_output);
+        LOG(INFO) << "Clear request on failed instance: " << instance_name
+                  << ", incarnation_id: " << incarnation_id
+                  << ", service_request_id: " << service_request_id;
+        cleared_request_ids.emplace_back(service_request_id);
+        cleared_requests.emplace_back(it->second);
+        it = requests_.erase(it);
+      } else {
+        ++it;
+      }
     }
+  }
+
+  for (const auto& request : cleared_requests) {
+    instance_mgr_->record_request_finished(request);
+    instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
   }
 
   if (!cleared_request_ids.empty()) {
@@ -484,6 +513,12 @@ void Scheduler::clear_requests_on_failed_instance(
     for (const auto& service_request_id : cleared_request_ids) {
       remote_requests_output_thread_map_.erase(service_request_id);
     }
+  }
+}
+
+void Scheduler::clear_instance_cache(const std::string& instance_name) {
+  if (global_kvcache_mgr_ != nullptr) {
+    global_kvcache_mgr_->clear_instance_cache(instance_name);
   }
 }
 
@@ -520,6 +555,7 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
   }
 
   if (client_disconnected) {
+    instance_mgr_->record_request_finished(request);
     instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
     std::lock_guard<std::mutex> guard(thread_map_mutex_);
     remote_requests_output_thread_map_.erase(service_request_id);
@@ -568,6 +604,7 @@ void Scheduler::update_request_metrics(std::shared_ptr<Request> request,
                                        bool finished_on_prefill_instance) {
   request->num_generated_tokens += 1;
   if (finished_on_prefill_instance) {
+    instance_mgr_->record_prefill_finished(request);
     request->prefill_stage_finished = true;
     // update instance request metrics for prefill finished request
     instance_mgr_->update_request_metrics(request,

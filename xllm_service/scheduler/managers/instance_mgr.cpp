@@ -106,9 +106,6 @@ size_t count_schedulable_instances(
 }
 
 InstanceType get_cleanup_type(const xllm_service::InstanceMetaInfo& info) {
-  if (info.type == InstanceType::DEFAULT) {
-    return InstanceType::PREFILL;
-  }
   if (info.type == InstanceType::MIX) {
     return info.current_type;
   }
@@ -134,7 +131,7 @@ InstanceMgr::InstanceMgr(const Options& options,
   for (auto& it : ETCD_KEYS_PREFIX_MAP) {
     etcd_client_->add_watch(it.second, handle_instance_metainfo);
   }
-  if (!is_master_service_) {
+  if (!options_.enable_peer_service() && !is_master_service_) {
     auto handle_load_metrics = std::bind(&InstanceMgr::update_load_metrics,
                                          this,
                                          std::placeholders::_1,
@@ -167,12 +164,14 @@ void InstanceMgr::init() {
     }
   }
 
-  std::unordered_map<std::string, LoadMetrics> loaded_metrics;
-  etcd_client_->get_prefix(ETCD_LOADMETRICS_PREFIX, &loaded_metrics);
-  {
-    std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
-    load_metrics_ = std::move(loaded_metrics);
-    GAUGE_SET(xservice_load_metrics_size, load_metrics_.size());
+  if (!options_.enable_peer_service()) {
+    std::unordered_map<std::string, LoadMetrics> loaded_metrics;
+    etcd_client_->get_prefix(ETCD_LOADMETRICS_PREFIX, &loaded_metrics);
+    {
+      std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
+      load_metrics_ = std::move(loaded_metrics);
+      GAUGE_SET(xservice_load_metrics_size, load_metrics_.size());
+    }
   }
 
   {
@@ -301,22 +300,31 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos) {
       continue;
     }
 
+    LoadMetrics adjusted_metrics = it->second;
+    auto inflight_it = inflight_request_counts_.find(name);
+    if (inflight_it != inflight_request_counts_.end()) {
+      adjusted_metrics.waiting_requests_num += inflight_it->second;
+    }
+
     if (instance_it->second.type == InstanceType::DECODE) {
-      infos->decode_load_metrics.insert(std::make_pair(name, it->second));
+      infos->decode_load_metrics.insert(std::make_pair(name, adjusted_metrics));
       infos->decode_max_waiting_requests_num =
           std::max(infos->decode_max_waiting_requests_num,
-                   it->second.waiting_requests_num);
+                   adjusted_metrics.waiting_requests_num);
     } else {
-      infos->prefill_load_metrics.insert(std::make_pair(name, it->second));
+      infos->prefill_load_metrics.insert(
+          std::make_pair(name, adjusted_metrics));
       infos->prefill_max_waiting_requests_num =
           std::max(infos->prefill_max_waiting_requests_num,
-                   it->second.waiting_requests_num);
+                   adjusted_metrics.waiting_requests_num);
     }
   }
 
   std::string least_loaded_prefill_instance;
+  LoadMetrics least_loaded_prefill_metrics;
   float least_loaded_prefill_gpu_cache_usage_perc = 1;
   std::string least_loaded_decode_instance;
+  LoadMetrics least_loaded_decode_metrics;
   float least_loaded_decode_gpu_cache_usage_perc = 1;
 
   if (infos->prefill_load_metrics.size() == 0 ||
@@ -327,19 +335,27 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos) {
           !is_instance_schedulable(instance_it->second)) {
         continue;
       }
+      LoadMetrics adjusted_metrics = metric.second;
+      auto inflight_it = inflight_request_counts_.find(metric.first);
+      if (inflight_it != inflight_request_counts_.end()) {
+        adjusted_metrics.waiting_requests_num += inflight_it->second;
+      }
+
       if (instance_it->second.type != InstanceType::DECODE) {
-        if (metric.second.gpu_cache_usage_perc <
+        if (adjusted_metrics.gpu_cache_usage_perc <
             least_loaded_prefill_gpu_cache_usage_perc) {
           least_loaded_prefill_gpu_cache_usage_perc =
-              metric.second.gpu_cache_usage_perc;
+              adjusted_metrics.gpu_cache_usage_perc;
           least_loaded_prefill_instance = metric.first;
+          least_loaded_prefill_metrics = adjusted_metrics;
         }
       } else {
-        if (metric.second.gpu_cache_usage_perc <
+        if (adjusted_metrics.gpu_cache_usage_perc <
             least_loaded_decode_gpu_cache_usage_perc) {
           least_loaded_decode_gpu_cache_usage_perc =
-              metric.second.gpu_cache_usage_perc;
+              adjusted_metrics.gpu_cache_usage_perc;
           least_loaded_decode_instance = metric.first;
+          least_loaded_decode_metrics = adjusted_metrics;
         }
       }
     }
@@ -349,26 +365,32 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos) {
       !least_loaded_prefill_instance.empty()) {
     infos->prefill_load_metrics.insert(
         std::make_pair(least_loaded_prefill_instance,
-                       load_metrics_[least_loaded_prefill_instance]));
+                       least_loaded_prefill_metrics));
   }
 
   if (infos->decode_load_metrics.size() == 0 &&
       !least_loaded_decode_instance.empty()) {
     infos->decode_load_metrics.insert(
         std::make_pair(least_loaded_decode_instance,
-                       load_metrics_[least_loaded_decode_instance]));
+                       least_loaded_decode_metrics));
   }
 }
 
 void InstanceMgr::record_load_metrics_update(
     const std::string& instance_name,
+    const std::string& incarnation_id,
     const proto::LoadMetrics& load_metrics) {
-  std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
-
-  updated_metrics_.insert_or_assign(
-      instance_name,
-      LoadMetrics(load_metrics.waiting_requests_num(),
-                  load_metrics.gpu_cache_usage_perc()));
+  std::shared_lock<std::shared_mutex> cluster_lock(cluster_mutex_);
+  if (!is_current_incarnation_locked(instance_name, incarnation_id)) return;
+  std::unique_lock<std::shared_mutex> metrics_lock(metrics_mutex_);
+  LoadMetrics metrics(load_metrics.waiting_requests_num(),
+                      load_metrics.gpu_cache_usage_perc());
+  if (options_.enable_peer_service()) {
+    load_metrics_.insert_or_assign(instance_name, std::move(metrics));
+    GAUGE_SET(xservice_load_metrics_size, load_metrics_.size());
+    return;
+  }
+  updated_metrics_.insert_or_assign(instance_name, std::move(metrics));
 }
 
 bool InstanceMgr::upload_load_metrics() {
@@ -396,6 +418,75 @@ bool InstanceMgr::upload_load_metrics() {
 void InstanceMgr::set_as_master() {
   is_master_service_ = true;
   etcd_client_->remove_watch(ETCD_LOADMETRICS_PREFIX);
+}
+
+void InstanceMgr::record_dispatch(const std::shared_ptr<Request>& request) {
+  if (request == nullptr) {
+    return;
+  }
+  std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
+  if (!request->routing.prefill_name.empty()) {
+    ++inflight_request_counts_[request->routing.prefill_name];
+  }
+  if (!request->routing.decode_name.empty() &&
+      request->routing.decode_name != request->routing.prefill_name) {
+    ++inflight_request_counts_[request->routing.decode_name];
+  }
+}
+
+void InstanceMgr::record_prefill_finished(
+    const std::shared_ptr<Request>& request) {
+  if (request == nullptr || request->prefill_stage_finished) {
+    return;
+  }
+  const bool has_separate_decode =
+      !request->routing.decode_name.empty() &&
+      request->routing.decode_name != request->routing.prefill_name;
+  if (!has_separate_decode) {
+    return;
+  }
+
+  std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
+  auto it = inflight_request_counts_.find(request->routing.prefill_name);
+  if (it == inflight_request_counts_.end()) {
+    return;
+  }
+  if (it->second <= 1) {
+    inflight_request_counts_.erase(it);
+  } else {
+    --it->second;
+  }
+}
+
+void InstanceMgr::record_request_finished(
+    const std::shared_ptr<Request>& request) {
+  if (request == nullptr) {
+    return;
+  }
+  std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
+  auto decrement = [this](const std::string& instance_name) {
+    auto it = inflight_request_counts_.find(instance_name);
+    if (it == inflight_request_counts_.end()) {
+      return;
+    }
+    if (it->second <= 1) {
+      inflight_request_counts_.erase(it);
+    } else {
+      --it->second;
+    }
+  };
+  if (!request->routing.prefill_name.empty()) {
+    const bool has_separate_decode =
+        !request->routing.decode_name.empty() &&
+        request->routing.decode_name != request->routing.prefill_name;
+    if (!request->prefill_stage_finished || !has_separate_decode) {
+      decrement(request->routing.prefill_name);
+    }
+  }
+  if (!request->routing.decode_name.empty() &&
+      request->routing.decode_name != request->routing.prefill_name) {
+    decrement(request->routing.decode_name);
+  }
 }
 
 std::shared_ptr<brpc::Channel> InstanceMgr::get_channel(
@@ -711,8 +802,11 @@ void InstanceMgr::update_load_metrics(const etcd::Response& response,
 
 void InstanceMgr::update_latency_metrics(
     const std::string& instance_name,
+    const std::string& incarnation_id,
     const proto::LatencyMetrics& latency_metrics) {
-  std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
+  std::shared_lock<std::shared_mutex> cluster_lock(cluster_mutex_);
+  if (!is_current_incarnation_locked(instance_name, incarnation_id)) return;
+  std::unique_lock<std::shared_mutex> metrics_lock(metrics_mutex_);
 
   latency_metrics_.insert_or_assign(
       instance_name,
@@ -843,10 +937,13 @@ void InstanceMgr::update_request_metrics(std::shared_ptr<Request> request,
     return;
   }
 
-  auto decode_it = request_metrics_.find(request->routing.decode_name);
+  const std::string decode_name = request->routing.decode_name.empty()
+                                      ? request->routing.prefill_name
+                                      : request->routing.decode_name;
+  auto decode_it = request_metrics_.find(decode_name);
   if (decode_it == request_metrics_.end()) {
     LOG(ERROR) << "Failed to find instance request metrics, instance name : "
-               << request->routing.decode_name;
+               << decode_name;
     return;
   }
 
@@ -901,7 +998,8 @@ void InstanceMgr::update_request_metrics(std::shared_ptr<Request> request,
       break;
   }
 
-  if (decode_it->second.decode_request_num == 0) {
+  if (decode_it->second.decode_request_num == 0 &&
+      !request->routing.decode_name.empty()) {
     flip_decode_to_prefill(request->routing.decode_name);
   }
 }
@@ -1290,6 +1388,33 @@ void InstanceMgr::remove_instance_resources(const std::string& name) {
   updated_metrics_.erase(name);
   removed_instance_.insert(name);
   load_metrics_.erase(name);
+  inflight_request_counts_.erase(name);
+  lock.unlock();
+  clear_instance_cache(name);
+}
+
+bool InstanceMgr::is_current_incarnation_locked(
+    const std::string& instance_name,
+    const std::string& incarnation_id) const {
+  auto it = instances_.find(instance_name);
+  if (it == instances_.end()) {
+    LOG(WARNING) << "Ignore metrics from unknown instance: " << instance_name;
+    return false;
+  }
+  if (it->second.incarnation_id != incarnation_id) {
+    LOG(WARNING) << "Ignore stale metrics from instance: " << instance_name
+                 << ", current incarnation_id: " << it->second.incarnation_id
+                 << ", heartbeat incarnation_id: " << incarnation_id;
+    return false;
+  }
+  return true;
+}
+
+void InstanceMgr::clear_instance_cache(const std::string& name) {
+  if (scheduler_ == nullptr) {
+    return;
+  }
+  scheduler_->clear_instance_cache(name);
 }
 
 bool InstanceMgr::gather_link_operations(
@@ -1492,6 +1617,7 @@ nlohmann::json InstanceMgr::debug_summary() const {
   summary["suspect_instance_count"] = suspect_instances_.size();
   summary["load_metrics_count"] = load_metrics_.size();
   summary["latency_metrics_count"] = latency_metrics_.size();
+  summary["inflight_request_counts"] = inflight_request_counts_;
 
   for (const auto& iter : instances_) {
     const InstanceMetaInfo& info = iter.second;

@@ -67,12 +67,18 @@ class InstanceMgr final {
   bool record_instance_heartbeat(const std::string& instance_name,
                                  const std::string& incarnation_id);
   void record_load_metrics_update(const std::string& instance_name,
+                                  const std::string& incarnation_id,
                                   const proto::LoadMetrics& load_metrics);
   bool upload_load_metrics();
 
   // update the recent token latency metrics for the corresponding instance
   void update_latency_metrics(const std::string& instance_name,
+                              const std::string& incarnation_id,
                               const proto::LatencyMetrics& latency_metrics);
+
+  void record_dispatch(const std::shared_ptr<Request>& request);
+  void record_prefill_finished(const std::shared_ptr<Request>& request);
+  void record_request_finished(const std::shared_ptr<Request>& request);
 
   // update request metrics under different actions
   void update_request_metrics(std::shared_ptr<Request> request,
@@ -82,7 +88,6 @@ class InstanceMgr final {
   bool select_instance_pair_on_slo(std::shared_ptr<Request> request);
 
   nlohmann::json debug_summary() const;
-
   void set_as_master();
 
   // Returns true if at least one valid instance group is available:
@@ -134,6 +139,9 @@ class InstanceMgr final {
                               const InstanceMetaInfo& info);
   // Release internal resources for an instance
   void remove_instance_resources(const std::string& name);
+  bool is_current_incarnation_locked(const std::string& instance_name,
+                                     const std::string& incarnation_id) const;
+  void clear_instance_cache(const std::string& name);
   // Build LinkInstance RPC list; caller must hold cluster_mutex_.
   bool gather_link_operations(
       const InstanceMetaInfo& info,
@@ -169,7 +177,6 @@ class InstanceMgr final {
   bool exited_ = false;
   bool use_etcd_ = false;
   std::atomic_bool is_master_service_ = false;
-
   std::shared_ptr<EtcdClient> etcd_client_;
 
   // L1 — cluster topology & channels
@@ -192,6 +199,7 @@ class InstanceMgr final {
   std::unordered_map<std::string, LoadMetrics> load_metrics_;
   std::unordered_map<std::string, LoadMetrics> updated_metrics_;
   std::unordered_set<std::string> removed_instance_;
+  std::unordered_map<std::string, uint64_t> inflight_request_counts_;
   std::unordered_map<std::string, TimePredictor> time_predictors_;
   std::unordered_map<std::string, LatencyMetrics> latency_metrics_;
   std::unordered_map<std::string, RequestMetrics> request_metrics_;

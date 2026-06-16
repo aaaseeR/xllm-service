@@ -42,14 +42,13 @@ class GlobalKVCacheMgr final {
   void record_updated_kvcaches(const std::string& instance_name,
                                const proto::KvCacheEvent& kvcache_event);
   bool upload_kvcache();
+  void clear_instance_cache(const std::string& instance_name);
 
   nlohmann::json debug_summary() const;
-
   void set_as_master();
 
  private:
   DISALLOW_COPY_AND_ASSIGN(GlobalKVCacheMgr);
-
   void update_kvcache(const etcd::Response& response,
                       const uint64_t prefix_len);
 

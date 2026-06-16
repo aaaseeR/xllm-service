@@ -39,7 +39,7 @@ GlobalKVCacheMgr::GlobalKVCacheMgr(
     : options_(options),
       is_master_service_(is_master_service),
       etcd_client_(etcd_client) {
-  if (!is_master_service_) {
+  if (!options_.enable_peer_service() && !is_master_service_) {
     auto handle_kvcache = std::bind(&GlobalKVCacheMgr::update_kvcache,
                                     this,
                                     std::placeholders::_1,
@@ -47,7 +47,7 @@ GlobalKVCacheMgr::GlobalKVCacheMgr(
     etcd_client_->add_watch(ETCD_CACHE_PREFIX, handle_kvcache);
   }
 
-  {
+  if (!options_.enable_peer_service()) {
     std::unique_lock<std::shared_mutex> lock(kvcache_mutex_);
     etcd_client_->get_prefix(ETCD_CACHE_PREFIX, &kvcache_infos_);
     GAUGE_SET(xservice_kvcache_index_size, kvcache_infos_.size());
@@ -57,7 +57,9 @@ GlobalKVCacheMgr::GlobalKVCacheMgr(
 
 GlobalKVCacheMgr::~GlobalKVCacheMgr() {
   exited_ = true;
-  etcd_client_->remove_watch(ETCD_CACHE_PREFIX);
+  if (!options_.enable_peer_service()) {
+    etcd_client_->remove_watch(ETCD_CACHE_PREFIX);
+  }
 }
 
 void set_score(const std::unordered_set<std::string>& instance_names,
@@ -182,6 +184,45 @@ void GlobalKVCacheMgr::update_kvcache(const etcd::Response& response,
 void GlobalKVCacheMgr::record_updated_kvcaches(
     const std::string& instance_name,
     const proto::KvCacheEvent& kvcache_event) {
+  if (options_.enable_peer_service()) {
+    std::unique_lock<std::shared_mutex> lock(kvcache_mutex_);
+    for (int i = 0; i < kvcache_event.stored_cache_size(); i++) {
+      XXH3Key key(kvcache_event.stored_cache(i).c_str());
+      auto& locations = kvcache_infos_[key];
+      locations.hbm_instance_set.insert(instance_name);
+    }
+
+    for (int i = 0; i < kvcache_event.offload_cache_size(); i++) {
+      XXH3Key key(kvcache_event.offload_cache(i).c_str());
+      auto iter = kvcache_infos_.find(key);
+      if (iter == kvcache_infos_.end()) {
+        continue;
+      }
+      auto& locations = iter->second;
+      if (locations.hbm_instance_set.erase(instance_name) > 0) {
+        locations.dram_instance_set.insert(instance_name);
+      } else if (locations.dram_instance_set.erase(instance_name) > 0) {
+        locations.ssd_instance_set.insert(instance_name);
+      }
+    }
+
+    for (int i = 0; i < kvcache_event.removed_cache_size(); i++) {
+      XXH3Key key(kvcache_event.removed_cache(i).c_str());
+      auto iter = kvcache_infos_.find(key);
+      if (iter == kvcache_infos_.end()) {
+        continue;
+      }
+      iter->second.hbm_instance_set.erase(instance_name);
+      iter->second.dram_instance_set.erase(instance_name);
+      iter->second.ssd_instance_set.erase(instance_name);
+      if (iter->second.empty()) {
+        kvcache_infos_.erase(iter);
+      }
+    }
+    GAUGE_SET(xservice_kvcache_index_size, kvcache_infos_.size());
+    return;
+  }
+
   std::lock_guard<std::mutex> update_lock(update_mutex_);
   std::shared_lock<std::shared_mutex> metric_lock(kvcache_mutex_);
   for (int i = 0; i < kvcache_event.stored_cache_size(); i++) {
@@ -229,7 +270,37 @@ void GlobalKVCacheMgr::record_updated_kvcaches(
   }
 }
 
+void GlobalKVCacheMgr::clear_instance_cache(
+    const std::string& instance_name) {
+  std::lock_guard<std::mutex> update_lock(update_mutex_);
+  std::unique_lock<std::shared_mutex> lock(kvcache_mutex_);
+  for (auto iter = kvcache_infos_.begin(); iter != kvcache_infos_.end();) {
+    iter->second.hbm_instance_set.erase(instance_name);
+    iter->second.dram_instance_set.erase(instance_name);
+    iter->second.ssd_instance_set.erase(instance_name);
+    if (iter->second.empty()) {
+      iter = kvcache_infos_.erase(iter);
+    } else {
+      ++iter;
+    }
+  }
+  for (auto iter = updated_kvcaches_.begin(); iter != updated_kvcaches_.end();) {
+    iter->second.hbm_instance_set.erase(instance_name);
+    iter->second.dram_instance_set.erase(instance_name);
+    iter->second.ssd_instance_set.erase(instance_name);
+    if (iter->second.empty()) {
+      iter = updated_kvcaches_.erase(iter);
+    } else {
+      ++iter;
+    }
+  }
+  GAUGE_SET(xservice_kvcache_index_size, kvcache_infos_.size());
+}
+
 bool GlobalKVCacheMgr::upload_kvcache() {
+  if (options_.enable_peer_service()) {
+    return true;
+  }
   std::lock_guard<std::mutex> update_lock(update_mutex_);
   if (updated_kvcaches_.empty()) {
     return true;

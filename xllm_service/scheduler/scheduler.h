@@ -73,6 +73,7 @@ class Scheduler final {
   void clear_requests_on_failed_instance(const std::string& instance_name,
                                          const std::string& incarnation_id,
                                          InstanceType type);
+  void clear_instance_cache(const std::string& instance_name);
 
   // handle generations from prefill/decode instance
   bool handle_generation(const llm::RequestOutput& request_output);
@@ -104,7 +105,6 @@ class Scheduler final {
   Options options_;
 
   bool exited_ = false;
-
   bool is_master_service_ = false;
 
   TokenizerArgs tokenizer_args_;
@@ -121,7 +121,6 @@ class Scheduler final {
   std::shared_ptr<GlobalKVCacheMgr> global_kvcache_mgr_;
 
   std::unique_ptr<LoadBalancePolicy> lb_policy_;
-
   std::unique_ptr<std::thread> heartbeat_thread_;
 
   // `service request id` -> `request` map
