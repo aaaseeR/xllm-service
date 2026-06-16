@@ -67,6 +67,8 @@ DECLARE_int32(lease_lost_heartbeat_timeout_ms);
 
 DECLARE_int32(block_size);
 
+DECLARE_bool(enable_peer_service);
+
 DECLARE_string(tokenizer_path);
 
 DECLARE_bool(enable_request_trace);

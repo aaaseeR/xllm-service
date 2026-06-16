@@ -43,12 +43,26 @@ message InstanceMetaInfo {
   repeated uint32 ports = 10;
   string incarnation_id = 11;
   uint64 register_ts_ms = 12;
+  int32 kv_split_size = 13;
 }
 
 message KvCacheEvent {
   repeated bytes stored_cache = 1;
   repeated bytes removed_cache = 2;
   repeated bytes offload_cache = 3;
+}
+
+enum KvCacheEventEnvelopeType {
+  KV_CACHE_EVENT_DELTA = 0;
+  KV_CACHE_EVENT_SNAPSHOT = 1;
+}
+
+message KvCacheEventEnvelope {
+  KvCacheEventEnvelopeType event_type = 1;
+  string incarnation_id = 2;
+  uint64 seq_no = 3;
+  uint64 publish_ts_ms = 4;
+  KvCacheEvent cache_event = 5;
 }
 
 message LoadMetrics {
@@ -61,11 +75,29 @@ message LatencyMetrics {
   int64 recent_max_tbt = 2;
 }
 
+// XTensor mode info for heartbeat updates.
+message XTensorHeartbeatInfo {
+  // Per-worker free physical pages (index = worker rank).
+  repeated uint64 worker_free_phy_pages = 1;
+  // Model weight segments in GlobalXTensor (key: model_id).
+  map<string, WeightSegmentList> model_weight_segments = 3;
+}
+
+message WeightSegmentInfo {
+  uint64 offset = 1;
+  uint64 size = 2;
+}
+
+message WeightSegmentList {
+  repeated WeightSegmentInfo segments = 1;
+}
+
 message HeartbeatRequest {
   string name = 1;
   KvCacheEvent cache_event = 2;
   LoadMetrics load_metrics = 3;
   LatencyMetrics latency_metrics = 4;
+  XTensorHeartbeatInfo xtensor_info = 5;
   string incarnation_id = 6;
 }
 

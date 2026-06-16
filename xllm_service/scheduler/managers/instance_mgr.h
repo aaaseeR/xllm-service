@@ -18,6 +18,7 @@ limitations under the License.
 #include <brpc/channel.h>
 
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -79,6 +80,8 @@ class InstanceMgr final {
 
   // select instances based on the SLO
   bool select_instance_pair_on_slo(std::shared_ptr<Request> request);
+
+  nlohmann::json debug_summary() const;
 
   void set_as_master();
 
@@ -185,7 +188,7 @@ class InstanceMgr final {
       cached_channels_;
 
   // L2 — metrics & predictors (single lock to avoid order ambiguity)
-  std::shared_mutex metrics_mutex_;
+  mutable std::shared_mutex metrics_mutex_;
   std::unordered_map<std::string, LoadMetrics> load_metrics_;
   std::unordered_map<std::string, LoadMetrics> updated_metrics_;
   std::unordered_set<std::string> removed_instance_;

@@ -115,6 +115,11 @@ DEFINE_int32(block_size,
              128,
              "Number of slots per kv cache block. Default is 128.");
 
+DEFINE_bool(enable_peer_service,
+            false,
+            "Enable peer-service rollout mode. Phase 0 only exposes the switch "
+            "without changing master/slave behavior.");
+
 DEFINE_string(tokenizer_path, "", "tokenizer config path.");
 
 DEFINE_bool(enable_request_trace, false, "Whether to enable request trace");

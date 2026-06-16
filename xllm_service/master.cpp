@@ -231,6 +231,7 @@ int main(int argc, char* argv[]) {
       .lease_lost_heartbeat_timeout_ms(FLAGS_lease_lost_heartbeat_timeout_ms)
       .enable_request_trace(FLAGS_enable_request_trace)
       .block_size(FLAGS_block_size)
+      .enable_peer_service(FLAGS_enable_peer_service)
       .tokenizer_path(FLAGS_tokenizer_path)
       .tool_call_parser(FLAGS_tool_call_parser)
       .reasoning_parser(FLAGS_reasoning_parser);

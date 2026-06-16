@@ -77,6 +77,10 @@ class Options {
 
   PROPERTY(std::string, service_name);
 
+  // Phase 0 rollout switch for the peer-service architecture. Phase 0 only
+  // plumbs the flag; Phase 1 changes behavior behind it.
+  PROPERTY(bool, enable_peer_service) = false;
+
   // tokenizer options
   PROPERTY(std::string, tokenizer_path);
 

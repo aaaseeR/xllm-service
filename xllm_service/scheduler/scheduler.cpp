@@ -33,6 +33,8 @@ constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
 namespace xllm_service {
 
 Scheduler::Scheduler(const Options& options) : options_(options) {
+  GAUGE_SET(peer_service_enabled, options_.enable_peer_service() ? 1.0 : 0.0);
+
   tokenizer_ = TokenizerFactory::create_tokenizer(options_.tokenizer_path(),
                                                   &tokenizer_args_);
   chat_template_ = std::make_unique<JinjaChatTemplate>(tokenizer_args_);
@@ -186,6 +188,10 @@ bool Scheduler::register_current_service() {
 bool Scheduler::handle_instance_heartbeat(const proto::HeartbeatRequest* req) {
   if (exited_) {
     return false;
+  }
+  COUNTER_INC(xservice_heartbeat_total);
+  if (req->has_xtensor_info()) {
+    COUNTER_INC(xservice_heartbeat_xtensor_total);
   }
   if (!instance_mgr_->record_instance_heartbeat(req->name(),
                                                 req->incarnation_id())) {
@@ -588,6 +594,19 @@ void Scheduler::update_token_latency_metrics(
 
 bool Scheduler::has_available_instances() const {
   return instance_mgr_->has_available_instances();
+}
+
+nlohmann::json Scheduler::debug_summary() const {
+  nlohmann::json summary;
+  summary["service_name"] = options_.service_name();
+  summary["enable_peer_service"] = options_.enable_peer_service();
+  summary["is_master_service"] = is_master_service_;
+  summary["instance_view"] =
+      instance_mgr_ ? instance_mgr_->debug_summary() : nlohmann::json::object();
+  summary["cache_index"] = global_kvcache_mgr_
+                               ? global_kvcache_mgr_->debug_summary()
+                               : nlohmann::json::object();
+  return summary;
 }
 
 }  // namespace xllm_service

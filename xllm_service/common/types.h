@@ -200,7 +200,8 @@ struct InstanceMetaInfo {
   std::vector<std::string> addrs;
   std::vector<uint64_t> k_cache_ids;
   std::vector<uint64_t> v_cache_ids;
-  int32_t dp_size;
+  int32_t dp_size = 1;
+  int32_t kv_split_size = 1;
   // device network info
   std::vector<std::string> device_ips;
   std::vector<uint16_t> ports;
@@ -233,6 +234,7 @@ struct InstanceMetaInfo {
     json_val["k_cache_ids"] = k_cache_ids;
     json_val["v_cache_ids"] = v_cache_ids;
     json_val["dp_size"] = dp_size;
+    json_val["kv_split_size"] = kv_split_size;
     json_val["device_ips"] = device_ips;
     json_val["ports"] = ports;
     json_val["ttft_profiling_data"] = ttft_profiling_data;
@@ -260,36 +262,39 @@ struct InstanceMetaInfo {
       tpot_profiling_data.clear();
 
       for (const auto& item :
-           json_value.at("cluster_ids").get<std::vector<uint64_t>>()) {
+           json_value.value("cluster_ids", std::vector<uint64_t>())) {
         cluster_ids.push_back(item);
       }
 
       for (const auto& item :
-           json_value.at("k_cache_ids").get<std::vector<uint64_t>>()) {
+           json_value.value("k_cache_ids", std::vector<uint64_t>())) {
         k_cache_ids.push_back(item);
       }
 
       for (const auto& item :
-           json_value.at("addrs").get<std::vector<std::string>>()) {
+           json_value.value("addrs", std::vector<std::string>())) {
         addrs.push_back(item);
       }
 
       for (const auto& item :
-           json_value.at("v_cache_ids").get<std::vector<uint64_t>>()) {
+           json_value.value("v_cache_ids", std::vector<uint64_t>())) {
         v_cache_ids.push_back(item);
       }
 
-      dp_size = json_value.at("dp_size").get<int32_t>();
-      device_ips = json_value.at("device_ips").get<std::vector<std::string>>();
-      ports = json_value.at("ports").get<std::vector<uint16_t>>();
+      dp_size = json_value.value("dp_size", int32_t(1));
+      kv_split_size = json_value.value("kv_split_size", int32_t(1));
+      device_ips = json_value.value("device_ips", std::vector<std::string>());
+      ports = json_value.value("ports", std::vector<uint16_t>());
 
-      for (const auto& item : json_value.at("ttft_profiling_data")) {
+      for (const auto& item :
+           json_value.value("ttft_profiling_data", nlohmann::json::array())) {
         if (item.is_array() && item.size() == 2) {
           ttft_profiling_data.emplace_back(item[0], item[1]);
         }
       }
 
-      for (const auto& item : json_value.at("tpot_profiling_data")) {
+      for (const auto& item :
+           json_value.value("tpot_profiling_data", nlohmann::json::array())) {
         if (item.is_array() && item.size() == 3) {
           tpot_profiling_data.emplace_back(item[0], item[1], item[2]);
         }

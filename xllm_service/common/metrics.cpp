@@ -18,6 +18,19 @@ limitations under the License.
 DEFINE_COUNTER(server_request_in_total,
                "Total number of request that server received");
 
+DEFINE_GAUGE(peer_service_enabled,
+             "Whether peer-service rollout mode is enabled");
+DEFINE_GAUGE(xservice_instance_view_size,
+             "Number of instances in the local xllm-service view");
+DEFINE_GAUGE(xservice_load_metrics_size,
+             "Number of load metrics entries in the local xllm-service view");
+DEFINE_GAUGE(xservice_kvcache_index_size,
+             "Number of KV cache index entries in the local xllm-service view");
+DEFINE_COUNTER(xservice_heartbeat_total,
+               "Total number of xllm instance heartbeats received");
+DEFINE_COUNTER(xservice_heartbeat_xtensor_total,
+               "Total number of xllm instance heartbeats with XTensor info");
+
 // ttft latency histogram
 DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,
                  "Histogram of time to first token latency in milliseconds");

@@ -528,7 +528,18 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
                                   proto::HttpResponse* response,
                                   ::google::protobuf::Closure* done) {
   ClosureGuard done_guard(done);
-  // TODO: implement metrics endpoint
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | respose | controller is null";
+    if (controller) {
+      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
+          "brpc request | respose | controller is null");
+    }
+    return;
+  }
+
+  auto cntl = reinterpret_cast<brpc::Controller*>(controller);
+  cntl->http_response().set_content_type("application/json");
+  cntl->response_attachment().append(scheduler_->debug_summary().dump());
 }
 
 }  // namespace xllm_service

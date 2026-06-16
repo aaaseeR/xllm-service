@@ -32,6 +32,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/global_gflags.h"
+#include "common/metrics.h"
 #include "common/types.h"
 #include "common/utils.h"
 #include "common/xllm/output.h"
@@ -171,6 +172,7 @@ void InstanceMgr::init() {
   {
     std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
     load_metrics_ = std::move(loaded_metrics);
+    GAUGE_SET(xservice_load_metrics_size, load_metrics_.size());
   }
 
   {
@@ -384,6 +386,7 @@ bool InstanceMgr::upload_load_metrics() {
     remove_snapshot = removed_instance_;
     updated_metrics_.clear();
     removed_instance_.clear();
+    GAUGE_SET(xservice_load_metrics_size, load_metrics_.size());
   }
   bool status = etcd_client_->set(ETCD_LOADMETRICS_PREFIX, upload_snapshot);
   status = status && etcd_client_->rm(ETCD_LOADMETRICS_PREFIX, remove_snapshot);
@@ -701,6 +704,7 @@ void InstanceMgr::update_load_metrics(const etcd::Response& response,
       for (auto& iter : delete_list) {
         load_metrics_.erase(iter);
       }
+      GAUGE_SET(xservice_load_metrics_size, load_metrics_.size());
     }
   });
 }
@@ -1205,6 +1209,7 @@ bool InstanceMgr::register_instance(const std::string& name,
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
     add_instance_to_index(name, info);
     instances_.insert(std::make_pair(name, info));
+    GAUGE_SET(xservice_instance_view_size, instances_.size());
   }
   return true;
 }
@@ -1260,6 +1265,7 @@ void InstanceMgr::deregister_instance(
     }
     remove_instance_resources(name);
     instances_.erase(it);
+    GAUGE_SET(xservice_instance_view_size, instances_.size());
   }
   LOG(INFO) << "delete instance: " << name;
 }
@@ -1469,6 +1475,47 @@ bool InstanceMgr::has_available_instances() const {
 
   return has_default || (has_prefill && has_decode) ||
          (has_mix_as_prefill && has_mix_as_decode);
+}
+
+nlohmann::json InstanceMgr::debug_summary() const {
+  nlohmann::json summary;
+  nlohmann::json instances_json = nlohmann::json::array();
+  nlohmann::json load_metrics_json = nlohmann::json::object();
+  nlohmann::json latency_metrics_json = nlohmann::json::object();
+
+  std::shared_lock<std::shared_mutex> cluster_lock(cluster_mutex_);
+  std::shared_lock<std::shared_mutex> metrics_lock(metrics_mutex_);
+
+  summary["instance_count"] = instances_.size();
+  summary["prefill_index"] = prefill_index_;
+  summary["decode_index"] = decode_index_;
+  summary["suspect_instance_count"] = suspect_instances_.size();
+  summary["load_metrics_count"] = load_metrics_.size();
+  summary["latency_metrics_count"] = latency_metrics_.size();
+
+  for (const auto& iter : instances_) {
+    const InstanceMetaInfo& info = iter.second;
+    nlohmann::json item = info.serialize_to_json();
+    item["runtime_state"] = runtime_state_name(info.runtime_state);
+    item["current_type"] = static_cast<int32_t>(info.current_type);
+    item["instance_index"] = info.instance_index;
+    instances_json.push_back(std::move(item));
+  }
+
+  for (const auto& [name, metrics] : load_metrics_) {
+    load_metrics_json[name] = metrics.serialize_to_json();
+  }
+
+  for (const auto& [name, metrics] : latency_metrics_) {
+    latency_metrics_json[name] = {
+        {"recent_max_ttft", metrics.recent_max_ttft},
+        {"recent_max_tbt", metrics.recent_max_tbt}};
+  }
+
+  summary["instances"] = std::move(instances_json);
+  summary["load_metrics"] = std::move(load_metrics_json);
+  summary["latency_metrics"] = std::move(latency_metrics_json);
+  return summary;
 }
 
 }  // namespace xllm_service

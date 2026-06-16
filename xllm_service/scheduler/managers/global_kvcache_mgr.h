@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <nlohmann/json.hpp>
 #include <shared_mutex>
 #include <thread>
 
@@ -42,6 +43,8 @@ class GlobalKVCacheMgr final {
                                const proto::KvCacheEvent& kvcache_event);
   bool upload_kvcache();
 
+  nlohmann::json debug_summary() const;
+
   void set_as_master();
 
  private:
@@ -54,7 +57,7 @@ class GlobalKVCacheMgr final {
   Options options_;
   std::atomic_bool is_master_service_ = false;
   bool exited_ = false;
-  std::shared_mutex kvcache_mutex_;
+  mutable std::shared_mutex kvcache_mutex_;
   XXH3KeyCacheMap kvcache_infos_;
   std::shared_ptr<EtcdClient> etcd_client_;  // not own
 

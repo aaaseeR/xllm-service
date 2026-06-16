@@ -17,7 +17,10 @@ limitations under the License.
 
 #include <nlohmann/json.hpp>
 
+#include <unordered_set>
+
 #include "common/hash_util.h"
+#include "common/metrics.h"
 
 namespace {
 inline size_t round_down(size_t n, size_t multiple) {
@@ -47,6 +50,7 @@ GlobalKVCacheMgr::GlobalKVCacheMgr(
   {
     std::unique_lock<std::shared_mutex> lock(kvcache_mutex_);
     etcd_client_->get_prefix(ETCD_CACHE_PREFIX, &kvcache_infos_);
+    GAUGE_SET(xservice_kvcache_index_size, kvcache_infos_.size());
     DLOG(INFO) << "Load etcd cache infos:" << kvcache_infos_.size();
   }
 }
@@ -170,6 +174,7 @@ void GlobalKVCacheMgr::update_kvcache(const etcd::Response& response,
       for (auto& iter : delete_list) {
         kvcache_infos_.erase(iter);
       }
+      GAUGE_SET(xservice_kvcache_index_size, kvcache_infos_.size());
     }
   });
 }
@@ -239,11 +244,51 @@ bool GlobalKVCacheMgr::upload_kvcache() {
         kvcache_infos_.insert_or_assign(iter.first, std::move(iter.second));
       }
     }
+    GAUGE_SET(xservice_kvcache_index_size, kvcache_infos_.size());
   }
   if (rt) {
     updated_kvcaches_.clear();
   }
   return rt;
+}
+
+nlohmann::json GlobalKVCacheMgr::debug_summary() const {
+  nlohmann::json summary;
+  size_t hbm_entry_count = 0;
+  size_t dram_entry_count = 0;
+  size_t ssd_entry_count = 0;
+  std::unordered_set<std::string> hbm_instances;
+  std::unordered_set<std::string> dram_instances;
+  std::unordered_set<std::string> ssd_instances;
+
+  std::shared_lock<std::shared_mutex> lock(kvcache_mutex_);
+  for (const auto& iter : kvcache_infos_) {
+    const CacheLocations& locations = iter.second;
+    if (!locations.hbm_instance_set.empty()) {
+      ++hbm_entry_count;
+      hbm_instances.insert(locations.hbm_instance_set.begin(),
+                           locations.hbm_instance_set.end());
+    }
+    if (!locations.dram_instance_set.empty()) {
+      ++dram_entry_count;
+      dram_instances.insert(locations.dram_instance_set.begin(),
+                            locations.dram_instance_set.end());
+    }
+    if (!locations.ssd_instance_set.empty()) {
+      ++ssd_entry_count;
+      ssd_instances.insert(locations.ssd_instance_set.begin(),
+                           locations.ssd_instance_set.end());
+    }
+  }
+
+  summary["cache_index_size"] = kvcache_infos_.size();
+  summary["hbm_entry_count"] = hbm_entry_count;
+  summary["dram_entry_count"] = dram_entry_count;
+  summary["ssd_entry_count"] = ssd_entry_count;
+  summary["hbm_instance_count"] = hbm_instances.size();
+  summary["dram_instance_count"] = dram_instances.size();
+  summary["ssd_instance_count"] = ssd_instances.size();
+  return summary;
 }
 
 void GlobalKVCacheMgr::set_as_master() {

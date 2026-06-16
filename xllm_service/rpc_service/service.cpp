@@ -104,6 +104,7 @@ void XllmRpcService::GetInstanceInfo(google::protobuf::RpcController* cntl_base,
     *(resp->mutable_v_cache_ids()->Add()) = v_cache_id;
   }
   resp->set_dp_size(metainfo.dp_size);
+  resp->set_kv_split_size(metainfo.kv_split_size);
   for (auto& ip : metainfo.device_ips) {
     *(resp->mutable_device_ips()->Add()) = ip;
   }

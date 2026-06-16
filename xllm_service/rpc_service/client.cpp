@@ -108,6 +108,7 @@ ErrorCode XllmRpcClient::register_instance(const InstanceMetaInfo& metainfo) {
     *(req.mutable_v_cache_ids()->Add()) = v_cache_id;
   }
   req.set_dp_size(metainfo.dp_size);
+  req.set_kv_split_size(metainfo.kv_split_size);
   for (auto& ip : metainfo.device_ips) {
     *(req.mutable_device_ips()->Add()) = ip;
   }

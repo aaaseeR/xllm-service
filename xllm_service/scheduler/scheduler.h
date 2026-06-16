@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <nlohmann/json.hpp>
+
 #include "chat_template/jinja_chat_template.h"
 #include "common/call_data.h"
 #include "common/options.h"
@@ -55,6 +57,8 @@ class Scheduler final {
 
   // Returns true if at least one valid instance group is available.
   bool has_available_instances() const;
+
+  nlohmann::json debug_summary() const;
 
   // register new requests from http service
   // keep http callback util request finished.
