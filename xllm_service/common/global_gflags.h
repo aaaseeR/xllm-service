@@ -69,6 +69,14 @@ DECLARE_int32(block_size);
 
 DECLARE_bool(enable_peer_service);
 
+DECLARE_bool(kv_event_zmq_enable);
+
+DECLARE_int32(kv_event_zmq_poll_interval_ms);
+
+DECLARE_int32(kv_event_zmq_reconnect_interval_ms);
+
+DECLARE_int32(kv_event_zmq_reconnect_interval_max_ms);
+
 DECLARE_string(tokenizer_path);
 
 DECLARE_bool(enable_request_trace);

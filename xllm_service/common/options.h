@@ -81,6 +81,14 @@ class Options {
   // plumbs the flag; Phase 1 changes behavior behind it.
   PROPERTY(bool, enable_peer_service) = false;
 
+  PROPERTY(bool, kv_event_zmq_enable) = false;
+
+  PROPERTY(int32_t, kv_event_zmq_poll_interval_ms) = 20;
+
+  PROPERTY(int32_t, kv_event_zmq_reconnect_interval_ms) = 1000;
+
+  PROPERTY(int32_t, kv_event_zmq_reconnect_interval_max_ms) = 10000;
+
   // tokenizer options
   PROPERTY(std::string, tokenizer_path);
 

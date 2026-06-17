@@ -23,6 +23,8 @@ limitations under the License.
 #include "loadbalance_policy/slo_aware_policy.h"
 #include "tokenizer/tokenizer_factory.h"
 
+#include <utility>
+
 namespace {
 constexpr int32_t kHeartbeatInterval = 3;  // in seconds
 
@@ -80,11 +82,30 @@ Scheduler::Scheduler(const Options& options) : options_(options) {
     }
   }
 
-  instance_mgr_ = std::make_shared<InstanceMgr>(
-      options, etcd_client_, is_master_service_, this);
-
   global_kvcache_mgr_ = std::make_shared<GlobalKVCacheMgr>(
       options, etcd_client_, is_master_service_);
+
+  if (options_.enable_peer_service() && options_.kv_event_zmq_enable()) {
+    KvEventSubscriber::Options subscriber_options;
+    subscriber_options.enabled(true)
+        .poll_interval_ms(options_.kv_event_zmq_poll_interval_ms())
+        .reconnect_interval_ms(options_.kv_event_zmq_reconnect_interval_ms())
+        .reconnect_interval_max_ms(
+            options_.kv_event_zmq_reconnect_interval_max_ms())
+        .record_callback([this](const std::string& instance_name,
+                                const proto::KvCacheEvent& cache_event) {
+          record_instance_cache_event(instance_name, cache_event);
+        })
+        .clear_callback([this](const std::string& instance_name) {
+          clear_instance_cache(instance_name);
+        });
+    kv_event_subscriber_ =
+        std::make_unique<KvEventSubscriber>(std::move(subscriber_options));
+    kv_event_subscriber_->start();
+  }
+
+  instance_mgr_ = std::make_shared<InstanceMgr>(
+      options, etcd_client_, is_master_service_, this);
 
   if (options.load_balance_policy() == "CAR") {
     lb_policy_ =
@@ -110,7 +131,20 @@ Scheduler::Scheduler(const Options& options) : options_(options) {
   }
 }
 
-Scheduler::~Scheduler() { etcd_client_->stop_watch(); }
+Scheduler::~Scheduler() {
+  exited_ = true;
+  if (etcd_client_ != nullptr) {
+    etcd_client_->stop_watch();
+  }
+  if (heartbeat_thread_ && heartbeat_thread_->joinable()) {
+    heartbeat_thread_->join();
+  }
+  lb_policy_.reset();
+  instance_mgr_.reset();
+  if (kv_event_subscriber_ != nullptr) {
+    kv_event_subscriber_->stop();
+  }
+}
 
 bool Scheduler::schedule(std::shared_ptr<Request> request) {
   // apply chat template
@@ -204,7 +238,15 @@ bool Scheduler::handle_instance_heartbeat(const proto::HeartbeatRequest* req) {
                                                 req->incarnation_id())) {
     return false;
   }
-  global_kvcache_mgr_->record_updated_kvcaches(req->name(), req->cache_event());
+  const auto& cache_event = req->cache_event();
+  const bool has_heartbeat_cache_event = cache_event.stored_cache_size() > 0 ||
+                                         cache_event.removed_cache_size() > 0 ||
+                                         cache_event.offload_cache_size() > 0;
+  if (!(options_.enable_peer_service() && options_.kv_event_zmq_enable()) ||
+      has_heartbeat_cache_event) {
+    global_kvcache_mgr_->record_updated_kvcaches(req->name(),
+                                                 cache_event);
+  }
   instance_mgr_->record_load_metrics_update(
       req->name(), req->incarnation_id(), req->load_metrics());
   instance_mgr_->update_latency_metrics(
@@ -522,6 +564,28 @@ void Scheduler::clear_instance_cache(const std::string& instance_name) {
   }
 }
 
+void Scheduler::add_kv_event_source(const InstanceMetaInfo& info) {
+  if (kv_event_subscriber_ != nullptr) {
+    kv_event_subscriber_->add_or_update_source(info);
+  }
+}
+
+void Scheduler::remove_kv_event_source(
+    const std::string& instance_name,
+    const std::string& incarnation_id) {
+  if (kv_event_subscriber_ != nullptr) {
+    kv_event_subscriber_->remove_source(instance_name, incarnation_id);
+  }
+}
+
+void Scheduler::record_instance_cache_event(
+    const std::string& instance_name,
+    const proto::KvCacheEvent& cache_event) {
+  if (global_kvcache_mgr_ != nullptr) {
+    global_kvcache_mgr_->record_updated_kvcaches(instance_name, cache_event);
+  }
+}
+
 bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
   bool finished_on_prefill_instance =
       request_output.finished_on_prefill_instance;
@@ -643,6 +707,9 @@ nlohmann::json Scheduler::debug_summary() const {
   summary["cache_index"] = global_kvcache_mgr_
                                ? global_kvcache_mgr_->debug_summary()
                                : nlohmann::json::object();
+  summary["kv_event_subscriber"] =
+      kv_event_subscriber_ ? kv_event_subscriber_->debug_summary()
+                           : nlohmann::json::object();
   return summary;
 }
 

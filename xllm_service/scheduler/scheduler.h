@@ -26,6 +26,7 @@ limitations under the License.
 #include "loadbalance_policy/loadbalance_policy.h"
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
+#include "managers/kv_event_subscriber.h"
 #include "request/request.h"
 #include "response_handler.h"
 #include "tokenizer/tokenizer.h"
@@ -74,6 +75,11 @@ class Scheduler final {
                                          const std::string& incarnation_id,
                                          InstanceType type);
   void clear_instance_cache(const std::string& instance_name);
+  void add_kv_event_source(const InstanceMetaInfo& info);
+  void remove_kv_event_source(const std::string& instance_name,
+                              const std::string& incarnation_id = "");
+  void record_instance_cache_event(const std::string& instance_name,
+                                   const proto::KvCacheEvent& cache_event);
 
   // handle generations from prefill/decode instance
   bool handle_generation(const llm::RequestOutput& request_output);
@@ -116,9 +122,9 @@ class Scheduler final {
 
   std::unique_ptr<Tokenizer> tokenizer_;
 
-  std::shared_ptr<InstanceMgr> instance_mgr_;
-
   std::shared_ptr<GlobalKVCacheMgr> global_kvcache_mgr_;
+  std::unique_ptr<KvEventSubscriber> kv_event_subscriber_;
+  std::shared_ptr<InstanceMgr> instance_mgr_;
 
   std::unique_ptr<LoadBalancePolicy> lb_policy_;
   std::unique_ptr<std::thread> heartbeat_thread_;

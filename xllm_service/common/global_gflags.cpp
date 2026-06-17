@@ -120,6 +120,22 @@ DEFINE_bool(enable_peer_service,
             "Enable peer-service rollout mode. Phase 0 only exposes the switch "
             "without changing master/slave behavior.");
 
+DEFINE_bool(kv_event_zmq_enable,
+            false,
+            "Subscribe to per-instance KV cache event ZMQ publishers.");
+
+DEFINE_int32(kv_event_zmq_poll_interval_ms,
+             20,
+             "KV cache event ZMQ subscriber polling interval in milliseconds.");
+
+DEFINE_int32(kv_event_zmq_reconnect_interval_ms,
+             1000,
+             "KV cache event ZMQ reconnect interval in milliseconds.");
+
+DEFINE_int32(kv_event_zmq_reconnect_interval_max_ms,
+             10000,
+             "KV cache event ZMQ max reconnect interval in milliseconds.");
+
 DEFINE_string(tokenizer_path, "", "tokenizer config path.");
 
 DEFINE_bool(enable_request_trace, false, "Whether to enable request trace");

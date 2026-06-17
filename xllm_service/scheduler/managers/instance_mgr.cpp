@@ -668,8 +668,19 @@ void InstanceMgr::update_instance_metainfo(const etcd::Response& response,
 
         if (existing_it->second.incarnation_id == metainfo.incarnation_id) {
           const auto previous_state = existing_it->second.runtime_state;
+          const std::string previous_zmq_endpoint =
+              existing_it->second.zmq_endpoint;
           refresh_instance_registration(instance_name, metainfo);
           clear_suspect_instance(instance_name, metainfo.incarnation_id);
+          const bool should_update_kv_source =
+              previous_zmq_endpoint != metainfo.zmq_endpoint;
+          lock.unlock();
+          if (should_update_kv_source && scheduler_ != nullptr) {
+            scheduler_->clear_instance_cache(instance_name);
+            scheduler_->remove_kv_event_source(instance_name,
+                                               metainfo.incarnation_id);
+            scheduler_->add_kv_event_source(metainfo);
+          }
           if (previous_state != InstanceRuntimeState::ACTIVE) {
             LOG(INFO) << "Instance registration restored, back to active: "
                       << instance_name
@@ -1309,6 +1320,9 @@ bool InstanceMgr::register_instance(const std::string& name,
     instances_.insert(std::make_pair(name, info));
     GAUGE_SET(xservice_instance_view_size, instances_.size());
   }
+  if (scheduler_ != nullptr) {
+    scheduler_->add_kv_event_source(info);
+  }
   return true;
 }
 
@@ -1337,6 +1351,10 @@ void InstanceMgr::deregister_instance(
     info = it->second;
     clear_suspect_instance(name, info.incarnation_id);
     gather_unlink_operations(name, info, &unlink_ops);
+  }
+
+  if (scheduler_ != nullptr) {
+    scheduler_->remove_kv_event_source(name, info.incarnation_id);
   }
 
   for (const auto& op : unlink_ops) {

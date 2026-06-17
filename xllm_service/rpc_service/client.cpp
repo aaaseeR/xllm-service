@@ -86,6 +86,10 @@ ErrorCode XllmRpcClient::register_instance(const InstanceMetaInfo& metainfo) {
   brpc::Controller cntl;
   proto::InstanceMetaInfo req;
   req.set_name(metainfo.name);
+  req.set_rpc_address(metainfo.rpc_address);
+  req.set_incarnation_id(metainfo.incarnation_id);
+  req.set_register_ts_ms(metainfo.register_ts_ms);
+  req.set_zmq_endpoint(metainfo.zmq_endpoint);
   if (metainfo.type == InstanceType::PREFILL) {
     req.set_type(proto::InstanceType::PREFILL);
   } else if (metainfo.type == InstanceType::DECODE) {

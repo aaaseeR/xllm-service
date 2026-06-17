@@ -82,6 +82,7 @@ void XllmRpcService::GetInstanceInfo(google::protobuf::RpcController* cntl_base,
   resp->set_rpc_address(metainfo.rpc_address);
   resp->set_incarnation_id(metainfo.incarnation_id);
   resp->set_register_ts_ms(metainfo.register_ts_ms);
+  resp->set_zmq_endpoint(metainfo.zmq_endpoint);
   if (metainfo.type == InstanceType::PREFILL) {
     resp->set_type(proto::InstanceType::PREFILL);
   } else if (metainfo.type == InstanceType::DECODE) {

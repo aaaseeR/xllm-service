@@ -232,6 +232,12 @@ int main(int argc, char* argv[]) {
       .enable_request_trace(FLAGS_enable_request_trace)
       .block_size(FLAGS_block_size)
       .enable_peer_service(FLAGS_enable_peer_service)
+      .kv_event_zmq_enable(FLAGS_kv_event_zmq_enable)
+      .kv_event_zmq_poll_interval_ms(FLAGS_kv_event_zmq_poll_interval_ms)
+      .kv_event_zmq_reconnect_interval_ms(
+          FLAGS_kv_event_zmq_reconnect_interval_ms)
+      .kv_event_zmq_reconnect_interval_max_ms(
+          FLAGS_kv_event_zmq_reconnect_interval_max_ms)
       .tokenizer_path(FLAGS_tokenizer_path)
       .tool_call_parser(FLAGS_tool_call_parser)
       .reasoning_parser(FLAGS_reasoning_parser);

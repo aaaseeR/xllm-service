@@ -111,8 +111,13 @@ DECLARE_GAUGE(peer_service_enabled);
 DECLARE_GAUGE(xservice_instance_view_size);
 DECLARE_GAUGE(xservice_load_metrics_size);
 DECLARE_GAUGE(xservice_kvcache_index_size);
+DECLARE_GAUGE(kv_event_zmq_source_count);
 DECLARE_COUNTER(xservice_heartbeat_total);
 DECLARE_COUNTER(xservice_heartbeat_xtensor_total);
+DECLARE_COUNTER(kv_event_zmq_received_total);
+DECLARE_COUNTER(kv_event_zmq_parse_failure_total);
+DECLARE_COUNTER(kv_event_zmq_stale_total);
+DECLARE_COUNTER(kv_event_zmq_gap_total);
 
 DECLARE_HISTOGRAM(time_to_first_token_latency_milliseconds);
 DECLARE_HISTOGRAM(inter_token_latency_milliseconds);

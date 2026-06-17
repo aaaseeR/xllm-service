@@ -136,6 +136,8 @@ find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(absl CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
+find_package(ZeroMQ CONFIG REQUIRED)
+find_package(cppzmq CONFIG REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -191,4 +193,3 @@ link_directories(${BRPC_OUTPUT_DIR}/lib)
 # add subdirectories
 add_subdirectory(third_party)
 add_subdirectory(xllm_service)
-

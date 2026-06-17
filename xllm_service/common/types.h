@@ -195,6 +195,7 @@ struct InstanceMetaInfo {
   std::string rpc_address = "";
   std::string incarnation_id = "";
   uint64_t register_ts_ms = 0;
+  std::string zmq_endpoint = "";
   InstanceType type = InstanceType::DEFAULT;
   std::vector<uint64_t> cluster_ids;
   std::vector<std::string> addrs;
@@ -228,6 +229,7 @@ struct InstanceMetaInfo {
     json_val["rpc_address"] = rpc_address;
     json_val["incarnation_id"] = incarnation_id;
     json_val["register_ts_ms"] = register_ts_ms;
+    json_val["zmq_endpoint"] = zmq_endpoint;
     json_val["type"] = int8_t(type);
     json_val["addrs"] = addrs;
     json_val["cluster_ids"] = cluster_ids;
@@ -251,6 +253,7 @@ struct InstanceMetaInfo {
       rpc_address = json_value.at("rpc_address").get<std::string>();
       incarnation_id = json_value.value("incarnation_id", std::string());
       register_ts_ms = json_value.value("register_ts_ms", uint64_t(0));
+      zmq_endpoint = json_value.value("zmq_endpoint", std::string());
       type = static_cast<InstanceType>(json_value.at("type").get<int8_t>());
       cluster_ids.clear();
       addrs.clear();

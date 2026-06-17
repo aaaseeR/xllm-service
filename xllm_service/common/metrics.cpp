@@ -26,10 +26,20 @@ DEFINE_GAUGE(xservice_load_metrics_size,
              "Number of load metrics entries in the local xllm-service view");
 DEFINE_GAUGE(xservice_kvcache_index_size,
              "Number of KV cache index entries in the local xllm-service view");
+DEFINE_GAUGE(kv_event_zmq_source_count,
+             "Number of connected KV event ZMQ sources");
 DEFINE_COUNTER(xservice_heartbeat_total,
                "Total number of xllm instance heartbeats received");
 DEFINE_COUNTER(xservice_heartbeat_xtensor_total,
                "Total number of xllm instance heartbeats with XTensor info");
+DEFINE_COUNTER(kv_event_zmq_received_total,
+               "Total number of KV cache events received through ZMQ");
+DEFINE_COUNTER(kv_event_zmq_parse_failure_total,
+               "Total number of failed KV cache event ZMQ parses");
+DEFINE_COUNTER(kv_event_zmq_stale_total,
+               "Total number of stale KV cache event ZMQ messages");
+DEFINE_COUNTER(kv_event_zmq_gap_total,
+               "Total number of KV cache event ZMQ sequence gaps");
 
 // ttft latency histogram
 DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,
