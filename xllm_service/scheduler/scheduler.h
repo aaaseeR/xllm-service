@@ -80,6 +80,9 @@ class Scheduler final {
                               const std::string& incarnation_id = "");
   void record_instance_cache_event(const std::string& instance_name,
                                    const proto::KvCacheEvent& cache_event);
+  void replace_instance_cache_snapshot(
+      const std::string& instance_name,
+      const proto::KvCacheEvent& cache_event);
 
   // handle generations from prefill/decode instance
   bool handle_generation(const llm::RequestOutput& request_output);

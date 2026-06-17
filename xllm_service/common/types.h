@@ -203,6 +203,8 @@ struct InstanceMetaInfo {
   std::vector<uint64_t> v_cache_ids;
   int32_t dp_size = 1;
   int32_t kv_split_size = 1;
+  int32_t block_size = 0;
+  uint32_t xxh3_128bits_seed = 0;
   // device network info
   std::vector<std::string> device_ips;
   std::vector<uint16_t> ports;
@@ -237,6 +239,8 @@ struct InstanceMetaInfo {
     json_val["v_cache_ids"] = v_cache_ids;
     json_val["dp_size"] = dp_size;
     json_val["kv_split_size"] = kv_split_size;
+    json_val["block_size"] = block_size;
+    json_val["xxh3_128bits_seed"] = xxh3_128bits_seed;
     json_val["device_ips"] = device_ips;
     json_val["ports"] = ports;
     json_val["ttft_profiling_data"] = ttft_profiling_data;
@@ -286,6 +290,9 @@ struct InstanceMetaInfo {
 
       dp_size = json_value.value("dp_size", int32_t(1));
       kv_split_size = json_value.value("kv_split_size", int32_t(1));
+      block_size = json_value.value("block_size", int32_t(0));
+      xxh3_128bits_seed =
+          json_value.value("xxh3_128bits_seed", uint32_t(0));
       device_ips = json_value.value("device_ips", std::vector<std::string>());
       ports = json_value.value("ports", std::vector<uint16_t>());
 

@@ -115,6 +115,7 @@ DECLARE_GAUGE(kv_event_zmq_source_count);
 DECLARE_COUNTER(xservice_heartbeat_total);
 DECLARE_COUNTER(xservice_heartbeat_xtensor_total);
 DECLARE_COUNTER(kv_event_zmq_received_total);
+DECLARE_COUNTER(kv_event_zmq_snapshot_received_total);
 DECLARE_COUNTER(kv_event_zmq_parse_failure_total);
 DECLARE_COUNTER(kv_event_zmq_stale_total);
 DECLARE_COUNTER(kv_event_zmq_gap_total);

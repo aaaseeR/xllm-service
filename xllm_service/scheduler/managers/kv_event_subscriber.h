@@ -37,6 +37,8 @@ class KvEventSubscriber final {
  public:
   using RecordCallback =
       std::function<void(const std::string&, const proto::KvCacheEvent&)>;
+  using SnapshotCallback =
+      std::function<void(const std::string&, const proto::KvCacheEvent&)>;
   using ClearCallback = std::function<void(const std::string&)>;
 
   struct Options {
@@ -45,6 +47,7 @@ class KvEventSubscriber final {
     PROPERTY(int32_t, reconnect_interval_ms) = 1000;
     PROPERTY(int32_t, reconnect_interval_max_ms) = 10000;
     PROPERTY(RecordCallback, record_callback);
+    PROPERTY(SnapshotCallback, snapshot_callback);
     PROPERTY(ClearCallback, clear_callback);
   };
 
@@ -86,6 +89,7 @@ class KvEventSubscriber final {
   struct ReceivedEvent {
     std::string instance_name;
     proto::KvCacheEvent cache_event;
+    bool snapshot = false;
   };
 
   void enqueue(Command command);
@@ -101,6 +105,7 @@ class KvEventSubscriber final {
   std::deque<Command> commands_;
   std::unordered_map<std::string, SourceState> sources_;
   uint64_t received_events_ = 0;
+  uint64_t received_snapshots_ = 0;
   uint64_t seq_gap_events_ = 0;
   uint64_t stale_events_ = 0;
 };

@@ -15,9 +15,39 @@ limitations under the License.
 
 #include "cache_aware_routing.h"
 
-namespace xllm_service {
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <random>
+#include <vector>
 
-constexpr float MIN_SCORE = -2.0;
+namespace xllm_service {
+namespace {
+
+constexpr double kDramOverlapWeight = 0.5;
+constexpr double kSsdOverlapWeight = 0.25;
+constexpr double kLoadPenaltyWeight = 1.0;
+constexpr double kSoftmaxTemperature = 0.2;
+
+double get_score(const std::unordered_map<std::string, uint32_t>& scores,
+                 const std::string& instance_name) {
+  const auto it = scores.find(instance_name);
+  if (it == scores.end()) {
+    return 0.0;
+  }
+  return static_cast<double>(it->second);
+}
+
+double weighted_overlap_blocks(const OverlapScores& overlap_scores,
+                               const std::string& instance_name) {
+  return get_score(overlap_scores.hbm_instance_score, instance_name) +
+         kDramOverlapWeight *
+             get_score(overlap_scores.dram_instance_score, instance_name) +
+         kSsdOverlapWeight *
+             get_score(overlap_scores.ssd_instance_score, instance_name);
+}
+
+}  // namespace
 
 bool CacheAwareRouting::select_instances_pair(
     std::shared_ptr<Request> request) {
@@ -38,16 +68,14 @@ bool CacheAwareRouting::select_instances_pair(
   }
 
   // find preifll
-  cost_function(lb_infos.overlap_scores.hbm_instance_score,
-                lb_infos.overlap_scores.max_block_num,
+  cost_function(lb_infos.overlap_scores,
                 lb_infos.prefill_load_metrics,
                 lb_infos.prefill_max_waiting_requests_num,
                 &request->routing.prefill_name);
 
   // find decode
   if (lb_infos.decode_load_metrics.size()) {
-    cost_function(lb_infos.overlap_scores.hbm_instance_score,
-                  lb_infos.overlap_scores.max_block_num,
+    cost_function(lb_infos.overlap_scores,
                   lb_infos.decode_load_metrics,
                   lb_infos.decode_max_waiting_requests_num,
                   &request->routing.decode_name);
@@ -57,31 +85,71 @@ bool CacheAwareRouting::select_instances_pair(
 }
 
 void CacheAwareRouting::cost_function(
-    const std::unordered_map<std::string, uint32_t>& overlap_scores,
-    const uint32_t& max_block_num,
+    const OverlapScores& overlap_scores,
     const std::unordered_map<std::string, LoadMetrics>& load_metrics,
-    const int64_t& max_waiting_requests_num,
+    const uint64_t& max_waiting_requests_num,
     std::string* best_choice) {
-  float best_score = MIN_SCORE;
+  if (best_choice == nullptr || load_metrics.empty()) {
+    return;
+  }
+
+  struct Candidate {
+    std::string instance_name;
+    double score = 0.0;
+  };
+  std::vector<Candidate> candidates;
+  candidates.reserve(load_metrics.size());
+  double max_score = -std::numeric_limits<double>::infinity();
+
   for (const auto& it : load_metrics) {
-    const auto matched_blocks_it = overlap_scores.find(it.first);
-    uint32_t matched_blocks = 0;
-    if (matched_blocks_it != overlap_scores.end()) {
-      matched_blocks = matched_blocks_it->second;
-    }
+    const double max_blocks =
+        std::max<double>(1.0, overlap_scores.max_block_num);
+    const double overlap =
+        std::min(weighted_overlap_blocks(overlap_scores, it.first), max_blocks);
+    const double prefill_blocks_after_reuse = max_blocks - overlap;
+    const double waiting_ratio =
+        max_waiting_requests_num == 0
+            ? 0.0
+            : static_cast<double>(it.second.waiting_requests_num) /
+                  static_cast<double>(max_waiting_requests_num);
+    const double load_penalty =
+        static_cast<double>(it.second.gpu_cache_usage_perc) + waiting_ratio;
+    const double score =
+        -prefill_blocks_after_reuse - kLoadPenaltyWeight * load_penalty;
+    candidates.push_back({it.first, score});
+    max_score = std::max(max_score, score);
+  }
 
-    auto score =
-        (max_block_num == 0 ? 0 : matched_blocks / max_block_num) -
-        it.second.gpu_cache_usage_perc -
-        (max_waiting_requests_num == 0
-             ? 0
-             : it.second.waiting_requests_num / max_waiting_requests_num);
+  if (candidates.empty()) {
+    return;
+  }
 
-    if (score > best_score) {
-      best_score = score;
-      *best_choice = it.first;
+  thread_local std::mt19937 rng(std::random_device{}());
+  std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
+  double sum = 0.0;
+  std::vector<double> weights;
+  weights.reserve(candidates.size());
+  for (const auto& candidate : candidates) {
+    const double weight =
+        std::exp((candidate.score - max_score) / kSoftmaxTemperature);
+    weights.push_back(weight);
+    sum += weight;
+  }
+
+  if (sum <= 0.0 || !std::isfinite(sum)) {
+    *best_choice = candidates.front().instance_name;
+    return;
+  }
+
+  double threshold = unit_dist(rng) * sum;
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    threshold -= weights[i];
+    if (threshold <= 0.0) {
+      *best_choice = candidates[i].instance_name;
+      return;
     }
   }
+  *best_choice = candidates.back().instance_name;
 }
 
 }  // namespace xllm_service

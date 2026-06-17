@@ -76,6 +76,17 @@ void set_score(const std::unordered_set<std::string>& instance_names,
   }
 }
 
+void set_best_match(const std::unordered_set<std::string>& instance_names,
+                    const uint32_t match_length,
+                    OverlapScores* overlap_scores) {
+  if (instance_names.empty() ||
+      match_length <= overlap_scores->max_matched_block_num) {
+    return;
+  }
+  overlap_scores->max_matched_block_num = match_length;
+  overlap_scores->max_matched_instance_name = *instance_names.begin();
+}
+
 void GlobalKVCacheMgr::match(const Slice<int32_t>& token_ids,
                              OverlapScores* overlap_scores) {
   // allign tokens to block boundary
@@ -101,34 +112,32 @@ void GlobalKVCacheMgr::match(const Slice<int32_t>& token_ids,
 
     auto iter = kvcache_infos_.find(token_hash_key);
     if (iter != kvcache_infos_.end() && !iter->second.empty()) {
+      const uint32_t match_length = i / options_.block_size() + 1;
       if (!iter->second.hbm_instance_set.empty()) {
         set_score(iter->second.hbm_instance_set,
-                  i / options_.block_size() + 1,
+                  match_length,
                   &(overlap_scores->hbm_instance_score),
                   &(overlap_scores->instances));
-        overlap_scores->max_matched_instance_name =
-            *iter->second.hbm_instance_set.begin();
-        overlap_scores->max_matched_block_num = i / options_.block_size() + 1;
+        set_best_match(
+            iter->second.hbm_instance_set, match_length, overlap_scores);
       }
 
       if (!iter->second.dram_instance_set.empty()) {
         set_score(iter->second.dram_instance_set,
-                  i / options_.block_size() + 1,
+                  match_length,
                   &(overlap_scores->dram_instance_score),
                   &(overlap_scores->instances));
-        overlap_scores->max_matched_instance_name =
-            *iter->second.hbm_instance_set.begin();
-        overlap_scores->max_matched_block_num = i / options_.block_size() + 1;
+        set_best_match(
+            iter->second.dram_instance_set, match_length, overlap_scores);
       }
 
       if (!iter->second.ssd_instance_set.empty()) {
         set_score(iter->second.ssd_instance_set,
-                  i / options_.block_size() + 1,
+                  match_length,
                   &(overlap_scores->ssd_instance_score),
                   &(overlap_scores->instances));
-        overlap_scores->max_matched_instance_name =
-            *iter->second.hbm_instance_set.begin();
-        overlap_scores->max_matched_block_num = i / options_.block_size() + 1;
+        set_best_match(
+            iter->second.ssd_instance_set, match_length, overlap_scores);
       }
     } else {
       break;
@@ -268,6 +277,36 @@ void GlobalKVCacheMgr::record_updated_kvcaches(
     updated_kvcaches_.at(key).dram_instance_set.erase(instance_name);
     updated_kvcaches_.at(key).ssd_instance_set.erase(instance_name);
   }
+}
+
+void GlobalKVCacheMgr::replace_instance_kvcaches(
+    const std::string& instance_name,
+    const proto::KvCacheEvent& kvcache_event) {
+  std::lock_guard<std::mutex> update_lock(update_mutex_);
+  std::unique_lock<std::shared_mutex> lock(kvcache_mutex_);
+
+  auto remove_instance_from_map = [&instance_name](XXH3KeyCacheMap* cache_map) {
+    for (auto iter = cache_map->begin(); iter != cache_map->end();) {
+      iter->second.hbm_instance_set.erase(instance_name);
+      iter->second.dram_instance_set.erase(instance_name);
+      iter->second.ssd_instance_set.erase(instance_name);
+      if (iter->second.empty()) {
+        iter = cache_map->erase(iter);
+      } else {
+        ++iter;
+      }
+    }
+  };
+
+  remove_instance_from_map(&kvcache_infos_);
+  remove_instance_from_map(&updated_kvcaches_);
+
+  for (int i = 0; i < kvcache_event.stored_cache_size(); i++) {
+    XXH3Key key(kvcache_event.stored_cache(i).c_str());
+    kvcache_infos_[key].hbm_instance_set.insert(instance_name);
+  }
+
+  GAUGE_SET(xservice_kvcache_index_size, kvcache_infos_.size());
 }
 
 void GlobalKVCacheMgr::clear_instance_cache(

@@ -34,6 +34,8 @@ DEFINE_COUNTER(xservice_heartbeat_xtensor_total,
                "Total number of xllm instance heartbeats with XTensor info");
 DEFINE_COUNTER(kv_event_zmq_received_total,
                "Total number of KV cache events received through ZMQ");
+DEFINE_COUNTER(kv_event_zmq_snapshot_received_total,
+               "Total number of KV cache snapshots received through ZMQ");
 DEFINE_COUNTER(kv_event_zmq_parse_failure_total,
                "Total number of failed KV cache event ZMQ parses");
 DEFINE_COUNTER(kv_event_zmq_stale_total,

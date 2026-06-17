@@ -111,6 +111,24 @@ InstanceType get_cleanup_type(const xllm_service::InstanceMetaInfo& info) {
   }
   return info.type;
 }
+
+void validate_instance_cache_config(const xllm_service::Options& options,
+                                    const xllm_service::InstanceMetaInfo& info) {
+  if (info.block_size > 0 && info.block_size != options.block_size()) {
+    LOG(WARNING) << "Instance block_size does not match xllm-service config, "
+                 << "instance: " << info.name
+                 << ", instance_block_size: " << info.block_size
+                 << ", service_block_size: " << options.block_size();
+  }
+  if (info.xxh3_128bits_seed > 0 &&
+      info.xxh3_128bits_seed != options.xxh3_128bits_seed()) {
+    LOG(WARNING) << "Instance xxh3_128bits_seed does not match "
+                    "xllm-service config, instance: "
+                 << info.name << ", instance_seed: "
+                 << info.xxh3_128bits_seed
+                 << ", service_seed: " << options.xxh3_128bits_seed();
+  }
+}
 }  // namespace
 
 namespace xllm_service {
@@ -895,6 +913,7 @@ void InstanceMgr::refresh_instance_registration(const std::string& name,
   if (it == instances_.end()) {
     return;
   }
+  validate_instance_cache_config(options_, info);
 
   // Preserve local scheduling/index state across etcd refreshes.
   const auto instance_index = it->second.instance_index;
@@ -1270,6 +1289,7 @@ bool InstanceMgr::register_instance(const std::string& name,
   info.runtime_state = InstanceRuntimeState::ACTIVE;
   info.latest_timestamp = current_time_ms();
   info.name = name;
+  validate_instance_cache_config(options_, info);
 
   {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);

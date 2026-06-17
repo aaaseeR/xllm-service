@@ -36,10 +36,9 @@ class CacheAwareRouting final : public LoadBalancePolicy {
   DISALLOW_COPY_AND_ASSIGN(CacheAwareRouting);
 
   void cost_function(
-      const std::unordered_map<std::string, uint32_t>& overlap_scores,
-      const uint32_t& max_block_num,
+      const OverlapScores& overlap_scores,
       const std::unordered_map<std::string, LoadMetrics>& load_metrics,
-      const int64_t& max_waiting_requests_num,
+      const uint64_t& max_waiting_requests_num,
       std::string* best_choice);
 
   std::shared_ptr<GlobalKVCacheMgr> global_kvcache_mgr_;

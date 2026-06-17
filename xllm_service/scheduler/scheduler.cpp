@@ -96,6 +96,10 @@ Scheduler::Scheduler(const Options& options) : options_(options) {
                                 const proto::KvCacheEvent& cache_event) {
           record_instance_cache_event(instance_name, cache_event);
         })
+        .snapshot_callback([this](const std::string& instance_name,
+                                  const proto::KvCacheEvent& cache_event) {
+          replace_instance_cache_snapshot(instance_name, cache_event);
+        })
         .clear_callback([this](const std::string& instance_name) {
           clear_instance_cache(instance_name);
         });
@@ -583,6 +587,14 @@ void Scheduler::record_instance_cache_event(
     const proto::KvCacheEvent& cache_event) {
   if (global_kvcache_mgr_ != nullptr) {
     global_kvcache_mgr_->record_updated_kvcaches(instance_name, cache_event);
+  }
+}
+
+void Scheduler::replace_instance_cache_snapshot(
+    const std::string& instance_name,
+    const proto::KvCacheEvent& cache_event) {
+  if (global_kvcache_mgr_ != nullptr) {
+    global_kvcache_mgr_->replace_instance_kvcaches(instance_name, cache_event);
   }
 }
 

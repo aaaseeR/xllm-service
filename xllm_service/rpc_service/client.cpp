@@ -113,6 +113,8 @@ ErrorCode XllmRpcClient::register_instance(const InstanceMetaInfo& metainfo) {
   }
   req.set_dp_size(metainfo.dp_size);
   req.set_kv_split_size(metainfo.kv_split_size);
+  req.set_block_size(metainfo.block_size);
+  req.set_xxh3_128bits_seed(metainfo.xxh3_128bits_seed);
   for (auto& ip : metainfo.device_ips) {
     *(req.mutable_device_ips()->Add()) = ip;
   }

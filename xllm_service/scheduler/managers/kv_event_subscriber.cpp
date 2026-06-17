@@ -92,6 +92,7 @@ nlohmann::json KvEventSubscriber::debug_summary() const {
   summary["started"] = started_.load();
   summary["source_count"] = sources_.size();
   summary["received_events"] = received_events_;
+  summary["received_snapshots"] = received_snapshots_;
   summary["seq_gap_events"] = seq_gap_events_;
   summary["stale_events"] = stale_events_;
   for (const auto& [name, source] : sources_) {
@@ -248,28 +249,50 @@ void KvEventSubscriber::run_loop() {
           continue;
         }
 
-        if (source.has_seq && envelope.seq_no() != source.last_seq_no + 1) {
-          ++seq_gap_events_;
-          source.suspect = true;
-          COUNTER_INC(kv_event_zmq_gap_total);
-          LOG(WARNING) << "KV event sequence gap, instance: " << instance_name
-                       << ", last_seq_no: " << source.last_seq_no
-                       << ", received_seq_no: " << envelope.seq_no();
+        const bool is_snapshot =
+            envelope.event_type() == proto::KV_CACHE_EVENT_SNAPSHOT;
+        if (source.has_seq) {
+          if (envelope.seq_no() <= source.last_seq_no) {
+            ++stale_events_;
+            COUNTER_INC(kv_event_zmq_stale_total);
+            LOG(WARNING) << "Ignore stale KV event by sequence, instance: "
+                         << instance_name
+                         << ", last_seq_no: " << source.last_seq_no
+                         << ", received_seq_no: " << envelope.seq_no();
+            continue;
+          }
+          if (envelope.seq_no() != source.last_seq_no + 1) {
+            ++seq_gap_events_;
+            source.suspect = true;
+            COUNTER_INC(kv_event_zmq_gap_total);
+            LOG(WARNING) << "KV event sequence gap, instance: "
+                         << instance_name
+                         << ", last_seq_no: " << source.last_seq_no
+                         << ", received_seq_no: " << envelope.seq_no();
+          }
         }
         source.last_seq_no = envelope.seq_no();
         source.has_seq = true;
+        if (is_snapshot) {
+          source.suspect = false;
+          ++received_snapshots_;
+          COUNTER_INC(kv_event_zmq_snapshot_received_total);
+        }
         ++received_events_;
         COUNTER_INC(kv_event_zmq_received_total);
 
         ReceivedEvent event;
         event.instance_name = instance_name;
         event.cache_event = envelope.cache_event();
+        event.snapshot = is_snapshot;
         received_events.emplace_back(std::move(event));
       }
     }
 
     for (const auto& event : received_events) {
-      if (options_.record_callback()) {
+      if (event.snapshot && options_.snapshot_callback()) {
+        options_.snapshot_callback()(event.instance_name, event.cache_event);
+      } else if (options_.record_callback()) {
         options_.record_callback()(event.instance_name, event.cache_event);
       }
     }

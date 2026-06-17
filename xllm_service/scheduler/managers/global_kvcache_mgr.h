@@ -41,6 +41,8 @@ class GlobalKVCacheMgr final {
 
   void record_updated_kvcaches(const std::string& instance_name,
                                const proto::KvCacheEvent& kvcache_event);
+  void replace_instance_kvcaches(const std::string& instance_name,
+                                 const proto::KvCacheEvent& kvcache_event);
   bool upload_kvcache();
   void clear_instance_cache(const std::string& instance_name);
 
