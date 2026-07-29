@@ -46,6 +46,11 @@ class XllmHttpServiceImpl : public proto::XllmHttpService {
              proto::HttpHelloResponse* response,
              ::google::protobuf::Closure* done) override;
 
+  void Health(::google::protobuf::RpcController* controller,
+              const proto::HttpRequest* request,
+              proto::HttpResponse* response,
+              ::google::protobuf::Closure* done) override;
+
   void Completions(::google::protobuf::RpcController* controller,
                    const proto::HttpRequest* request,
                    proto::HttpResponse* response,
@@ -71,9 +76,15 @@ class XllmHttpServiceImpl : public proto::XllmHttpService {
                proto::HttpResponse* response,
                ::google::protobuf::Closure* done) override;
 
+  void DebugSummary(::google::protobuf::RpcController* controller,
+                    const proto::HttpRequest* request,
+                    proto::HttpResponse* response,
+                    ::google::protobuf::Closure* done) override;
+
  private:
   template <typename T>
   std::shared_ptr<Request> generate_request(T* req_pb,
+                                            const brpc::Controller& controller,
                                             const std::string& method);
 
   template <typename T>

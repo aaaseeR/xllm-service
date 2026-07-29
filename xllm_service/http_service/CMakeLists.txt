@@ -11,9 +11,11 @@ cc_library(
     service.cpp 
     request_tracer.cpp
   DEPS
+    :backend_http
     :common
     :request
     :scheduler
+    :telemetry
     absl::random_random
     absl::synchronization
     glog::glog

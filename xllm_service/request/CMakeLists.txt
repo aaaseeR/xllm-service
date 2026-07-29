@@ -6,5 +6,6 @@ cc_library(
   HDRS
     request.h
   DEPS
+    :backend_http
     :common
 )

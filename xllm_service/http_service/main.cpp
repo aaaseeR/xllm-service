@@ -40,7 +40,10 @@ int main(int argc, char** argv) {
   if (server.AddService(&service_impl,
                         brpc::SERVER_DOESNT_OWN_SERVICE,
                         "/hello => Hello,"
-                        "/v1/completions => Completions,") != 0) {
+                        "/health => Health,"
+                        "/v1/completions => Completions,"
+                        "/metrics => Metrics,"
+                        "/debug/summary => DebugSummary,") != 0) {
     LOG(ERROR) << "Fail to add brpc http service";
     return false;
   }

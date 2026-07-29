@@ -18,15 +18,24 @@ limitations under the License.
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
 #include <brpc/controller.h>
+#include <brpc/http_status_code.h>
 #include <brpc/progressive_reader.h>
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 #include <json2pb/json_to_pb.h>
 #include <json2pb/pb_to_json.h>
 
+#include <cctype>
 #include <functional>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include <thread>
+#include <type_traits>
+#include <utility>
 #include <nlohmann/json.hpp>
 
+#include "backend_http/request_context.h"
 #include "chat.pb.h"
 #include "common/call_data.h"
 #include "common/closure_guard.h"
@@ -35,6 +44,7 @@ limitations under the License.
 #include "common/xllm/uuid.h"
 #include "completion.pb.h"
 #include "scheduler/scheduler.h"
+#include "telemetry/prometheus_metrics.h"
 #include "xllm_service.pb.h"
 
 namespace xllm_service {
@@ -134,6 +144,29 @@ void XllmHttpServiceImpl::Hello(::google::protobuf::RpcController* controller,
   response->set_pong(request->ping());
 }
 
+void XllmHttpServiceImpl::Health(::google::protobuf::RpcController* controller,
+                                 const proto::HttpRequest* request,
+                                 proto::HttpResponse* response,
+                                 ::google::protobuf::Closure* done) {
+  assert(initialized_);
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | respose | controller is null";
+    if (controller) {
+      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
+          "brpc request | respose | controller is null");
+    }
+    return;
+  }
+
+  brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
+  bool ready = scheduler_ != nullptr && scheduler_->has_available_instances();
+  cntl->http_response().set_content_type("text/plain");
+  cntl->http_response().set_status_code(
+      ready ? brpc::HTTP_STATUS_OK : brpc::HTTP_STATUS_SERVICE_UNAVAILABLE);
+  cntl->response_attachment().append(ready ? "ok\n" : "unavailable\n");
+}
+
 namespace {
 template <typename T>
 void handle_non_stream_response(brpc::Controller* cntl,
@@ -201,20 +234,68 @@ namespace {
 constexpr char kInferContentLength[] = "Infer-Content-Length";
 constexpr char kContentLength[] = "Content-Length";
 
-size_t GetJsonContentLength(const brpc::Controller* ctrl) {
+bool TryParseContentLength(const char* header_name,
+                           const std::string& header_value,
+                           size_t attachment_size,
+                           size_t* content_len) {
+  try {
+    size_t parsed_size = 0;
+    const auto parsed_value = std::stoull(header_value, &parsed_size, 10);
+    while (parsed_size < header_value.size() &&
+           std::isspace(static_cast<unsigned char>(header_value[parsed_size]))) {
+      ++parsed_size;
+    }
+    if (parsed_size != header_value.size() ||
+        parsed_value > std::numeric_limits<size_t>::max()) {
+      LOG(WARNING) << "Invalid " << header_name
+                   << " header value: " << header_value;
+      return false;
+    }
+
+    *content_len = static_cast<size_t>(parsed_value);
+    if (*content_len > attachment_size) {
+      LOG(WARNING) << header_name << " header value " << *content_len
+                   << " exceeds request attachment size " << attachment_size
+                   << ", use attachment size instead.";
+      *content_len = attachment_size;
+    }
+    return true;
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "Invalid " << header_name
+                 << " header value: " << header_value << ", error: "
+                 << e.what();
+    return false;
+  }
+}
+
+size_t GetJsonContentLength(const brpc::Controller* ctrl,
+                            size_t attachment_size) {
   const auto infer_content_len =
       ctrl->http_request().GetHeader(kInferContentLength);
-  if (infer_content_len != nullptr) {
-    return std::stoul(*infer_content_len);
+  size_t content_len = 0;
+  if (infer_content_len != nullptr &&
+      TryParseContentLength(kInferContentLength,
+                            *infer_content_len,
+                            attachment_size,
+                            &content_len)) {
+    return content_len;
   }
 
-  const auto content_len = ctrl->http_request().GetHeader(kContentLength);
-  if (content_len != nullptr) {
-    return std::stoul(*content_len);
+  const auto content_len_header = ctrl->http_request().GetHeader(kContentLength);
+  if (content_len_header != nullptr &&
+      TryParseContentLength(kContentLength,
+                            *content_len_header,
+                            attachment_size,
+                            &content_len)) {
+    return content_len;
   }
 
-  LOG(FATAL) << "Content-Length header is missing.";
-  return (size_t)-1L;
+  if (attachment_size > 0) {
+    LOG(WARNING) << "Content-Length header is missing, use request attachment "
+                    "size instead: "
+                 << attachment_size;
+  }
+  return attachment_size;
 }
 
 }  // namespace
@@ -262,9 +343,17 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
 template <typename T>
 std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
     T* req_pb,
+    const brpc::Controller& controller,
     const std::string& method) {
-  auto request = std::make_shared<Request>();
-  request->model = req_pb->model();
+  std::shared_ptr<Request> request = std::make_shared<Request>();
+  request->request_context = parse_request_context(controller);
+
+  const std::string request_body_model = req_pb->model();
+  request->model = resolve_effective_model_name(request_body_model,
+                                                request->request_context);
+  if (request->model != request_body_model) {
+    req_pb->set_model(request->model);
+  }
 
   // TODO: add `created_time` fileds etc.
   // create xllm_service request_id: service_request_id
@@ -388,7 +477,7 @@ void XllmHttpServiceImpl::Completions(
     return;
   }
 
-  auto service_request = generate_request(req_pb, "/v1/completions");
+  auto service_request = generate_request(req_pb, *cntl, "/v1/completions");
 
   if (!req_pb->prompt().empty()) {
     service_request->prompt = req_pb->prompt();
@@ -441,7 +530,8 @@ void XllmHttpServiceImpl::ChatCompletions(
       google::protobuf::Arena::CreateMessage<::xllm::proto::ChatResponse>(
           arena);
 
-  auto content_len = GetJsonContentLength(cntl);
+  const auto attachment_size = cntl->request_attachment().size();
+  auto content_len = GetJsonContentLength(cntl, attachment_size);
   std::string attachment;
   cntl->request_attachment().copy_to(&attachment, content_len, 0);
 
@@ -455,7 +545,7 @@ void XllmHttpServiceImpl::ChatCompletions(
     return;
   }
 
-  auto service_request = generate_request(req_pb, "/v1/chat/completions");
+  auto service_request = generate_request(req_pb, *cntl, "/v1/chat/completions");
 
   if (req_pb->messages_size() > 0) {
     service_request->messages.reserve(req_pb->messages_size());
@@ -527,6 +617,7 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
                                   const proto::HttpRequest* request,
                                   proto::HttpResponse* response,
                                   ::google::protobuf::Closure* done) {
+  assert(initialized_);
   ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | respose | controller is null";
@@ -537,9 +628,47 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
     return;
   }
 
-  auto cntl = reinterpret_cast<brpc::Controller*>(controller);
+  brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
+  nlohmann::json summary = nlohmann::json::object();
+  bool ready = false;
+  if (scheduler_ != nullptr) {
+    summary = scheduler_->debug_summary();
+    ready = scheduler_->has_available_instances();
+  }
+
+  PrometheusMetricsSnapshot snapshot = build_prometheus_metrics_snapshot(
+      summary, options_.service_name(), options_.block_size(), ready);
+  cntl->http_response().set_content_type("text/plain; version=0.0.4");
+  cntl->response_attachment().append(render_prometheus_metrics(snapshot));
+}
+
+void XllmHttpServiceImpl::DebugSummary(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  assert(initialized_);
+  ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | respose | controller is null";
+    if (controller) {
+      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
+          "brpc request | respose | controller is null");
+    }
+    return;
+  }
+
+  brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
+  nlohmann::json summary = nlohmann::json::object();
+  if (scheduler_ != nullptr) {
+    summary = scheduler_->debug_summary();
+    summary["ready"] = scheduler_->has_available_instances();
+  } else {
+    summary["service_name"] = options_.service_name();
+    summary["ready"] = false;
+  }
   cntl->http_response().set_content_type("application/json");
-  cntl->response_attachment().append(scheduler_->debug_summary().dump());
+  cntl->response_attachment().append(summary.dump());
 }
 
 }  // namespace xllm_service

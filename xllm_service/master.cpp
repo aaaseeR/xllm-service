@@ -69,11 +69,13 @@ bool Master::setup_http_server() {
                               brpc::SERVER_DOESNT_OWN_SERVICE,
                               // for testing
                               "/hello => Hello,"
+                              "/health => Health,"
                               "/v1/completions => Completions,"
                               "/v1/chat/completions => ChatCompletions,"
                               "/v1/embeddings => Embeddings,"
                               "/v1/models => Models,"
-                              "/metrics => Metrics,") != 0) {
+                              "/metrics => Metrics,"
+                              "/debug/summary => DebugSummary,") != 0) {
     LOG(FATAL) << "Fail to add http service";
     return false;
   }
