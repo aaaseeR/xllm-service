@@ -103,6 +103,7 @@ GenerationDispatchResult RequestSessionRegistry::on_generation(
 
 bool RequestSessionRegistry::on_transport_failure(
     const std::string& request_id,
+    TransportFailureStage stage,
     const std::string& message) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (closed_) {
@@ -114,7 +115,9 @@ bool RequestSessionRegistry::on_transport_failure(
   }
   const auto session = it->second.session;
   executors_[it->second.executor_index]->schedule(
-      [session, message]() { session->on_transport_failure(message); });
+      [session, stage, message]() {
+        session->on_transport_failure(stage, message);
+      });
   return true;
 }
 

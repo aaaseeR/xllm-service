@@ -34,11 +34,16 @@ constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
 
 namespace xllm_service {
 
-Scheduler::Scheduler(const Options& options)
+Scheduler::Scheduler(
+    const Options& options,
+    InstanceLifecycleEventDispatcher::Handler lifecycle_handler)
     : options_(options),
-      lifecycle_events_([this](const InstanceLifecycleEvent& event) {
-        handle_instance_lifecycle_event(event);
-      }) {
+      lifecycle_events_(
+          std::vector<InstanceLifecycleEventDispatcher::Handler>{
+              [this](const InstanceLifecycleEvent& event) {
+                handle_instance_lifecycle_event(event);
+              },
+              std::move(lifecycle_handler)}) {
   GAUGE_SET(peer_service_enabled, options_.enable_peer_service() ? 1.0 : 0.0);
 
   tokenizer_ = TokenizerFactory::create_tokenizer(options_.tokenizer_path(),
@@ -215,11 +220,6 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   }
 
   return true;
-}
-
-std::shared_ptr<brpc::Channel> Scheduler::get_channel(
-    const std::string& target_name) {
-  return instance_mgr_->get_channel(target_name);
 }
 
 void Scheduler::update_master_service_heartbeat() {
@@ -475,8 +475,10 @@ bool Scheduler::record_new_request(
 
 bool Scheduler::handle_transport_failure(
     const std::string& service_request_id,
+    TransportFailureStage stage,
     const std::string& message) {
-  return request_registry_->on_transport_failure(service_request_id, message);
+  return request_registry_->on_transport_failure(
+      service_request_id, stage, message);
 }
 
 void Scheduler::handle_instance_lifecycle_event(

@@ -19,7 +19,6 @@ limitations under the License.
 #include <absl/time/time.h>
 #include <brpc/controller.h>
 #include <brpc/http_status_code.h>
-#include <brpc/progressive_reader.h>
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 #include <json2pb/json_to_pb.h>
@@ -43,10 +42,10 @@ limitations under the License.
 #include "common/xllm/status.h"
 #include "common/xllm/uuid.h"
 #include "completion.pb.h"
+#include "dispatcher/dispatcher.h"
 #include "runtime/runtime_state.h"
 #include "scheduler/scheduler.h"
 #include "telemetry/prometheus_metrics.h"
-#include "xllm_service.pb.h"
 
 namespace xllm_service {
 
@@ -120,12 +119,13 @@ std::vector<JsonTool> parse_tools_from_proto(
 
 XllmHttpServiceImpl::XllmHttpServiceImpl(const Options& options,
                                          Scheduler* scheduler,
-                                         RuntimeState& runtime_state)
+                                         RuntimeState& runtime_state,
+                                         Dispatcher* dispatcher)
     : options_(options),
       scheduler_(scheduler),
+      dispatcher_(dispatcher),
       runtime_state_(runtime_state) {
   initialized_ = true;
-  thread_pool_ = std::make_unique<ThreadPool>(options_.num_threads());
   request_tracer_ =
       std::make_unique<RequestTracer>(options_.enable_request_trace());
 }
@@ -244,65 +244,6 @@ bool XllmHttpServiceImpl::ensure_backend_ready(
 }
 
 namespace {
-template <typename T>
-void handle_non_stream_response(brpc::Controller* cntl,
-                                std::shared_ptr<T> call_data) {
-  std::unique_ptr<brpc::Controller> cntl_guard(cntl);
-  if (cntl->Failed()) {
-    call_data->finish_with_error(cntl->ErrorText());
-    LOG(ERROR) << "Fail to send stream generation, " << cntl->ErrorText();
-    return;
-  }
-  call_data->write_and_finish(cntl->response_attachment().to_string());
-}
-
-// fire and forget
-void handle_first_send_request(brpc::Controller* cntl,
-                               Scheduler* scheduler,
-                               std::string service_request_id) {
-  std::unique_ptr<brpc::Controller> cntl_guard(cntl);
-  if (cntl->Failed()) {
-    LOG(ERROR) << "Fail to send stream generation, " << cntl->ErrorText();
-    scheduler->handle_transport_failure(service_request_id,
-                                        cntl->ErrorText());
-    return;
-  }
-}
-
-template <typename T>
-class CustomProgressiveReader : public brpc::ProgressiveReader {
- public:
-  explicit CustomProgressiveReader(brpc::Controller* redirect_cntl,
-                                   std::shared_ptr<T> call_data)
-      : redirect_cntl_(redirect_cntl), call_data_(call_data) {}
-
-  virtual ~CustomProgressiveReader() { delete redirect_cntl_; }
-
-  // Called when one part was read.
-  // Error returned is treated as *permanent* and the socket where the
-  // data was read will be closed.
-  // A temporary error may be handled by blocking this function, which
-  // may block the HTTP parsing on the socket.
-  virtual butil::Status OnReadOnePart(const void* data, size_t length) {
-    call_data_->write(std::string((char*)data, length));
-    return butil::Status::OK();
-  }
-
-  // Called when there's nothing to read anymore. The `status' is a hint for
-  // why this method is called.
-  // - status.ok(): the message is complete and successfully consumed.
-  // - otherwise: socket was broken or OnReadOnePart() failed.
-  // This method will be called once and only once. No other methods will
-  // be called after. User can release the memory of this object inside.
-  virtual void OnEndOfMessage(const butil::Status& status) { delete this; }
-
- private:
-  brpc::Controller* redirect_cntl_ = nullptr;
-  std::shared_ptr<T> call_data_;
-};
-}  // namespace
-
-namespace {
 
 constexpr char kInferContentLength[] = "Infer-Content-Length";
 constexpr char kContentLength[] = "Content-Length";
@@ -386,28 +327,30 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
     return;
   }
 
-  // async redistribute the request and wait the response
-  // TODO: optimize the thread pool to async mode.
-  auto& target_uri = request->routing.prefill_name;
-  brpc::Channel* channel_ptr = scheduler_->get_channel(target_uri).get();
-  // use stub
-  xllm::proto::XllmAPIService_Stub stub(channel_ptr);
-  // xllm::proto::Status* resp_pb = new xllm::proto::Status();
-  brpc::Controller* redirect_cntl = new brpc::Controller();
-  google::protobuf::Closure* done =
-      brpc::NewCallback(&handle_first_send_request,
-                        redirect_cntl,
-                        scheduler_,
-                        request->service_request_id);
-
+  bool dispatched = false;
   if constexpr (std::is_same_v<T, CompletionCallData>) {
-    stub.Completions(redirect_cntl, &req_pb, nullptr, done);
+    dispatched = dispatcher_ != nullptr &&
+                 dispatcher_->dispatch_completion(
+                     request->routing.prefill_name,
+                     request->prefill_incarnation_id,
+                     request->service_request_id,
+                     req_pb);
   } else if constexpr (std::is_same_v<T, ChatCallData>) {
-    stub.ChatCompletions(redirect_cntl, &req_pb, nullptr, done);
+    dispatched = dispatcher_ != nullptr &&
+                 dispatcher_->dispatch_chat(
+                     request->routing.prefill_name,
+                     request->prefill_incarnation_id,
+                     request->service_request_id,
+                     req_pb);
   } else {
-    delete redirect_cntl;
-    delete done;
     LOG(ERROR) << "Unknown call_data type";
+  }
+
+  if (!dispatched) {
+    scheduler_->handle_transport_failure(
+        request->service_request_id,
+        TransportFailureStage::BEFORE_FIRST_TOKEN,
+        "Backend dispatcher is unavailable");
   }
 }
 
@@ -450,21 +393,18 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
 }
 
 namespace {
-void handle_get_model_response(brpc::Controller* cntl,
-                               std::shared_ptr<CompletionCallData> call_data,
-                               google::protobuf::Closure* done,
-                               xllm::proto::ModelListResponse* resp_pb) {
-  std::unique_ptr<brpc::Controller> cntl_guard(cntl);
-  std::unique_ptr<xllm::proto::ModelListResponse> resp_pb_guard(resp_pb);
-
-  if (cntl->Failed()) {
-    LOG(ERROR) << "Fail to send stream generation, " << cntl->ErrorText();
-    call_data->finish_with_error(cntl->ErrorText());
+void handle_get_model_response(
+    std::shared_ptr<CompletionCallData> call_data,
+    const TransportResult& result,
+    const xllm::proto::ModelListResponse& response) {
+  if (result.code != TransportResultCode::SUCCESS) {
+    LOG(ERROR) << "Failed to get serving models: " << result.message;
+    call_data->finish_with_error(result.message);
     return;
   }
   std::string err_msg;
   std::string json_output;
-  if (!json2pb::ProtoMessageToJson(*resp_pb, &json_output, &err_msg)) {
+  if (!json2pb::ProtoMessageToJson(response, &json_output, &err_msg)) {
     call_data->finish_with_error(err_msg);
     LOG(ERROR) << "ProtoMessageToJson failed: " << err_msg;
     return;
@@ -493,13 +433,6 @@ void XllmHttpServiceImpl::get_serving_models(
   if (!ensure_backend_ready(cntl)) {
     return;
   }
-  auto arena = response->GetArena();
-  auto req_pb =
-      google::protobuf::Arena::CreateMessage<::xllm::proto::ModelListRequest>(
-          arena);
-
-  // auto call_data = std::make_shared<StreamCallData>(cntl, false,
-  // done_guard.release());
   auto call_data = std::make_shared<CompletionCallData>(
       cntl, false, done_guard.release(), nullptr, nullptr);
 
@@ -510,15 +443,20 @@ void XllmHttpServiceImpl::get_serving_models(
     return;
   }
 
-  brpc::Channel* channel_ptr =
-      scheduler_->get_channel(service_request->routing.prefill_name).get();
-
-  xllm::proto::XllmAPIService_Stub stub(channel_ptr);
-  brpc::Controller* redirect_cntl = new brpc::Controller();
-  auto* resp_pb = new xllm::proto::ModelListResponse();
-  google::protobuf::Closure* done_callback = brpc::NewCallback(
-      &handle_get_model_response, redirect_cntl, call_data, done, resp_pb);
-  stub.Models(redirect_cntl, req_pb, resp_pb, done_callback);
+  xllm::proto::ModelListRequest model_request;
+  const bool dispatched =
+      dispatcher_ != nullptr &&
+      dispatcher_->dispatch_models(
+          service_request->routing.prefill_name,
+          service_request->prefill_incarnation_id,
+          model_request,
+          [call_data](const TransportResult& result,
+                      const xllm::proto::ModelListResponse& model_response) {
+            handle_get_model_response(call_data, result, model_response);
+          });
+  if (!dispatched) {
+    call_data->finish_with_error("Backend dispatcher is unavailable");
+  }
 }
 
 void XllmHttpServiceImpl::Completions(
@@ -721,6 +659,14 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
   if (scheduler_ != nullptr) {
     summary = scheduler_->debug_summary();
   }
+  if (dispatcher_ != nullptr) {
+    const DispatcherStats stats = dispatcher_->stats();
+    summary["dispatcher"] = {
+        {"inflight", stats.inflight},
+        {"transport_failure_total", stats.transport_failure_total},
+        {"channel_count", stats.channel_count},
+        {"endpoint_count", stats.endpoint_count}};
+  }
 
   const RuntimeHealthSnapshot health = runtime_state_.health_snapshot();
   PrometheusMetricsSnapshot snapshot = build_prometheus_metrics_snapshot(
@@ -755,6 +701,14 @@ void XllmHttpServiceImpl::DebugSummary(
     summary = scheduler_->debug_summary();
   } else {
     summary["service_name"] = options_.service_name();
+  }
+  if (dispatcher_ != nullptr) {
+    const DispatcherStats stats = dispatcher_->stats();
+    summary["dispatcher"] = {
+        {"inflight", stats.inflight},
+        {"transport_failure_total", stats.transport_failure_total},
+        {"channel_count", stats.channel_count},
+        {"endpoint_count", stats.endpoint_count}};
   }
   const RuntimeHealthSnapshot health = runtime_state_.health_snapshot();
   summary["live"] = health.live;

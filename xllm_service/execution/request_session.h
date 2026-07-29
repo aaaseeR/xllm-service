@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "common/xllm/output.h"
 #include "request/request.h"
+#include "transport/types.h"
 
 namespace xllm_service {
 
@@ -40,10 +41,11 @@ enum class RequestTerminalReason : uint8_t {
   COMPLETED = 0,
   GENERATION_FAILURE = 1,
   OUTPUT_FAILURE = 2,
-  TRANSPORT_FAILURE = 3,
-  CLIENT_DISCONNECTED = 4,
-  INSTANCE_FAILURE = 5,
-  RUNTIME_CANCELLED = 6,
+  TRANSPORT_FAILURE_BEFORE_FIRST_TOKEN = 3,
+  TRANSPORT_FAILURE_AFTER_FIRST_TOKEN = 4,
+  CLIENT_DISCONNECTED = 5,
+  INSTANCE_FAILURE = 6,
+  RUNTIME_CANCELLED = 7,
 };
 
 const char* request_terminal_reason_name(RequestTerminalReason reason);
@@ -74,7 +76,8 @@ class RequestSession final {
   // State-changing methods must be invoked by the same serial executor.
   bool on_dispatched();
   bool on_generation(llm::RequestOutput output);
-  bool on_transport_failure(const std::string& message);
+  bool on_transport_failure(TransportFailureStage stage,
+                            const std::string& message);
   bool on_instance_failure(const InstanceFailure& failure);
   bool on_client_disconnect();
 

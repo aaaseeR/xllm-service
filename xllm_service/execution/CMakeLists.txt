@@ -13,6 +13,7 @@ cc_library(
   DEPS
     :common
     :request
+    :transport
 )
 
 cc_test(

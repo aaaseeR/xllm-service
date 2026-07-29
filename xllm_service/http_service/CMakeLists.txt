@@ -14,6 +14,7 @@ cc_library(
   DEPS
     :backend_http
     :common
+    :dispatcher
     :request
     :runtime
     :scheduler

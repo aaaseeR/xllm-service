@@ -15,7 +15,9 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <vector>
@@ -49,7 +51,9 @@ class InstanceLifecycleEventDispatcher final {
  private:
   const std::vector<Handler> handlers_;
   mutable std::mutex mutex_;
+  mutable std::condition_variable condition_;
   mutable bool closed_ = false;
+  mutable size_t inflight_publish_count_ = 0;
 };
 
 }  // namespace xllm_service

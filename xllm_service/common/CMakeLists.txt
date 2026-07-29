@@ -34,6 +34,7 @@ cc_library(
   DEPS
     absl::random_random
     absl::strings
+    absl::synchronization
     glog::glog
     gflags::gflags
     nlohmann_json::nlohmann_json

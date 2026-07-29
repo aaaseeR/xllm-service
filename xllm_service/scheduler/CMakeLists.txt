@@ -58,6 +58,7 @@ cc_library(
     :loadbalance_policy
     :managers
     :request
+    :transport
     :xllm_chat_parse_runtime
     cpprest
     etcd-cpp-api

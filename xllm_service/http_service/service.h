@@ -15,7 +15,7 @@ limitations under the License.
 
 #pragma once
 
-#include <brpc/channel.h>
+#include <brpc/controller.h>
 
 #include <iostream>
 #include <mutex>
@@ -23,7 +23,6 @@ limitations under the License.
 #include "chat.pb.h"
 #include "common/call_data.h"
 #include "common/options.h"
-#include "common/threadpool.h"
 #include "common/types.h"
 #include "completion.pb.h"
 #include "request/request.h"
@@ -33,15 +32,15 @@ limitations under the License.
 namespace xllm_service {
 
 class Scheduler;
-class InstanceMgr;
-class ClosureGuard;
+class Dispatcher;
 class RuntimeState;
 
 class XllmHttpServiceImpl : public proto::XllmHttpService {
  public:
   XllmHttpServiceImpl(const Options& options,
                       Scheduler* scheduler,
-                      RuntimeState& runtime_state);
+                      RuntimeState& runtime_state,
+                      Dispatcher* dispatcher = nullptr);
   ~XllmHttpServiceImpl();
 
   void Hello(::google::protobuf::RpcController* controller,
@@ -101,12 +100,6 @@ class XllmHttpServiceImpl : public proto::XllmHttpService {
                                             const std::string& method);
 
   template <typename T>
-  void handle(std::shared_ptr<T> call_data,
-              const std::string& req_attachment,
-              std::shared_ptr<Request> request,
-              const std::string& method);
-
-  template <typename T>
   void handle(std::shared_ptr<T> call_data, std::shared_ptr<Request> request);
 
   void get_serving_models(::google::protobuf::RpcController* controller,
@@ -122,13 +115,14 @@ class XllmHttpServiceImpl : public proto::XllmHttpService {
   // not own
   Scheduler* scheduler_;
 
+  // not own
+  Dispatcher* dispatcher_;
+
   RuntimeState& runtime_state_;
 
   bool initialized_ = false;
 
   std::unique_ptr<RequestTracer> request_tracer_;
-
-  std::unique_ptr<ThreadPool> thread_pool_;
 };
 
 }  // namespace xllm_service

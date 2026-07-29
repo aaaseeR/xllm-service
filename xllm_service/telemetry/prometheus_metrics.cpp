@@ -104,6 +104,15 @@ void append_gauge(std::ostringstream* out,
   *out << name << " " << value << "\n";
 }
 
+void append_counter(std::ostringstream* out,
+                    const std::string& name,
+                    const std::string& help,
+                    uint64_t value) {
+  *out << "# HELP " << name << " " << help << "\n";
+  *out << "# TYPE " << name << " counter\n";
+  *out << name << " " << value << "\n";
+}
+
 void append_labeled_gauge(std::ostringstream* out,
                           const std::string& name,
                           const std::string& help,
@@ -164,6 +173,14 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
        ++it) {
     snapshot.total_running_requests += read_uint64(it.value());
   }
+
+  const nlohmann::json& dispatcher =
+      object_field(scheduler_summary, "dispatcher");
+  snapshot.transport_inflight = read_uint64_field(dispatcher, "inflight");
+  snapshot.transport_failure_total =
+      read_uint64_field(dispatcher, "transport_failure_total");
+  snapshot.channel_count = read_uint64_field(dispatcher, "channel_count");
+  snapshot.endpoint_count = read_uint64_field(dispatcher, "endpoint_count");
 
   const nlohmann::json& cache_index =
       object_field(scheduler_summary, "cache_index");
@@ -246,6 +263,22 @@ std::string render_prometheus_metrics(
                "xllm_service_block_size",
                "Configured number of tokens per KV cache block.",
                static_cast<double>(snapshot.block_size));
+  append_gauge(&out,
+               "xllm_service_transport_inflight",
+               "Number of backend transport RPCs awaiting completion.",
+               static_cast<double>(snapshot.transport_inflight));
+  append_counter(&out,
+                 "xllm_service_transport_failures_total",
+                 "Number of failed backend transport dispatches.",
+                 snapshot.transport_failure_total);
+  append_gauge(&out,
+               "xllm_service_channel_count",
+               "Number of initialized backend channels.",
+               static_cast<double>(snapshot.channel_count));
+  append_gauge(&out,
+               "xllm_service_endpoint_count",
+               "Number of active backend endpoint incarnations.",
+               static_cast<double>(snapshot.endpoint_count));
 
   append_gauge(&out,
                "vllm:num_requests_waiting",

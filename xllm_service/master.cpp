@@ -25,13 +25,40 @@ limitations under the License.
 namespace xllm_service {
 
 Master::Master(const Options& options) : options_(options) {
-  scheduler_ = std::make_unique<Scheduler>(options);
+  channel_pool_ = std::make_shared<ChannelPool>(options);
+  scheduler_ = std::make_unique<Scheduler>(
+      options,
+      [channel_pool = channel_pool_](const InstanceLifecycleEvent& event) {
+        const InstanceMetaInfo& instance = event.instance;
+        switch (event.type) {
+          case InstanceLifecycleEventType::REGISTERED:
+          case InstanceLifecycleEventType::REGISTRATION_UPDATED:
+            channel_pool->activate(instance.name, instance.incarnation_id);
+            return;
+          case InstanceLifecycleEventType::DEREGISTERING:
+            return;
+          case InstanceLifecycleEventType::DEREGISTERED:
+            channel_pool->remove(instance.name, instance.incarnation_id);
+            return;
+        }
+      });
+
+  dispatcher_ = std::make_unique<Dispatcher>(
+      channel_pool_,
+      [scheduler = scheduler_.get()](const TransportResult& result) {
+        if (result.code == TransportResultCode::SUCCESS) {
+          return;
+        }
+        scheduler->handle_transport_failure(result.request_id,
+                                            result.failure_stage,
+                                            result.message);
+      });
 
   rpc_service_ =
       std::make_unique<xllm_service::XllmRpcService>(options, scheduler_.get());
 
   http_service_ = std::make_unique<xllm_service::XllmHttpServiceImpl>(
-      options, scheduler_.get(), runtime_state_);
+      options, scheduler_.get(), runtime_state_, dispatcher_.get());
 }
 
 Master::~Master() { stop(); }
@@ -93,6 +120,8 @@ void Master::stop() {
     rpc_server_.Join();
     rpc_server_started_ = false;
   }
+
+  dispatcher_->close();
 
   runtime_state_.mark_stopped();
 }

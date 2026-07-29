@@ -41,7 +41,12 @@ TEST(PrometheusMetricsTest, BuildsSnapshotFromLegacyDebugSummary) {
         {"ssd_entry_count", 1},
         {"hbm_instance_count", 2},
         {"dram_instance_count", 1},
-        {"ssd_instance_count", 1}}}};
+        {"ssd_instance_count", 1}}},
+      {"dispatcher",
+       {{"inflight", 3},
+        {"transport_failure_total", 7},
+        {"channel_count", 2},
+        {"endpoint_count", 4}}}};
 
   PrometheusMetricsSnapshot snapshot = build_prometheus_metrics_snapshot(
       summary,
@@ -58,6 +63,10 @@ TEST(PrometheusMetricsTest, BuildsSnapshotFromLegacyDebugSummary) {
   EXPECT_EQ(snapshot.total_waiting_requests, 8);
   EXPECT_EQ(snapshot.total_running_requests, 6);
   EXPECT_DOUBLE_EQ(snapshot.max_gpu_cache_usage_perc, 0.75);
+  EXPECT_EQ(snapshot.transport_inflight, 3);
+  EXPECT_EQ(snapshot.transport_failure_total, 7);
+  EXPECT_EQ(snapshot.channel_count, 2);
+  EXPECT_EQ(snapshot.endpoint_count, 4);
   EXPECT_EQ(snapshot.cache_index_size, 10);
   EXPECT_EQ(snapshot.block_size, 128);
 }
@@ -71,6 +80,10 @@ TEST(PrometheusMetricsTest, RendersLlmDCompatibleMetrics) {
   snapshot.total_waiting_requests = 8;
   snapshot.total_running_requests = 6;
   snapshot.max_gpu_cache_usage_perc = 0.75;
+  snapshot.transport_inflight = 3;
+  snapshot.transport_failure_total = 7;
+  snapshot.channel_count = 2;
+  snapshot.endpoint_count = 4;
 
   std::string output = render_prometheus_metrics(snapshot);
 
@@ -83,6 +96,16 @@ TEST(PrometheusMetricsTest, RendersLlmDCompatibleMetrics) {
   EXPECT_NE(output.find("vllm:num_requests_running 6"), std::string::npos);
   EXPECT_NE(output.find("vllm:kv_cache_usage_perc 0.75"), std::string::npos);
   EXPECT_NE(output.find("xllm_service_block_size 128"),
+            std::string::npos);
+  EXPECT_NE(output.find("xllm_service_transport_inflight 3"),
+            std::string::npos);
+  EXPECT_NE(output.find("# TYPE xllm_service_transport_failures_total counter"),
+            std::string::npos);
+  EXPECT_NE(output.find("xllm_service_transport_failures_total 7"),
+            std::string::npos);
+  EXPECT_NE(output.find("xllm_service_channel_count 2"),
+            std::string::npos);
+  EXPECT_NE(output.find("xllm_service_endpoint_count 4"),
             std::string::npos);
 }
 

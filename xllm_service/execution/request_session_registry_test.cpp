@@ -235,7 +235,9 @@ TEST(RequestSessionRegistryTest, ConcurrentTerminalEventsCompleteOnce) {
   });
   std::thread transport_thread([&registry, &await_start]() {
     await_start();
-    registry.on_transport_failure("request-5", "connection reset");
+    registry.on_transport_failure("request-5",
+                                  TransportFailureStage::BEFORE_FIRST_TOKEN,
+                                  "connection reset");
   });
   std::thread instance_thread([&registry, &await_start]() {
     await_start();

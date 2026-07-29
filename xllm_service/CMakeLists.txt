@@ -8,7 +8,9 @@ add_subdirectory(runtime)
 add_subdirectory(backend_http)
 add_subdirectory(telemetry)
 add_subdirectory(request)
+add_subdirectory(transport)
 add_subdirectory(execution)
+add_subdirectory(dispatcher)
 add_subdirectory(rpc_service)
 add_subdirectory(tokenizer)
 add_subdirectory(chat_template)
@@ -23,9 +25,11 @@ cc_binary(
   SRCS
     master.cpp
   DEPS
+    :dispatcher
     :xllm_http_service
     :xllm_rpc_service
     :runtime
+    :transport
 )
 
 add_subdirectory(examples)

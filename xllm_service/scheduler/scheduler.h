@@ -37,12 +37,12 @@ namespace xllm_service {
 // A scheduler for scheduling requests and instances
 class Scheduler final {
  public:
-  Scheduler(const Options& options);
+  explicit Scheduler(
+      const Options& options,
+      InstanceLifecycleEventDispatcher::Handler lifecycle_handler = {});
   ~Scheduler();
 
   bool schedule(std::shared_ptr<Request> request);
-
-  std::shared_ptr<brpc::Channel> get_channel(const std::string& target_name);
 
   InstanceMetaInfo get_instance_info(const std::string& instance_name);
 
@@ -69,6 +69,7 @@ class Scheduler final {
   bool record_new_request(std::shared_ptr<CompletionCallData> call_data,
                           std::shared_ptr<Request> request);
   bool handle_transport_failure(const std::string& service_request_id,
+                                TransportFailureStage stage,
                                 const std::string& message);
 
   // handle generations from prefill/decode instance

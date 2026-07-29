@@ -29,8 +29,10 @@ const char* request_terminal_reason_name(RequestTerminalReason reason) {
       return "generation_failure";
     case RequestTerminalReason::OUTPUT_FAILURE:
       return "output_failure";
-    case RequestTerminalReason::TRANSPORT_FAILURE:
-      return "transport_failure";
+    case RequestTerminalReason::TRANSPORT_FAILURE_BEFORE_FIRST_TOKEN:
+      return "transport_failure_before_first_token";
+    case RequestTerminalReason::TRANSPORT_FAILURE_AFTER_FIRST_TOKEN:
+      return "transport_failure_after_first_token";
     case RequestTerminalReason::CLIENT_DISCONNECTED:
       return "client_disconnected";
     case RequestTerminalReason::INSTANCE_FAILURE:
@@ -105,7 +107,8 @@ bool RequestSession::on_generation(llm::RequestOutput output) {
   return true;
 }
 
-bool RequestSession::on_transport_failure(const std::string& message) {
+bool RequestSession::on_transport_failure(TransportFailureStage stage,
+                                          const std::string& message) {
   if (is_terminal()) {
     return false;
   }
@@ -114,8 +117,16 @@ bool RequestSession::on_transport_failure(const std::string& message) {
   output.service_request_id = request_->service_request_id;
   output.status = llm::Status(llm::StatusCode::UNAVAILABLE, message);
   deliver_output(std::move(output));
-  return finish(RequestSessionState::FAILED,
-                RequestTerminalReason::TRANSPORT_FAILURE);
+  const bool generation_started =
+      state_.load() == RequestSessionState::PREFILL_RUNNING ||
+      state_.load() == RequestSessionState::DECODE_RUNNING;
+  const bool after_first_token =
+      stage == TransportFailureStage::AFTER_FIRST_TOKEN || generation_started;
+  return finish(
+      RequestSessionState::FAILED,
+      after_first_token
+          ? RequestTerminalReason::TRANSPORT_FAILURE_AFTER_FIRST_TOKEN
+          : RequestTerminalReason::TRANSPORT_FAILURE_BEFORE_FIRST_TOKEN);
 }
 
 bool RequestSession::on_instance_failure(const InstanceFailure& failure) {

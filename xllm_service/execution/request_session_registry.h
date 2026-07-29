@@ -53,6 +53,7 @@ class RequestSessionRegistry final {
                         RequestSession::DisconnectCheck disconnect_check);
   GenerationDispatchResult on_generation(const llm::RequestOutput& output);
   bool on_transport_failure(const std::string& request_id,
+                            TransportFailureStage stage,
                             const std::string& message);
   size_t on_instance_failure(const InstanceFailure& failure);
 

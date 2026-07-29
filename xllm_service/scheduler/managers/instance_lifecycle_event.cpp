@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "scheduler/managers/instance_lifecycle_event.h"
 
+#include <glog/logging.h>
+
+#include <exception>
 #include <utility>
 
 namespace xllm_service {
@@ -30,20 +33,36 @@ InstanceLifecycleEventDispatcher::InstanceLifecycleEventDispatcher(
 
 void InstanceLifecycleEventDispatcher::publish(
     const InstanceLifecycleEvent& event) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (closed_) {
-    return;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) {
+      return;
+    }
+    ++inflight_publish_count_;
   }
   for (const auto& handler : handlers_) {
     if (handler) {
-      handler(event);
+      try {
+        handler(event);
+      } catch (const std::exception& error) {
+        LOG(ERROR) << "Instance lifecycle handler failed: " << error.what();
+      } catch (...) {
+        LOG(ERROR) << "Instance lifecycle handler failed with unknown error";
+      }
     }
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  --inflight_publish_count_;
+  if (inflight_publish_count_ == 0) {
+    condition_.notify_all();
   }
 }
 
 void InstanceLifecycleEventDispatcher::close() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   closed_ = true;
+  condition_.wait(lock, [this]() { return inflight_publish_count_ == 0; });
 }
 
 }  // namespace xllm_service

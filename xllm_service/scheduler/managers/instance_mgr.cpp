@@ -18,6 +18,7 @@ limitations under the License.
 #include <absl/strings/str_join.h>
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
+#include <brpc/channel.h>
 #include <brpc/controller.h>
 #include <glog/logging.h>
 
@@ -499,16 +500,6 @@ void InstanceMgr::record_request_finished(
   }
 }
 
-std::shared_ptr<brpc::Channel> InstanceMgr::get_channel(
-    const std::string& instance_name) {
-  std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
-  auto iter = cached_channels_.find(instance_name);
-  if (iter == cached_channels_.end()) {
-    return nullptr;
-  }
-  return iter->second;
-}
-
 bool InstanceMgr::bind_request_instance_incarnations(
     const std::shared_ptr<Request>& request) {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
@@ -578,26 +569,6 @@ bool InstanceMgr::record_instance_heartbeat(const std::string& instance_name,
                  << "lease lost state: " << instance_name
                  << ", incarnation_id: " << incarnation_id;
   }
-  return true;
-}
-
-bool InstanceMgr::init_brpc_channel(
-    const std::string& instance_name,
-    std::shared_ptr<brpc::Channel>* out_channel) {
-  auto channel = std::make_shared<brpc::Channel>();
-  brpc::ChannelOptions options;
-  // Add to params
-  // options.protocol = "http";
-  options.timeout_ms = options_.timeout_ms(); /*milliseconds*/
-  options.max_retry = 3;
-  options.connect_timeout_ms = options_.connect_timeout_ms();
-  std::string load_balancer = "";
-  if (channel->Init(instance_name.c_str(), load_balancer.c_str(), &options) !=
-      0) {
-    LOG(ERROR) << "Fail to initialize channel for " << instance_name;
-    return false;
-  }
-  *out_channel = std::move(channel);
   return true;
 }
 
@@ -1284,27 +1255,11 @@ bool InstanceMgr::register_instance(const std::string& name,
   {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
     if (instances_.find(name) != instances_.end() ||
-        cached_channels_.find(name) != cached_channels_.end()) {
+        registering_instances_.find(name) != registering_instances_.end()) {
       LOG(ERROR) << "Instance is already registered, instance_name: " << name;
       return false;
     }
-  }
-
-  std::shared_ptr<brpc::Channel> channel;
-  if (!init_brpc_channel(name, &channel)) {
-    LOG(ERROR) << "create channel fail: " << name;
-    return false;
-  }
-
-  {
-    std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
-    if (instances_.find(name) != instances_.end() ||
-        cached_channels_.find(name) != cached_channels_.end()) {
-      LOG(WARNING) << "Instance registered concurrently during channel init: "
-                   << name;
-      return false;
-    }
-    cached_channels_[name] = std::move(channel);
+    registering_instances_.insert(name);
   }
 
   add_instance_resources(name, info);
@@ -1313,25 +1268,34 @@ bool InstanceMgr::register_instance(const std::string& name,
   {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
     if (!gather_link_operations(info, &link_ops)) {
-      remove_instance_resources(name);
+      lock.unlock();
+      abort_instance_registration(name);
       return false;
     }
   }
 
   if (!run_link_operations(link_ops)) {
-    std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
-    remove_instance_resources(name);
+    abort_instance_registration(name);
     return false;
   }
 
+  lifecycle_events_.publish({InstanceLifecycleEventType::REGISTERED, info});
+
   {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
+    if (instances_.find(name) != instances_.end() ||
+        registering_instances_.erase(name) == 0) {
+      lock.unlock();
+      lifecycle_events_.publish(
+          {InstanceLifecycleEventType::DEREGISTERED, info});
+      abort_instance_registration(name);
+      LOG(ERROR) << "Instance registration lost its reservation: " << name;
+      return false;
+    }
     add_instance_to_index(name, info);
     instances_.insert(std::make_pair(name, info));
     GAUGE_SET(xservice_instance_view_size, instances_.size());
   }
-  lifecycle_events_.publish(
-      {InstanceLifecycleEventType::REGISTERED, info});
   return true;
 }
 
@@ -1376,20 +1340,12 @@ void InstanceMgr::deregister_instance(
       return;
     }
     remove_instance_from_index(name, it->second);
-  }
-
-  lifecycle_events_.publish({InstanceLifecycleEventType::DEREGISTERED, info});
-
-  {
-    std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
-    auto it = instances_.find(name);
-    if (it == instances_.end()) {
-      return;
-    }
     remove_instance_resources(name);
     instances_.erase(it);
     GAUGE_SET(xservice_instance_view_size, instances_.size());
   }
+
+  lifecycle_events_.publish({InstanceLifecycleEventType::DEREGISTERED, info});
   LOG(INFO) << "delete instance: " << name;
 }
 
@@ -1404,8 +1360,7 @@ void InstanceMgr::add_instance_resources(const std::string& name,
 }
 
 void InstanceMgr::remove_instance_resources(const std::string& name) {
-  // Caller must hold cluster_mutex_ (cached_channels_ is L1).
-  cached_channels_.erase(name);
+  // Caller must hold cluster_mutex_ to preserve the L1 -> L2 lock order.
   std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
   time_predictors_.erase(name);
   request_metrics_.erase(name);
@@ -1414,6 +1369,12 @@ void InstanceMgr::remove_instance_resources(const std::string& name) {
   removed_instance_.insert(name);
   load_metrics_.erase(name);
   inflight_request_counts_.erase(name);
+}
+
+void InstanceMgr::abort_instance_registration(const std::string& name) {
+  std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
+  remove_instance_resources(name);
+  registering_instances_.erase(name);
 }
 
 bool InstanceMgr::is_current_incarnation_locked(

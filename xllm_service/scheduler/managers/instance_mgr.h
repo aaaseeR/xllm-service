@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <brpc/channel.h>
-
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <shared_mutex>
@@ -59,8 +57,6 @@ class InstanceMgr final {
       const std::string& instance_name);
 
   void get_load_metrics(LoadBalanceInfos* infos);
-
-  std::shared_ptr<brpc::Channel> get_channel(const std::string& instance_name);
 
   bool bind_request_instance_incarnations(
       const std::shared_ptr<Request>& request);
@@ -106,9 +102,6 @@ class InstanceMgr final {
 
   void init();
 
-  // brpc::Channel::Init only; must NOT be called while holding cluster_mutex_.
-  bool init_brpc_channel(const std::string& target_uri,
-                         std::shared_ptr<brpc::Channel>* out_channel);
   bool probe_instance_health(const std::string& instance_name);
   void reconcile_instance_states();
   void refresh_instance_registration(const std::string& name,
@@ -139,6 +132,7 @@ class InstanceMgr final {
                               const InstanceMetaInfo& info);
   // Release internal resources for an instance
   void remove_instance_resources(const std::string& name);
+  void abort_instance_registration(const std::string& name);
   bool is_current_incarnation_locked(const std::string& instance_name,
                                      const std::string& incarnation_id) const;
   // Build LinkInstance RPC list; caller must hold cluster_mutex_.
@@ -164,7 +158,7 @@ class InstanceMgr final {
                             const InstanceMetaInfo& peer_info);
 
   // Locking (scheme B): only two mutexes participate in ordering.
-  // L1 cluster_mutex_: instances_, indices, cached_channels_.
+  // L1 cluster_mutex_: instances_, registration state, indices.
   // L2 metrics_mutex_: load_metrics_, request_metrics_, latency_metrics_,
   // time_predictors_, updated_metrics_, removed_instance_.
   // Order when both needed: always lock L1 before L2 (use std::scoped_lock).
@@ -179,9 +173,10 @@ class InstanceMgr final {
   std::shared_ptr<EtcdClient> etcd_client_;
   InstanceLifecycleEventDispatcher& lifecycle_events_;
 
-  // L1 — cluster topology & channels
+  // L1 - cluster topology
   mutable std::shared_mutex cluster_mutex_;
   std::unordered_map<std::string, InstanceMetaInfo> instances_;
+  std::unordered_set<std::string> registering_instances_;
   struct SuspectInstanceInfo {
     std::string incarnation_id;
     uint64_t enter_ts_ms = 0;
@@ -191,10 +186,7 @@ class InstanceMgr final {
   std::vector<std::string> decode_index_;
   uint64_t next_prefill_index_ = 0;
   uint64_t next_decode_index_ = 0;
-  std::unordered_map<std::string, std::shared_ptr<brpc::Channel>>
-      cached_channels_;
-
-  // L2 — metrics & predictors (single lock to avoid order ambiguity)
+  // L2 - metrics & predictors (single lock to avoid order ambiguity)
   mutable std::shared_mutex metrics_mutex_;
   std::unordered_map<std::string, LoadMetrics> load_metrics_;
   std::unordered_map<std::string, LoadMetrics> updated_metrics_;

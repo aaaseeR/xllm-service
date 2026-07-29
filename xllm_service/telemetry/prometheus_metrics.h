@@ -35,6 +35,10 @@ struct PrometheusMetricsSnapshot {
   uint64_t total_waiting_requests = 0;
   uint64_t total_running_requests = 0;
   double max_gpu_cache_usage_perc = 0.0;
+  uint64_t transport_inflight = 0;
+  uint64_t transport_failure_total = 0;
+  uint64_t channel_count = 0;
+  uint64_t endpoint_count = 0;
   uint64_t cache_index_size = 0;
   uint64_t hbm_entry_count = 0;
   uint64_t dram_entry_count = 0;

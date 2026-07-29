@@ -97,15 +97,41 @@ TEST(RequestSessionTest, TransportFailureWritesErrorAndFailsOnce) {
       });
 
   ASSERT_TRUE(session.on_dispatched());
-  EXPECT_TRUE(session.on_transport_failure("connection refused"));
-  EXPECT_FALSE(session.on_transport_failure("duplicate failure"));
+  EXPECT_TRUE(session.on_transport_failure(
+      TransportFailureStage::BEFORE_FIRST_TOKEN, "connection refused"));
+  EXPECT_FALSE(session.on_transport_failure(
+      TransportFailureStage::BEFORE_FIRST_TOKEN, "duplicate failure"));
 
   EXPECT_EQ(session.state(), RequestSessionState::FAILED);
   EXPECT_EQ(status_codes,
             (std::vector<llm::StatusCode>{llm::StatusCode::UNAVAILABLE}));
   EXPECT_EQ(terminal_reasons,
             (std::vector<RequestTerminalReason>{
-                RequestTerminalReason::TRANSPORT_FAILURE}));
+                RequestTerminalReason::
+                    TRANSPORT_FAILURE_BEFORE_FIRST_TOKEN}));
+}
+
+TEST(RequestSessionTest, ClassifiesTransportFailureAfterGenerationStarts) {
+  auto request = make_request();
+  RequestTerminalReason terminal_reason =
+      RequestTerminalReason::COMPLETED;
+  RequestSession session(
+      request,
+      [](llm::RequestOutput) { return true; },
+      []() { return false; },
+      {},
+      [&terminal_reason](const std::shared_ptr<Request>&,
+                         RequestTerminalReason reason) {
+        terminal_reason = reason;
+      });
+
+  ASSERT_TRUE(session.on_dispatched());
+  ASSERT_TRUE(session.on_generation(make_output(true, false)));
+  EXPECT_TRUE(session.on_transport_failure(
+      TransportFailureStage::BEFORE_FIRST_TOKEN, "connection reset"));
+
+  EXPECT_EQ(terminal_reason,
+            RequestTerminalReason::TRANSPORT_FAILURE_AFTER_FIRST_TOKEN);
 }
 
 TEST(RequestSessionTest, CancelsDisconnectedClientWithoutOutput) {

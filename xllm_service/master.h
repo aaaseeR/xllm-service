@@ -21,10 +21,12 @@ limitations under the License.
 #include <thread>
 
 #include "common/options.h"
+#include "dispatcher/dispatcher.h"
 #include "http_service/service.h"
 #include "rpc_service/service.h"
 #include "runtime/runtime_state.h"
 #include "scheduler/scheduler.h"
+#include "transport/channel_pool.h"
 
 namespace xllm_service {
 
@@ -45,8 +47,9 @@ class Master {
   Options options_;
   RuntimeState runtime_state_;
 
-  // Scheduler for scheduling requests and instances
+  std::shared_ptr<ChannelPool> channel_pool_;
   std::unique_ptr<Scheduler> scheduler_;
+  std::unique_ptr<Dispatcher> dispatcher_;
 
   // 1.For http service
   std::string http_server_address_;
