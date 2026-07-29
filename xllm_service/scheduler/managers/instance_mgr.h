@@ -34,17 +34,17 @@ limitations under the License.
 #include "common/types.h"
 #include "request/request.h"
 #include "scheduler/etcd_client/etcd_client.h"
+#include "scheduler/managers/instance_lifecycle_event.h"
 #include "xllm_rpc_service.pb.h"
 
 namespace xllm_service {
-class Scheduler;
 
 class InstanceMgr final {
  public:
   explicit InstanceMgr(const Options& options,
                        const std::shared_ptr<EtcdClient>& etcd_client,
                        const bool is_master_service,
-                       Scheduler* scheduler);
+                       InstanceLifecycleEventDispatcher& lifecycle_events);
 
   ~InstanceMgr();
 
@@ -141,7 +141,6 @@ class InstanceMgr final {
   void remove_instance_resources(const std::string& name);
   bool is_current_incarnation_locked(const std::string& instance_name,
                                      const std::string& incarnation_id) const;
-  void clear_instance_cache(const std::string& name);
   // Build LinkInstance RPC list; caller must hold cluster_mutex_.
   bool gather_link_operations(
       const InstanceMetaInfo& info,
@@ -178,6 +177,7 @@ class InstanceMgr final {
   bool use_etcd_ = false;
   std::atomic_bool is_master_service_ = false;
   std::shared_ptr<EtcdClient> etcd_client_;
+  InstanceLifecycleEventDispatcher& lifecycle_events_;
 
   // L1 — cluster topology & channels
   mutable std::shared_mutex cluster_mutex_;
@@ -203,10 +203,6 @@ class InstanceMgr final {
   std::unordered_map<std::string, TimePredictor> time_predictors_;
   std::unordered_map<std::string, LatencyMetrics> latency_metrics_;
   std::unordered_map<std::string, RequestMetrics> request_metrics_;
-
-  // not own
-  // NOTE: need to refactor with scheduler in future
-  Scheduler* scheduler_;
 
   ThreadPool threadpool_;
   std::unique_ptr<std::thread> state_reconcile_thread_;

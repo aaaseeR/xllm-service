@@ -34,7 +34,11 @@ constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
 
 namespace xllm_service {
 
-Scheduler::Scheduler(const Options& options) : options_(options) {
+Scheduler::Scheduler(const Options& options)
+    : options_(options),
+      lifecycle_events_([this](const InstanceLifecycleEvent& event) {
+        handle_instance_lifecycle_event(event);
+      }) {
   GAUGE_SET(peer_service_enabled, options_.enable_peer_service() ? 1.0 : 0.0);
 
   tokenizer_ = TokenizerFactory::create_tokenizer(options_.tokenizer_path(),
@@ -109,7 +113,7 @@ Scheduler::Scheduler(const Options& options) : options_(options) {
   }
 
   instance_mgr_ = std::make_shared<InstanceMgr>(
-      options, etcd_client_, is_master_service_, this);
+      options, etcd_client_, is_master_service_, lifecycle_events_);
 
   if (options.load_balance_policy() == "CAR") {
     lb_policy_ =
@@ -143,6 +147,7 @@ Scheduler::~Scheduler() {
   if (heartbeat_thread_ && heartbeat_thread_->joinable()) {
     heartbeat_thread_->join();
   }
+  lifecycle_events_.close();
   lb_policy_.reset();
   instance_mgr_.reset();
   if (kv_event_subscriber_ != nullptr) {
@@ -505,6 +510,32 @@ void Scheduler::finish_request(const std::string& service_request_id,
   {
     std::lock_guard<std::mutex> guard(thread_map_mutex_);
     remote_requests_output_thread_map_.erase(service_request_id);
+  }
+}
+
+void Scheduler::handle_instance_lifecycle_event(
+    const InstanceLifecycleEvent& event) {
+  const InstanceMetaInfo& instance = event.instance;
+  switch (event.type) {
+    case InstanceLifecycleEventType::REGISTERED:
+      add_kv_event_source(instance);
+      return;
+    case InstanceLifecycleEventType::REGISTRATION_UPDATED:
+      clear_instance_cache(instance.name);
+      remove_kv_event_source(instance.name, instance.incarnation_id);
+      add_kv_event_source(instance);
+      return;
+    case InstanceLifecycleEventType::DEREGISTERING:
+      remove_kv_event_source(instance.name, instance.incarnation_id);
+      return;
+    case InstanceLifecycleEventType::DEREGISTERED:
+      clear_requests_on_failed_instance(
+          instance.name,
+          instance.incarnation_id,
+          instance.type == InstanceType::MIX ? instance.current_type
+                                             : instance.type);
+      clear_instance_cache(instance.name);
+      return;
   }
 }
 

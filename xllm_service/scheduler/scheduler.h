@@ -71,19 +71,6 @@ class Scheduler final {
   void finish_request(const std::string& service_request_id,
                       bool error = false);
 
-  void clear_requests_on_failed_instance(const std::string& instance_name,
-                                         const std::string& incarnation_id,
-                                         InstanceType type);
-  void clear_instance_cache(const std::string& instance_name);
-  void add_kv_event_source(const InstanceMetaInfo& info);
-  void remove_kv_event_source(const std::string& instance_name,
-                              const std::string& incarnation_id = "");
-  void record_instance_cache_event(const std::string& instance_name,
-                                   const proto::KvCacheEvent& cache_event);
-  void replace_instance_cache_snapshot(
-      const std::string& instance_name,
-      const proto::KvCacheEvent& cache_event);
-
   // handle generations from prefill/decode instance
   bool handle_generation(const llm::RequestOutput& request_output);
 
@@ -108,10 +95,26 @@ class Scheduler final {
   void handle_xservice_watch(const etcd::Response& response,
                              const uint64_t& prefix_len);
 
+  void handle_instance_lifecycle_event(
+      const InstanceLifecycleEvent& event);
+  void clear_requests_on_failed_instance(const std::string& instance_name,
+                                         const std::string& incarnation_id,
+                                         InstanceType type);
+  void clear_instance_cache(const std::string& instance_name);
+  void add_kv_event_source(const InstanceMetaInfo& info);
+  void remove_kv_event_source(const std::string& instance_name,
+                              const std::string& incarnation_id = "");
+  void record_instance_cache_event(const std::string& instance_name,
+                                   const proto::KvCacheEvent& cache_event);
+  void replace_instance_cache_snapshot(
+      const std::string& instance_name,
+      const proto::KvCacheEvent& cache_event);
+
   Tokenizer* get_tls_tokenizer();
 
  private:
   Options options_;
+  InstanceLifecycleEventDispatcher lifecycle_events_;
 
   bool exited_ = false;
   bool is_master_service_ = false;

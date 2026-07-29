@@ -38,7 +38,6 @@ limitations under the License.
 #include "common/xllm/output.h"
 #include "common/xllm/status.h"
 #include "disagg_pd.pb.h"
-#include "scheduler/scheduler.h"
 
 namespace {
 using xllm_service::InstanceRuntimeState;
@@ -105,13 +104,6 @@ size_t count_schedulable_instances(
   return count;
 }
 
-InstanceType get_cleanup_type(const xllm_service::InstanceMetaInfo& info) {
-  if (info.type == InstanceType::MIX) {
-    return info.current_type;
-  }
-  return info.type;
-}
-
 void validate_instance_cache_config(const xllm_service::Options& options,
                                     const xllm_service::InstanceMetaInfo& info) {
   if (info.block_size > 0 && info.block_size != options.block_size()) {
@@ -136,11 +128,11 @@ namespace xllm_service {
 InstanceMgr::InstanceMgr(const Options& options,
                          const std::shared_ptr<EtcdClient>& etcd_client,
                          const bool is_master_service,
-                         Scheduler* scheduler)
+                         InstanceLifecycleEventDispatcher& lifecycle_events)
     : options_(options),
       is_master_service_(is_master_service),
       etcd_client_(etcd_client),
-      scheduler_(scheduler) {
+      lifecycle_events_(lifecycle_events) {
   auto handle_instance_metainfo =
       std::bind(&InstanceMgr::update_instance_metainfo,
                 this,
@@ -693,11 +685,9 @@ void InstanceMgr::update_instance_metainfo(const etcd::Response& response,
           const bool should_update_kv_source =
               previous_zmq_endpoint != metainfo.zmq_endpoint;
           lock.unlock();
-          if (should_update_kv_source && scheduler_ != nullptr) {
-            scheduler_->clear_instance_cache(instance_name);
-            scheduler_->remove_kv_event_source(instance_name,
-                                               metainfo.incarnation_id);
-            scheduler_->add_kv_event_source(metainfo);
+          if (should_update_kv_source) {
+            lifecycle_events_.publish(
+                {InstanceLifecycleEventType::REGISTRATION_UPDATED, metainfo});
           }
           if (previous_state != InstanceRuntimeState::ACTIVE) {
             LOG(INFO) << "Instance registration restored, back to active: "
@@ -1340,9 +1330,8 @@ bool InstanceMgr::register_instance(const std::string& name,
     instances_.insert(std::make_pair(name, info));
     GAUGE_SET(xservice_instance_view_size, instances_.size());
   }
-  if (scheduler_ != nullptr) {
-    scheduler_->add_kv_event_source(info);
-  }
+  lifecycle_events_.publish(
+      {InstanceLifecycleEventType::REGISTERED, info});
   return true;
 }
 
@@ -1373,9 +1362,8 @@ void InstanceMgr::deregister_instance(
     gather_unlink_operations(name, info, &unlink_ops);
   }
 
-  if (scheduler_ != nullptr) {
-    scheduler_->remove_kv_event_source(name, info.incarnation_id);
-  }
+  lifecycle_events_.publish(
+      {InstanceLifecycleEventType::DEREGISTERING, info});
 
   for (const auto& op : unlink_ops) {
     call_unlink_instance(op.first, op.second);
@@ -1390,8 +1378,7 @@ void InstanceMgr::deregister_instance(
     remove_instance_from_index(name, it->second);
   }
 
-  scheduler_->clear_requests_on_failed_instance(
-      name, info.incarnation_id, get_cleanup_type(info));
+  lifecycle_events_.publish({InstanceLifecycleEventType::DEREGISTERED, info});
 
   {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
@@ -1427,8 +1414,6 @@ void InstanceMgr::remove_instance_resources(const std::string& name) {
   removed_instance_.insert(name);
   load_metrics_.erase(name);
   inflight_request_counts_.erase(name);
-  lock.unlock();
-  clear_instance_cache(name);
 }
 
 bool InstanceMgr::is_current_incarnation_locked(
@@ -1446,13 +1431,6 @@ bool InstanceMgr::is_current_incarnation_locked(
     return false;
   }
   return true;
-}
-
-void InstanceMgr::clear_instance_cache(const std::string& name) {
-  if (scheduler_ == nullptr) {
-    return;
-  }
-  scheduler_->clear_instance_cache(name);
 }
 
 bool InstanceMgr::gather_link_operations(

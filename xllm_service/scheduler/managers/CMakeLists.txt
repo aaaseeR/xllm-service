@@ -5,10 +5,12 @@ cc_library(
   NAME
    managers
   HDRS
+    instance_lifecycle_event.h
     instance_mgr.h
     global_kvcache_mgr.h
     kv_event_subscriber.h
   SRCS
+    instance_lifecycle_event.cpp
     instance_mgr.cpp
     global_kvcache_mgr.cpp
     kv_event_subscriber.cpp
@@ -24,6 +26,16 @@ cc_library(
     proto_xllm
 )
 target_link_libraries(managers PRIVATE brpc-static cppzmq)
+
+cc_test(
+  NAME
+    instance_lifecycle_event_test
+  SRCS
+    instance_lifecycle_event_test.cpp
+  DEPS
+    :managers
+    GTest::gtest_main
+)
 
 # Phase 3 §3.3-2: unit tests for GlobalKVCacheMgr::match() (built only with
 # -DBUILD_TESTING=ON; cc_test is a no-op otherwise).
