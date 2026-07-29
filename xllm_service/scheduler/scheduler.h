@@ -20,9 +20,9 @@ limitations under the License.
 #include "chat_template/jinja_chat_template.h"
 #include "common/call_data.h"
 #include "common/options.h"
-#include "common/threadpool.h"
 #include "common/xllm/output.h"
 #include "etcd_client/etcd_client.h"
+#include "execution/request_session_registry.h"
 #include "loadbalance_policy/loadbalance_policy.h"
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
@@ -68,8 +68,8 @@ class Scheduler final {
                           std::shared_ptr<Request> request);
   bool record_new_request(std::shared_ptr<CompletionCallData> call_data,
                           std::shared_ptr<Request> request);
-  void finish_request(const std::string& service_request_id,
-                      bool error = false);
+  bool handle_transport_failure(const std::string& service_request_id,
+                                const std::string& message);
 
   // handle generations from prefill/decode instance
   bool handle_generation(const llm::RequestOutput& request_output);
@@ -109,6 +109,11 @@ class Scheduler final {
   void replace_instance_cache_snapshot(
       const std::string& instance_name,
       const proto::KvCacheEvent& cache_event);
+  void observe_session_generation(
+      const std::shared_ptr<Request>& request,
+      const llm::RequestOutput& output);
+  void handle_session_terminal(const std::shared_ptr<Request>& request,
+                               RequestTerminalReason reason);
 
   Tokenizer* get_tls_tokenizer();
 
@@ -135,21 +140,9 @@ class Scheduler final {
   std::unique_ptr<LoadBalancePolicy> lb_policy_;
   std::unique_ptr<std::thread> heartbeat_thread_;
 
-  // `service request id` -> `request` map
-  std::unordered_map<std::string, std::shared_ptr<Request>> requests_;
-  std::mutex request_mutex_;
-
-  // use threadpool to handle all RequestOuputs queue
-  static constexpr size_t kOutputTheadNum_ = 128;  // magic num
-  ThreadPool output_threadpools_[kOutputTheadNum_];
-  // A request will be handled in the same thread to guarantee the token's
-  // order.
-  std::unordered_map<std::string, size_t> remote_requests_output_thread_map_;
-  size_t next_thread_idx = 0;
-  std::mutex thread_map_mutex_;
-
   // used when receive token from decode instance.
   ResponseHandler response_handler_;
+  std::unique_ptr<RequestSessionRegistry> request_registry_;
 };
 
 }  // namespace xllm_service

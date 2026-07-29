@@ -7,5 +7,6 @@ cc_library(
     request.h
   DEPS
     :backend_http
+    :chat_template
     :common
 )

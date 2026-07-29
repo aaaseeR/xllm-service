@@ -115,6 +115,16 @@ Scheduler::Scheduler(const Options& options)
   instance_mgr_ = std::make_shared<InstanceMgr>(
       options, etcd_client_, is_master_service_, lifecycle_events_);
 
+  request_registry_ = std::make_unique<RequestSessionRegistry>(
+      [this](const std::shared_ptr<Request>& request,
+             const llm::RequestOutput& output) {
+        observe_session_generation(request, output);
+      },
+      [this](const std::shared_ptr<Request>& request,
+             RequestTerminalReason reason) {
+        handle_session_terminal(request, reason);
+      });
+
   if (options.load_balance_policy() == "CAR") {
     lb_policy_ =
         std::make_unique<CacheAwareRouting>(instance_mgr_, global_kvcache_mgr_);
@@ -148,6 +158,9 @@ Scheduler::~Scheduler() {
     heartbeat_thread_->join();
   }
   lifecycle_events_.close();
+  if (request_registry_ != nullptr) {
+    request_registry_->close();
+  }
   lb_policy_.reset();
   instance_mgr_.reset();
   if (kv_event_subscriber_ != nullptr) {
@@ -346,46 +359,33 @@ Tokenizer* Scheduler::get_tls_tokenizer() {
 
 bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
                                    std::shared_ptr<Request> request) {
-  {
-    std::lock_guard<std::mutex> guard(request_mutex_);
-    if (requests_.find(request->service_request_id) != requests_.end()) {
-      LOG(ERROR) << "The request ID already exists. Requests with the same ID "
-                    "are not allowed. "
-                 << request->service_request_id;
-      instance_mgr_->record_request_finished(request);
-      instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
-      return false;
-    }
+  request->latest_generate_time = absl::Now();
+  auto tools_for_parse =
+      (request->tool_choice == "none" ? std::vector<JsonTool>{}
+                                      : request->tools);
+  auto tool_call_parser_pref = options_.tool_call_parser();
+  auto reasoning_parser_pref = options_.reasoning_parser();
+  std::shared_ptr<ChatStreamParseState> stream_state;
+  if (request->stream) {
+    stream_state = response_handler_.create_chat_stream_parse_state(
+        tools_for_parse,
+        request->model,
+        tool_call_parser_pref,
+        reasoning_parser_pref);
+  }
 
-    request->latest_generate_time = absl::Now();
-    auto tools_for_parse =
-        (request->tool_choice == "none" ? std::vector<JsonTool>{}
-                                        : request->tools);
-    auto tool_call_parser_pref = options_.tool_call_parser();
-    auto reasoning_parser_pref = options_.reasoning_parser();
-    std::shared_ptr<ChatStreamParseState> stream_state;
-    if (request->stream) {
-      stream_state = response_handler_.create_chat_stream_parse_state(
-          tools_for_parse,
-          request->model,
-          tool_call_parser_pref,
-          reasoning_parser_pref);
-    }
-
-    request->call_data = call_data;
-    request->output_callback =
-        [this,
-         call_data,
-         model = request->model,
-         stream = request->stream,
-         include_usage = request->include_usage,
-         tools = std::move(tools_for_parse),
-         tool_call_parser = std::move(tool_call_parser_pref),
-         reasoning_parser = std::move(reasoning_parser_pref),
-         stream_state = std::move(stream_state),
-         service_request_id = request->service_request_id,
-         created_time = absl::ToUnixSeconds(request->latest_generate_time)](
-            const llm::RequestOutput& req_output) mutable -> bool {
+  OutputCallback output_callback =
+      [this,
+       call_data,
+       model = request->model,
+       stream = request->stream,
+       include_usage = request->include_usage,
+       tools = std::move(tools_for_parse),
+       tool_call_parser = std::move(tool_call_parser_pref),
+       reasoning_parser = std::move(reasoning_parser_pref),
+       stream_state = std::move(stream_state),
+       created_time = absl::ToUnixSeconds(request->latest_generate_time)](
+          const llm::RequestOutput& req_output) mutable -> bool {
       if (req_output.status.has_value()) {
         const auto& status = req_output.status.value();
         if (!status.ok()) {
@@ -411,18 +411,19 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
                                                        reasoning_parser);
       }
       return true;
-    };
-    requests_.emplace(request->service_request_id, request);
-    COUNTER_INC(server_request_in_total);
-  }
+  };
 
-  {
-    // allocate thread for the request
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_[request->service_request_id] =
-        next_thread_idx;
-    next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
+  if (!request_registry_->register_request(
+          request,
+          std::move(output_callback),
+          [call_data]() { return call_data->is_disconnected(); })) {
+    LOG(ERROR) << "The request ID already exists or the registry is closed: "
+               << request->service_request_id;
+    instance_mgr_->record_request_finished(request);
+    instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
+    return false;
   }
+  COUNTER_INC(server_request_in_total);
 
   return true;
 }
@@ -430,29 +431,15 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
 bool Scheduler::record_new_request(
     std::shared_ptr<CompletionCallData> call_data,
     std::shared_ptr<Request> request) {
-  {
-    std::lock_guard<std::mutex> guard(request_mutex_);
-    if (requests_.find(request->service_request_id) != requests_.end()) {
-      LOG(ERROR) << "The request ID already exists. Requests with the same ID "
-                    "are not allowed. "
-                 << request->service_request_id;
-      instance_mgr_->record_request_finished(request);
-      instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
-      return false;
-    }
-
-    request->latest_generate_time = absl::Now();
-
-    request->call_data = call_data;
-    request->output_callback =
-        [this,
-         call_data,
-         model = request->model,
-         stream = request->stream,
-         include_usage = request->include_usage,
-         service_request_id = request->service_request_id,
-         created_time = absl::ToUnixSeconds(request->latest_generate_time)](
-            const llm::RequestOutput& req_output) mutable -> bool {
+  request->latest_generate_time = absl::Now();
+  OutputCallback output_callback =
+      [this,
+       call_data,
+       model = request->model,
+       stream = request->stream,
+       include_usage = request->include_usage,
+       created_time = absl::ToUnixSeconds(request->latest_generate_time)](
+          const llm::RequestOutput& req_output) mutable -> bool {
       if (req_output.status.has_value()) {
         const auto& status = req_output.status.value();
         if (!status.ok()) {
@@ -469,48 +456,27 @@ bool Scheduler::record_new_request(
             call_data, created_time, model, req_output);
       }
       return true;
-    };
-    requests_.emplace(request->service_request_id, request);
-    COUNTER_INC(server_request_in_total);
-  }
+  };
 
-  {
-    // allocate thread for the request
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_[request->service_request_id] =
-        next_thread_idx;
-    next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
+  if (!request_registry_->register_request(
+          request,
+          std::move(output_callback),
+          [call_data]() { return call_data->is_disconnected(); })) {
+    LOG(ERROR) << "The request ID already exists or the registry is closed: "
+               << request->service_request_id;
+    instance_mgr_->record_request_finished(request);
+    instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
+    return false;
   }
+  COUNTER_INC(server_request_in_total);
 
   return true;
 }
 
-void Scheduler::finish_request(const std::string& service_request_id,
-                               bool error) {
-  std::shared_ptr<Request> request;
-  {
-    std::lock_guard<std::mutex> guard(request_mutex_);
-    auto it = requests_.find(service_request_id);
-    if (it != requests_.end()) {
-      request = it->second;
-      requests_.erase(it);
-    }
-  }
-
-  if (request != nullptr) {
-    instance_mgr_->record_request_finished(request);
-    if (error) {
-      instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
-    } else {
-      instance_mgr_->update_request_metrics(request,
-                                            RequestAction::FINISH_DECODE);
-    }
-  }
-
-  {
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_.erase(service_request_id);
-  }
+bool Scheduler::handle_transport_failure(
+    const std::string& service_request_id,
+    const std::string& message) {
+  return request_registry_->on_transport_failure(service_request_id, message);
 }
 
 void Scheduler::handle_instance_lifecycle_event(
@@ -543,54 +509,8 @@ void Scheduler::clear_requests_on_failed_instance(
     const std::string& instance_name,
     const std::string& incarnation_id,
     InstanceType type) {
-  std::vector<std::string> cleared_request_ids;
-  std::vector<std::shared_ptr<Request>> cleared_requests;
-  {
-    std::lock_guard<std::mutex> lock(request_mutex_);
-    for (auto it = requests_.begin(); it != requests_.end();) {
-      const bool clear_default =
-          (type == InstanceType::DEFAULT &&
-           it->second->routing.prefill_name == instance_name &&
-           it->second->prefill_incarnation_id == incarnation_id);
-      const bool clear_prefill =
-          (type == InstanceType::PREFILL &&
-           it->second->routing.prefill_name == instance_name &&
-           it->second->prefill_incarnation_id == incarnation_id &&
-           !it->second->prefill_stage_finished);
-      const bool clear_decode =
-          (type == InstanceType::DECODE &&
-           it->second->routing.decode_name == instance_name &&
-           it->second->decode_incarnation_id == incarnation_id);
-      if (clear_default || clear_prefill || clear_decode) {
-        auto service_request_id = it->second->service_request_id;
-        llm::RequestOutput req_output;
-        req_output.status = llm::Status(llm::StatusCode::CANCELLED,
-                                        "Instance is failed and deleted");
-        // call request callback
-        it->second->output_callback(req_output);
-        LOG(INFO) << "Clear request on failed instance: " << instance_name
-                  << ", incarnation_id: " << incarnation_id
-                  << ", service_request_id: " << service_request_id;
-        cleared_request_ids.emplace_back(service_request_id);
-        cleared_requests.emplace_back(it->second);
-        it = requests_.erase(it);
-      } else {
-        ++it;
-      }
-    }
-  }
-
-  for (const auto& request : cleared_requests) {
-    instance_mgr_->record_request_finished(request);
-    instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
-  }
-
-  if (!cleared_request_ids.empty()) {
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    for (const auto& service_request_id : cleared_request_ids) {
-      remote_requests_output_thread_map_.erase(service_request_id);
-    }
-  }
+  request_registry_->on_instance_failure(
+      {instance_name, incarnation_id, type});
 }
 
 void Scheduler::clear_instance_cache(const std::string& instance_name) {
@@ -630,81 +550,47 @@ void Scheduler::replace_instance_cache_snapshot(
 }
 
 bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
-  bool finished_on_prefill_instance =
-      request_output.finished_on_prefill_instance;
-  const std::string& service_request_id = request_output.service_request_id;
-  bool status_error =
-      request_output.status.has_value() && !request_output.status.value().ok();
-
-  OutputCallback cb;
-  std::shared_ptr<Request> request;
-  bool client_disconnected = false;
-  {
-    std::lock_guard<std::mutex> guard(request_mutex_);
-    auto it = requests_.find(service_request_id);
-    if (it == requests_.end()) {
-      LOG(ERROR) << "Can not found the callback for the received request "
-                    "output, request id is: "
-                 << service_request_id;
-      return false;
-    }
-    request = it->second;
-    cb = request->output_callback;
-
-    // check client connection
-    if (request->call_data->is_disconnected()) {
-      LOG(INFO) << "Client has disconnected and the request will be cancelled, "
-                   "request id: "
-                << service_request_id;
-      requests_.erase(it);
-      client_disconnected = true;
-    }
+  const GenerationDispatchResult result =
+      request_registry_->on_generation(request_output);
+  if (result == GenerationDispatchResult::ACCEPTED) {
+    return true;
   }
-
-  if (client_disconnected) {
-    instance_mgr_->record_request_finished(request);
-    instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_.erase(service_request_id);
+  if (result == GenerationDispatchResult::CLIENT_DISCONNECTED) {
+    LOG(INFO) << "Client disconnected; request session was cancelled, "
+              << "request id: " << request_output.service_request_id;
     return false;
   }
-
-  if (!status_error) {
-    // no error, update instance request metrics
-    update_request_metrics(request, finished_on_prefill_instance);
-    update_token_latency_metrics(request, finished_on_prefill_instance);
+  if (result == GenerationDispatchResult::REGISTRY_CLOSED) {
+    LOG(WARNING) << "Generation ignored because request registry is closed, "
+                 << "request id: " << request_output.service_request_id;
+    return false;
   }
+  LOG(ERROR) << "Cannot find an active session for generation, request id: "
+             << request_output.service_request_id;
+  return false;
+}
 
-  size_t req_thread_idx = -1;
-  {
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    auto it = remote_requests_output_thread_map_.find(service_request_id);
-    if (it == remote_requests_output_thread_map_.end()) {
-      LOG(ERROR) << "Can not found the thread for the received request output, "
-                    "request id is: "
-                 << service_request_id;
-      return false;
-    }
-    req_thread_idx = it->second;
+void Scheduler::observe_session_generation(
+    const std::shared_ptr<Request>& request,
+    const llm::RequestOutput& output) {
+  update_request_metrics(request, output.finished_on_prefill_instance);
+  update_token_latency_metrics(request, output.finished_on_prefill_instance);
+}
+
+void Scheduler::handle_session_terminal(
+    const std::shared_ptr<Request>& request,
+    RequestTerminalReason reason) {
+  instance_mgr_->record_request_finished(request);
+  instance_mgr_->update_request_metrics(
+      request,
+      reason == RequestTerminalReason::COMPLETED
+          ? RequestAction::FINISH_DECODE
+          : RequestAction::CANCEL);
+  if (reason != RequestTerminalReason::COMPLETED) {
+    LOG(INFO) << "Request session terminated, request id: "
+              << request->service_request_id
+              << ", reason: " << request_terminal_reason_name(reason);
   }
-
-  output_threadpools_[req_thread_idx].schedule(
-      [this,
-       service_request_id,
-       cb,
-       status_error,
-       request_output = std::move(request_output)]() mutable {
-        if (!cb(request_output) || status_error) {
-          finish_request(service_request_id, true);
-          return;
-        }
-        if (request_output.finished) {
-          finish_request(service_request_id);
-          return;
-        }
-      });
-
-  return true;
 }
 
 void Scheduler::update_request_metrics(std::shared_ptr<Request> request,
@@ -753,6 +639,8 @@ nlohmann::json Scheduler::debug_summary() const {
   summary["kv_event_subscriber"] =
       kv_event_subscriber_ ? kv_event_subscriber_->debug_summary()
                            : nlohmann::json::object();
+  summary["active_request_sessions"] =
+      request_registry_ ? request_registry_->size() : 0;
   return summary;
 }
 

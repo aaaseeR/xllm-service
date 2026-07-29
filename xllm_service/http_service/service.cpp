@@ -257,17 +257,14 @@ void handle_non_stream_response(brpc::Controller* cntl,
 }
 
 // fire and forget
-template <typename T>
 void handle_first_send_request(brpc::Controller* cntl,
-                               std::shared_ptr<T> call_data,
                                Scheduler* scheduler,
-                               std::string service_request_id,
-                               bool stream) {
+                               std::string service_request_id) {
   std::unique_ptr<brpc::Controller> cntl_guard(cntl);
   if (cntl->Failed()) {
     LOG(ERROR) << "Fail to send stream generation, " << cntl->ErrorText();
-    call_data->finish_with_error(cntl->ErrorText());
-    scheduler->finish_request(service_request_id, /*error*/ true);
+    scheduler->handle_transport_failure(service_request_id,
+                                        cntl->ErrorText());
     return;
   }
 }
@@ -398,12 +395,10 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
   // xllm::proto::Status* resp_pb = new xllm::proto::Status();
   brpc::Controller* redirect_cntl = new brpc::Controller();
   google::protobuf::Closure* done =
-      brpc::NewCallback(&handle_first_send_request<T>,
+      brpc::NewCallback(&handle_first_send_request,
                         redirect_cntl,
-                        call_data,
                         scheduler_,
-                        request->service_request_id,
-                        request->stream);
+                        request->service_request_id);
 
   if constexpr (std::is_same_v<T, CompletionCallData>) {
     stub.Completions(redirect_cntl, &req_pb, nullptr, done);

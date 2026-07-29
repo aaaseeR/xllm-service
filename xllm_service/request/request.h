@@ -19,9 +19,7 @@ limitations under the License.
 
 #include "backend_http/request_context.h"
 #include "chat_template/jinja_chat_template.h"
-#include "common/call_data.h"
 #include "common/types.h"
-#include "common/xllm/output.h"
 
 namespace xllm_service {
 
@@ -75,11 +73,6 @@ struct Request {
 
   // the estimated TTFT obtained from the TTFT predictor
   int64_t estimated_ttft = 0;
-
-  // output callback
-  OutputCallback output_callback;
-
-  std::shared_ptr<CallData> call_data;
 
   // trace callback
   std::function<void(const std::string&)> trace_callback = nullptr;

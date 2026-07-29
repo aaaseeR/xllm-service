@@ -54,6 +54,7 @@ cc_library(
     :chat_template
     :common
     :etcd_client
+    :execution
     :loadbalance_policy
     :managers
     :request
