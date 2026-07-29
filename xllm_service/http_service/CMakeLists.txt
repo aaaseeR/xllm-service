@@ -1,5 +1,6 @@
 include(cc_binary)
 include(cc_library)
+include(cc_test)
 
 cc_library(
   NAME
@@ -14,6 +15,7 @@ cc_library(
     :backend_http
     :common
     :request
+    :runtime
     :scheduler
     :telemetry
     absl::random_random
@@ -24,6 +26,16 @@ cc_library(
     proto_xllm
 )
 target_link_libraries(xllm_http_service PRIVATE brpc-static leveldb::leveldb ZLIB::ZLIB protobuf::libprotobuf OpenSSL::SSL OpenSSL::Crypto)
+
+cc_test(
+  NAME
+    health_service_test
+  SRCS
+    health_service_test.cpp
+  DEPS
+    :xllm_http_service
+    GTest::gtest_main
+)
 
 cc_binary(
   NAME 

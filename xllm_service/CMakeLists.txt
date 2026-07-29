@@ -4,6 +4,7 @@ include(cc_test)
 
 add_subdirectory(proto)
 add_subdirectory(common)
+add_subdirectory(runtime)
 add_subdirectory(backend_http)
 add_subdirectory(telemetry)
 add_subdirectory(request)
@@ -23,6 +24,7 @@ cc_binary(
   DEPS
     :xllm_http_service
     :xllm_rpc_service
+    :runtime
 )
 
 add_subdirectory(examples)

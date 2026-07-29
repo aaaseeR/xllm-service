@@ -18,9 +18,12 @@ limitations under the License.
 #include <glog/logging.h>
 #include <grpcpp/grpcpp.h>
 
+#include <cstdlib>
+
 #include "common/global_gflags.h"
 #include "common/options.h"
 #include "http_service/service.h"
+#include "runtime/runtime_state.h"
 
 int main(int argc, char** argv) {
   // Initialize gflags
@@ -33,7 +36,11 @@ int main(int argc, char** argv) {
   LOG(INFO) << "Starting xllm http service, port: " << FLAGS_port;
 
   xllm_service::Options service_options;
-  xllm_service::XllmHttpServiceImpl service_impl(service_options, nullptr);
+  xllm_service::RuntimeState runtime_state;
+  runtime_state.set_backend_ready(false, "backend runtime is not configured");
+  runtime_state.mark_running();
+  xllm_service::XllmHttpServiceImpl service_impl(
+      service_options, nullptr, runtime_state);
 
   // register http methods here
   brpc::Server server;
@@ -41,20 +48,23 @@ int main(int argc, char** argv) {
                         brpc::SERVER_DOESNT_OWN_SERVICE,
                         "/hello => Hello,"
                         "/health => Health,"
+                        "/livez => Liveness,"
+                        "/readyz => Readiness,"
                         "/v1/completions => Completions,"
                         "/metrics => Metrics,"
                         "/debug/summary => DebugSummary,") != 0) {
     LOG(ERROR) << "Fail to add brpc http service";
-    return false;
+    return EXIT_FAILURE;
   }
 
   brpc::ServerOptions options;
   options.idle_timeout_sec = FLAGS_idle_timeout_s;
   options.num_threads = FLAGS_num_threads;
   options.max_concurrency = FLAGS_max_concurrency;
+  options.has_builtin_services = false;
   if (server.Start(FLAGS_port, &options) != 0) {
     LOG(ERROR) << "Failed to start brpc http server on port " << FLAGS_port;
-    return false;
+    return EXIT_FAILURE;
   }
 
   LOG(INFO) << "Xllm http server started on port " << FLAGS_port

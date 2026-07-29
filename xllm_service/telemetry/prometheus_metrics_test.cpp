@@ -44,10 +44,15 @@ TEST(PrometheusMetricsTest, BuildsSnapshotFromLegacyDebugSummary) {
         {"ssd_instance_count", 1}}}};
 
   PrometheusMetricsSnapshot snapshot = build_prometheus_metrics_snapshot(
-      summary, "fallback", /*block_size=*/128, /*ready=*/true);
+      summary,
+      "fallback",
+      /*block_size=*/128,
+      /*ready=*/true,
+      /*runtime_phase=*/"running");
 
   EXPECT_EQ(snapshot.service_name, "127.0.0.1:8889");
   EXPECT_TRUE(snapshot.ready);
+  EXPECT_EQ(snapshot.runtime_phase, "running");
   EXPECT_EQ(snapshot.instance_count, 2);
   EXPECT_EQ(snapshot.suspect_instance_count, 1);
   EXPECT_EQ(snapshot.total_waiting_requests, 8);
@@ -61,6 +66,7 @@ TEST(PrometheusMetricsTest, RendersLlmDCompatibleMetrics) {
   PrometheusMetricsSnapshot snapshot;
   snapshot.service_name = "127.0.0.1:8889";
   snapshot.ready = true;
+  snapshot.runtime_phase = "running";
   snapshot.block_size = 128;
   snapshot.total_waiting_requests = 8;
   snapshot.total_running_requests = 6;
@@ -69,6 +75,8 @@ TEST(PrometheusMetricsTest, RendersLlmDCompatibleMetrics) {
   std::string output = render_prometheus_metrics(snapshot);
 
   EXPECT_NE(output.find("xllm_service_routing_mode{mode=\"legacy\"} 1"),
+            std::string::npos);
+  EXPECT_NE(output.find("xllm_service_runtime_phase{phase=\"running\"} 1"),
             std::string::npos);
   EXPECT_NE(output.find("xllm_service_ready 1"), std::string::npos);
   EXPECT_NE(output.find("vllm:num_requests_waiting 8"), std::string::npos);

@@ -31,37 +31,70 @@ Master::Master(const Options& options) : options_(options) {
       std::make_unique<xllm_service::XllmRpcService>(options, scheduler_.get());
 
   http_service_ = std::make_unique<xllm_service::XllmHttpServiceImpl>(
-      options, scheduler_.get());
+      options, scheduler_.get(), runtime_state_);
 }
 
 Master::~Master() { stop(); }
 
 bool Master::start() {
+  if (stopped_.load()) {
+    LOG(ERROR) << "Cannot restart a stopped master.";
+    return false;
+  }
   if (!setup_http_server()) {
     return false;
   }
 
-  // 1. start readiness thread to manage http server lifecycle
-  readiness_thread_ = std::make_unique<std::thread>(
-      [this]() { manage_http_server_lifecycle(); });
+  if (http_server_.Start(http_endpoint_, &http_options_) != 0) {
+    LOG(ERROR) << "Failed to start HTTP server on: " << http_endpoint_;
+    return false;
+  }
+  http_server_started_ = true;
+  LOG(INFO) << "HTTP server started on: " << http_endpoint_;
 
-  // 2. start rpc server
-  rpc_server_thread_ =
-      std::make_unique<std::thread>([this]() { start_rpc_server(); });
+  if (!start_rpc_server()) {
+    stop();
+    return false;
+  }
+
+  runtime_state_.set_backend_ready(
+      scheduler_->has_available_instances(),
+      "no schedulable xLLM endpoint is available");
+  runtime_state_.mark_running();
+  readiness_thread_ = std::make_unique<std::thread>(
+      [this]() { reconcile_runtime_readiness(); });
 
   return true;
 }
 
 void Master::stop() {
-  stopped_.store(true);
+  if (stopped_.exchange(true)) {
+    return;
+  }
+
+  runtime_state_.begin_draining();
+
+  if (http_server_started_) {
+    http_server_.Stop(0);
+  }
+  if (rpc_server_started_) {
+    rpc_server_.Stop(0);
+  }
 
   if (readiness_thread_ && readiness_thread_->joinable()) {
     readiness_thread_->join();
   }
 
-  if (rpc_server_thread_ && rpc_server_thread_->joinable()) {
-    rpc_server_thread_->join();
+  if (http_server_started_) {
+    http_server_.Join();
+    http_server_started_ = false;
   }
+  if (rpc_server_started_) {
+    rpc_server_.Join();
+    rpc_server_started_ = false;
+  }
+
+  runtime_state_.mark_stopped();
 }
 
 bool Master::setup_http_server() {
@@ -70,26 +103,29 @@ bool Master::setup_http_server() {
                               // for testing
                               "/hello => Hello,"
                               "/health => Health,"
+                              "/livez => Liveness,"
+                              "/readyz => Readiness,"
                               "/v1/completions => Completions,"
                               "/v1/chat/completions => ChatCompletions,"
                               "/v1/embeddings => Embeddings,"
                               "/v1/models => Models,"
                               "/metrics => Metrics,"
                               "/debug/summary => DebugSummary,") != 0) {
-    LOG(FATAL) << "Fail to add http service";
+    LOG(ERROR) << "Failed to add HTTP service.";
     return false;
   }
 
   http_options_.idle_timeout_sec = options_.http_idle_timeout_s();
   http_options_.num_threads = options_.http_num_threads();
   http_options_.max_concurrency = options_.http_max_concurrency();
+  http_options_.has_builtin_services = false;
 
   if (!options_.server_host().empty()) {
     http_server_address_ =
         options_.server_host() + ":" + std::to_string(options_.http_port());
     if (butil::str2endpoint(http_server_address_.c_str(), &http_endpoint_) <
         0) {
-      LOG(FATAL) << "Convert server_addr to endpoint failed: "
+      LOG(ERROR) << "Convert server address to endpoint failed: "
                  << http_server_address_;
       return false;
     }
@@ -100,28 +136,12 @@ bool Master::setup_http_server() {
   return true;
 }
 
-void Master::manage_http_server_lifecycle() {
-  bool http_running = false;
+void Master::reconcile_runtime_readiness() {
   while (!stopped_.load()) {
-    bool has_instances = scheduler_->has_available_instances();
+    runtime_state_.set_backend_ready(
+        scheduler_->has_available_instances(),
+        "no schedulable xLLM endpoint is available");
 
-    if (has_instances && !http_running) {
-      if (http_server_.Start(http_endpoint_, &http_options_) == 0) {
-        LOG(INFO) << "HTTP server started, instances available, endpoint: "
-                  << http_endpoint_;
-        http_running = true;
-      } else {
-        LOG(ERROR) << "Failed to start HTTP server on: " << http_endpoint_;
-      }
-    } else if (!has_instances && http_running) {
-      LOG(WARNING) << "No available instances, stopping HTTP server.";
-      http_server_.Stop(0);
-      http_server_.Join();
-      http_running = false;
-      LOG(INFO) << "HTTP server stopped, waiting for instances to recover.";
-    }
-
-    // Sleep in small increments to be responsive to `stopped_` signal.
     const auto end_time =
         std::chrono::steady_clock::now() +
         std::chrono::seconds(FLAGS_readiness_check_interval_s);
@@ -129,17 +149,12 @@ void Master::manage_http_server_lifecycle() {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   }
-
-  if (http_running) {
-    http_server_.Stop(0);
-    http_server_.Join();
-  }
 }
 
 bool Master::start_rpc_server() {
   if (rpc_server_.AddService(rpc_service_.get(),
                              brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
-    LOG(FATAL) << "Failed to add rpc service.";
+    LOG(ERROR) << "Failed to add RPC service.";
     return false;
   }
 
@@ -153,7 +168,7 @@ bool Master::start_rpc_server() {
     rpc_server_address_ =
         options_.server_host() + ":" + std::to_string(options_.rpc_port());
     if (butil::str2endpoint(rpc_server_address_.c_str(), &endpoint) < 0) {
-      LOG(FATAL) << "Convert server_addr to endpoint failed: "
+      LOG(ERROR) << "Convert server address to endpoint failed: "
                  << rpc_server_address_;
       return false;
     }
@@ -162,23 +177,20 @@ bool Master::start_rpc_server() {
   }
 
   if (rpc_server_.Start(endpoint, &options) != 0) {
-    LOG(FATAL) << "Failed to start rpc server on: " << endpoint;
+    LOG(ERROR) << "Failed to start RPC server on: " << endpoint;
     return false;
   }
 
   LOG(INFO) << "Xllm rpc server started on: " << endpoint;
-
-  // Wait until Ctrl-C is pressed, then Stop() and Join() the server.
-  rpc_server_.RunUntilAskedToQuit();
+  rpc_server_started_ = true;
   return true;
 }
 
 }  // namespace xllm_service
 
-static std::atomic<uint32_t> g_signal_received{0};
+static volatile std::sig_atomic_t g_shutdown_signal = 0;
 void shutdown_handler(int signal) {
-  LOG(WARNING) << "Received signal " << signal << ", stopping master...";
-  exit(1);
+  g_shutdown_signal = signal;
 }
 
 int main(int argc, char* argv[]) {
@@ -252,14 +264,15 @@ int main(int argc, char* argv[]) {
   }
 
   // install graceful shutdown handler
-  (void)signal(SIGINT, shutdown_handler);
-  (void)signal(SIGTERM, shutdown_handler);
+  (void)std::signal(SIGINT, shutdown_handler);
+  (void)std::signal(SIGTERM, shutdown_handler);
 
-  while (g_signal_received.load(std::memory_order_relaxed) == 0) {
+  while (g_shutdown_signal == 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 
-  // wait here
+  LOG(WARNING) << "Received signal " << g_shutdown_signal
+               << ", stopping master...";
   master.stop();
 
   return 0;

@@ -23,6 +23,7 @@ limitations under the License.
 #include "common/options.h"
 #include "http_service/service.h"
 #include "rpc_service/service.h"
+#include "runtime/runtime_state.h"
 #include "scheduler/scheduler.h"
 
 namespace xllm_service {
@@ -37,11 +38,12 @@ class Master {
 
  private:
   bool setup_http_server();
-  void manage_http_server_lifecycle();
+  void reconcile_runtime_readiness();
   bool start_rpc_server();
 
  private:
   Options options_;
+  RuntimeState runtime_state_;
 
   // Scheduler for scheduling requests and instances
   std::unique_ptr<Scheduler> scheduler_;
@@ -52,6 +54,7 @@ class Master {
   brpc::Server http_server_;
   std::unique_ptr<std::thread> readiness_thread_;
   std::atomic<bool> stopped_{false};
+  bool http_server_started_ = false;
   brpc::ServerOptions http_options_;
   butil::EndPoint http_endpoint_;
 
@@ -59,7 +62,7 @@ class Master {
   std::string rpc_server_address_;
   std::unique_ptr<xllm_service::XllmRpcService> rpc_service_;
   brpc::Server rpc_server_;
-  std::unique_ptr<std::thread> rpc_server_thread_;
+  bool rpc_server_started_ = false;
 };
 
 }  // namespace xllm_service

@@ -35,10 +35,13 @@ namespace xllm_service {
 class Scheduler;
 class InstanceMgr;
 class ClosureGuard;
+class RuntimeState;
 
 class XllmHttpServiceImpl : public proto::XllmHttpService {
  public:
-  XllmHttpServiceImpl(const Options& options, Scheduler* scheduler);
+  XllmHttpServiceImpl(const Options& options,
+                      Scheduler* scheduler,
+                      RuntimeState& runtime_state);
   ~XllmHttpServiceImpl();
 
   void Hello(::google::protobuf::RpcController* controller,
@@ -50,6 +53,16 @@ class XllmHttpServiceImpl : public proto::XllmHttpService {
               const proto::HttpRequest* request,
               proto::HttpResponse* response,
               ::google::protobuf::Closure* done) override;
+
+  void Liveness(::google::protobuf::RpcController* controller,
+                const proto::HttpRequest* request,
+                proto::HttpResponse* response,
+                ::google::protobuf::Closure* done) override;
+
+  void Readiness(::google::protobuf::RpcController* controller,
+                 const proto::HttpRequest* request,
+                 proto::HttpResponse* response,
+                 ::google::protobuf::Closure* done) override;
 
   void Completions(::google::protobuf::RpcController* controller,
                    const proto::HttpRequest* request,
@@ -101,11 +114,15 @@ class XllmHttpServiceImpl : public proto::XllmHttpService {
                           proto::HttpResponse* response,
                           ::google::protobuf::Closure* done);
 
+  bool ensure_backend_ready(brpc::Controller* controller) const;
+
  private:
   Options options_;
 
   // not own
   Scheduler* scheduler_;
+
+  RuntimeState& runtime_state_;
 
   bool initialized_ = false;
 

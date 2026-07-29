@@ -164,7 +164,6 @@ DEFINE_string(tool_call_parser,
 
 DEFINE_int32(readiness_check_interval_s,
              3,
-             "Interval in seconds to check for available instance groups "
-             "before starting and during runtime of the HTTP service.");
+             "Interval in seconds to refresh backend readiness.");
 
 BRPC_VALIDATE_GFLAG(readiness_check_interval_s, brpc::PositiveInteger);

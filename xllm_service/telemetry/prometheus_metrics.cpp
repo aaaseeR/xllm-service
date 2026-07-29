@@ -122,11 +122,13 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
     const nlohmann::json& scheduler_summary,
     const std::string& service_name,
     int32_t block_size,
-    bool ready) {
+    bool ready,
+    const std::string& runtime_phase) {
   PrometheusMetricsSnapshot snapshot;
   snapshot.service_name = service_name;
   snapshot.block_size = block_size;
   snapshot.ready = ready;
+  snapshot.runtime_phase = runtime_phase;
 
   if (scheduler_summary.is_object() &&
       scheduler_summary.contains("service_name") &&
@@ -187,6 +189,12 @@ std::string render_prometheus_metrics(
                        "Routing authority mode for llm-d compatibility.",
                        "mode",
                        snapshot.routing_mode,
+                       1.0);
+  append_labeled_gauge(&out,
+                       "xllm_service_runtime_phase",
+                       "Current lifecycle phase of this backend adapter.",
+                       "phase",
+                       snapshot.runtime_phase,
                        1.0);
   append_labeled_gauge(&out,
                        "xllm_service_info",

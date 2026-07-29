@@ -43,6 +43,7 @@ limitations under the License.
 #include "common/xllm/status.h"
 #include "common/xllm/uuid.h"
 #include "completion.pb.h"
+#include "runtime/runtime_state.h"
 #include "scheduler/scheduler.h"
 #include "telemetry/prometheus_metrics.h"
 #include "xllm_service.pb.h"
@@ -118,8 +119,11 @@ std::vector<JsonTool> parse_tools_from_proto(
 }  // namespace
 
 XllmHttpServiceImpl::XllmHttpServiceImpl(const Options& options,
-                                         Scheduler* scheduler)
-    : options_(options), scheduler_(scheduler) {
+                                         Scheduler* scheduler,
+                                         RuntimeState& runtime_state)
+    : options_(options),
+      scheduler_(scheduler),
+      runtime_state_(runtime_state) {
   initialized_ = true;
   thread_pool_ = std::make_unique<ThreadPool>(options_.num_threads());
   request_tracer_ =
@@ -135,7 +139,7 @@ void XllmHttpServiceImpl::Hello(::google::protobuf::RpcController* controller,
   assert(initialized_);
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     return;
   }
 
@@ -151,20 +155,92 @@ void XllmHttpServiceImpl::Health(::google::protobuf::RpcController* controller,
   assert(initialized_);
   brpc::ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     if (controller) {
       reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
-          "brpc request | respose | controller is null");
+          "brpc request | response | controller is null");
     }
     return;
   }
 
   brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
-  bool ready = scheduler_ != nullptr && scheduler_->has_available_instances();
+  const RuntimeHealthSnapshot snapshot = runtime_state_.health_snapshot();
   cntl->http_response().set_content_type("text/plain");
   cntl->http_response().set_status_code(
-      ready ? brpc::HTTP_STATUS_OK : brpc::HTTP_STATUS_SERVICE_UNAVAILABLE);
-  cntl->response_attachment().append(ready ? "ok\n" : "unavailable\n");
+      snapshot.ready ? brpc::HTTP_STATUS_OK
+                     : brpc::HTTP_STATUS_SERVICE_UNAVAILABLE);
+  cntl->response_attachment().append(snapshot.ready ? "ok\n"
+                                                    : "unavailable\n");
+}
+
+void XllmHttpServiceImpl::Liveness(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  assert(initialized_);
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    if (controller) {
+      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
+          "brpc request | response | controller is null");
+    }
+    return;
+  }
+
+  brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
+  const RuntimeHealthSnapshot snapshot = runtime_state_.health_snapshot();
+  cntl->http_response().set_content_type("text/plain");
+  cntl->http_response().set_status_code(
+      snapshot.live ? brpc::HTTP_STATUS_OK
+                    : brpc::HTTP_STATUS_SERVICE_UNAVAILABLE);
+  cntl->response_attachment().append(snapshot.live ? "ok\n" : "stopped\n");
+}
+
+void XllmHttpServiceImpl::Readiness(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest* request,
+    proto::HttpResponse* response,
+    ::google::protobuf::Closure* done) {
+  assert(initialized_);
+  brpc::ClosureGuard done_guard(done);
+  if (!request || !response || !controller) {
+    LOG(ERROR) << "brpc request | response | controller is null";
+    if (controller) {
+      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
+          "brpc request | response | controller is null");
+    }
+    return;
+  }
+
+  brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
+  const RuntimeHealthSnapshot snapshot = runtime_state_.health_snapshot();
+  cntl->http_response().set_content_type("text/plain");
+  cntl->http_response().set_status_code(
+      snapshot.ready ? brpc::HTTP_STATUS_OK
+                     : brpc::HTTP_STATUS_SERVICE_UNAVAILABLE);
+  cntl->response_attachment().append(snapshot.ready ? "ready\n"
+                                                    : snapshot.reason + "\n");
+}
+
+bool XllmHttpServiceImpl::ensure_backend_ready(
+    brpc::Controller* controller) const {
+  const RuntimeHealthSnapshot snapshot = runtime_state_.health_snapshot();
+  if (snapshot.ready) {
+    return true;
+  }
+
+  nlohmann::json error = {
+      {"error",
+       {{"message", snapshot.reason.empty() ? "backend is not ready"
+                                             : snapshot.reason},
+        {"type", "service_unavailable"}}}};
+  controller->http_response().set_content_type("application/json");
+  controller->http_response().set_status_code(
+      brpc::HTTP_STATUS_SERVICE_UNAVAILABLE);
+  controller->response_attachment().append(error.dump());
+  return false;
 }
 
 namespace {
@@ -413,8 +489,13 @@ void XllmHttpServiceImpl::get_serving_models(
   auto cntl = reinterpret_cast<brpc::Controller*>(controller);
 
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
-    cntl->SetFailed("brpc request | respose | controller is null");
+    LOG(ERROR) << "brpc request | response | controller is null";
+    if (cntl) {
+      cntl->SetFailed("brpc request | response | controller is null");
+    }
+    return;
+  }
+  if (!ensure_backend_ready(cntl)) {
     return;
   }
   auto arena = response->GetArena();
@@ -455,8 +536,13 @@ void XllmHttpServiceImpl::Completions(
   auto cntl = reinterpret_cast<brpc::Controller*>(controller);
 
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
-    cntl->SetFailed("brpc request | respose | controller is null");
+    LOG(ERROR) << "brpc request | response | controller is null";
+    if (cntl) {
+      cntl->SetFailed("brpc request | response | controller is null");
+    }
+    return;
+  }
+  if (!ensure_backend_ready(cntl)) {
     return;
   }
 
@@ -518,8 +604,13 @@ void XllmHttpServiceImpl::ChatCompletions(
   auto cntl = reinterpret_cast<brpc::Controller*>(controller);
 
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
-    cntl->SetFailed("brpc request | respose | controller is null");
+    LOG(ERROR) << "brpc request | response | controller is null";
+    if (cntl) {
+      cntl->SetFailed("brpc request | response | controller is null");
+    }
+    return;
+  }
+  if (!ensure_backend_ready(cntl)) {
     return;
   }
 
@@ -597,8 +688,10 @@ void XllmHttpServiceImpl::Embeddings(
   auto cntl = reinterpret_cast<brpc::Controller*>(controller);
 
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
-    cntl->SetFailed("brpc request | respose | controller is null");
+    LOG(ERROR) << "brpc request | response | controller is null";
+    if (cntl) {
+      cntl->SetFailed("brpc request | response | controller is null");
+    }
     return;
   }
 
@@ -620,24 +713,27 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
   assert(initialized_);
   ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     if (controller) {
       reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
-          "brpc request | respose | controller is null");
+          "brpc request | response | controller is null");
     }
     return;
   }
 
   brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
   nlohmann::json summary = nlohmann::json::object();
-  bool ready = false;
   if (scheduler_ != nullptr) {
     summary = scheduler_->debug_summary();
-    ready = scheduler_->has_available_instances();
   }
 
+  const RuntimeHealthSnapshot health = runtime_state_.health_snapshot();
   PrometheusMetricsSnapshot snapshot = build_prometheus_metrics_snapshot(
-      summary, options_.service_name(), options_.block_size(), ready);
+      summary,
+      options_.service_name(),
+      options_.block_size(),
+      health.ready,
+      runtime_phase_name(health.phase));
   cntl->http_response().set_content_type("text/plain; version=0.0.4");
   cntl->response_attachment().append(render_prometheus_metrics(snapshot));
 }
@@ -650,10 +746,10 @@ void XllmHttpServiceImpl::DebugSummary(
   assert(initialized_);
   ClosureGuard done_guard(done);
   if (!request || !response || !controller) {
-    LOG(ERROR) << "brpc request | respose | controller is null";
+    LOG(ERROR) << "brpc request | response | controller is null";
     if (controller) {
       reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
-          "brpc request | respose | controller is null");
+          "brpc request | response | controller is null");
     }
     return;
   }
@@ -662,11 +758,14 @@ void XllmHttpServiceImpl::DebugSummary(
   nlohmann::json summary = nlohmann::json::object();
   if (scheduler_ != nullptr) {
     summary = scheduler_->debug_summary();
-    summary["ready"] = scheduler_->has_available_instances();
   } else {
     summary["service_name"] = options_.service_name();
-    summary["ready"] = false;
   }
+  const RuntimeHealthSnapshot health = runtime_state_.health_snapshot();
+  summary["live"] = health.live;
+  summary["ready"] = health.ready;
+  summary["readiness_reason"] = health.reason;
+  summary["runtime_phase"] = runtime_phase_name(health.phase);
   cntl->http_response().set_content_type("application/json");
   cntl->response_attachment().append(summary.dump());
 }

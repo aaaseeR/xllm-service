@@ -21,6 +21,8 @@ message HttpResponse {
 service XllmHttpService {
   rpc Hello(HttpHelloRequest) returns (HttpHelloResponse) {}
   rpc Health (HttpRequest) returns (HttpResponse) {}
+  rpc Liveness (HttpRequest) returns (HttpResponse) {}
+  rpc Readiness (HttpRequest) returns (HttpResponse) {}
   rpc Completions (HttpRequest) returns (HttpResponse) {}
   rpc ChatCompletions (HttpRequest) returns (HttpResponse) {}
   rpc Embeddings (HttpRequest) returns (HttpResponse) {}

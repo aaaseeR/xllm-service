@@ -25,6 +25,7 @@ namespace xllm_service {
 struct PrometheusMetricsSnapshot {
   std::string service_name;
   bool ready = false;
+  std::string runtime_phase = "starting";
   std::string routing_mode = "legacy";
   int32_t block_size = 0;
   uint64_t instance_count = 0;
@@ -47,7 +48,8 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
     const nlohmann::json& scheduler_summary,
     const std::string& service_name,
     int32_t block_size,
-    bool ready);
+    bool ready,
+    const std::string& runtime_phase);
 
 std::string render_prometheus_metrics(
     const PrometheusMetricsSnapshot& snapshot);
