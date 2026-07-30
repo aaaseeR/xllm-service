@@ -9,4 +9,5 @@ cc_library(
     :backend_http
     :chat_template
     :common
+    :routing
 )

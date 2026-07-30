@@ -24,6 +24,7 @@ limitations under the License.
 #include "chat.pb.h"
 #include "completion.pb.h"
 #include "models.pb.h"
+#include "routing/routing_decision.h"
 #include "transport/channel_pool.h"
 #include "transport/types.h"
 
@@ -52,12 +53,10 @@ class Dispatcher final {
   Dispatcher(const Dispatcher&) = delete;
   Dispatcher& operator=(const Dispatcher&) = delete;
 
-  bool dispatch_completion(const std::string& endpoint,
-                           const std::string& incarnation_id,
+  bool dispatch_completion(const RoutingDecision& decision,
                            const std::string& request_id,
                            const xllm::proto::CompletionRequest& request);
-  bool dispatch_chat(const std::string& endpoint,
-                     const std::string& incarnation_id,
+  bool dispatch_chat(const RoutingDecision& decision,
                      const std::string& request_id,
                      const xllm::proto::ChatRequest& request);
   bool dispatch_models(const std::string& endpoint,

@@ -33,6 +33,14 @@ limitations under the License.
 namespace xllm_service {
 namespace {
 
+RoutingDecision make_routing_decision(const std::string& endpoint,
+                                      const std::string& incarnation) {
+  RoutingDecision decision;
+  decision.prefill_endpoint = endpoint;
+  decision.prefill_incarnation = incarnation;
+  return decision;
+}
+
 class DelayedCompletionService final
     : public xllm::proto::XllmAPIService {
  public:
@@ -86,16 +94,41 @@ TEST(DispatcherTest, ReportsUnavailableGenerationChannel) {
       [&results](const TransportResult& result) { results.push_back(result); });
 
   xllm::proto::CompletionRequest request;
-  EXPECT_TRUE(dispatcher.dispatch_completion("127.0.0.1:8000",
-                                             "incarnation-1",
-                                             "request-1",
-                                             request));
+  EXPECT_TRUE(dispatcher.dispatch_completion(
+      make_routing_decision("127.0.0.1:8000", "incarnation-1"),
+      "request-1",
+      request));
 
   ASSERT_EQ(results.size(), 1);
   EXPECT_EQ(results[0].request_id, "request-1");
   EXPECT_EQ(results[0].code, TransportResultCode::CHANNEL_UNAVAILABLE);
   EXPECT_EQ(results[0].failure_stage,
             TransportFailureStage::BEFORE_FIRST_TOKEN);
+  EXPECT_EQ(dispatcher.stats().inflight, 0);
+  EXPECT_EQ(dispatcher.stats().transport_failure_total, 1);
+}
+
+TEST(DispatcherTest, ReportsInvalidRoutingDecision) {
+  auto pool = std::make_shared<ChannelPool>([](const std::string&) {
+    return std::shared_ptr<brpc::Channel>();
+  });
+  TransportResult observed;
+  int observer_count = 0;
+  Dispatcher dispatcher(pool, [&](const TransportResult& result) {
+    observed = result;
+    ++observer_count;
+  });
+
+  RoutingDecision decision;
+  decision.prefill_endpoint = "127.0.0.1:8000";
+  xllm::proto::CompletionRequest request;
+  EXPECT_TRUE(
+      dispatcher.dispatch_completion(decision, "request-1", request));
+
+  EXPECT_EQ(observer_count, 1);
+  EXPECT_EQ(observed.request_id, "request-1");
+  EXPECT_EQ(observed.code,
+            TransportResultCode::INVALID_ROUTING_DECISION);
   EXPECT_EQ(dispatcher.stats().inflight, 0);
   EXPECT_EQ(dispatcher.stats().transport_failure_total, 1);
 }
@@ -136,10 +169,10 @@ TEST(DispatcherTest, RejectsDispatchAfterClose) {
   dispatcher.close();
 
   xllm::proto::ChatRequest request;
-  EXPECT_FALSE(dispatcher.dispatch_chat("127.0.0.1:8000",
-                                       "incarnation-1",
-                                       "request-1",
-                                       request));
+  EXPECT_FALSE(dispatcher.dispatch_chat(
+      make_routing_decision("127.0.0.1:8000", "incarnation-1"),
+      "request-1",
+      request));
   EXPECT_EQ(observer_count, 0);
 }
 
@@ -172,10 +205,10 @@ TEST(DispatcherTest, CloseCancelsInflightRpc) {
       });
   xllm::proto::CompletionRequest request;
   request.set_service_request_id("request-owned-by-dispatcher");
-  ASSERT_TRUE(dispatcher.dispatch_completion(endpoint,
-                                             "incarnation-1",
-                                             "request-1",
-                                             request));
+  ASSERT_TRUE(dispatcher.dispatch_completion(
+      make_routing_decision(endpoint, "incarnation-1"),
+      "request-1",
+      request));
   const bool request_received = service.wait_until_received();
   EXPECT_TRUE(request_received);
   if (!request_received) {
@@ -245,10 +278,10 @@ TEST(DispatcherTest, CloseRejectsDispatchWaitingForChannelCreation) {
   xllm::proto::CompletionRequest request;
   std::atomic<bool> dispatched{false};
   std::thread dispatch_thread([&]() {
-    dispatched.store(dispatcher.dispatch_completion("127.0.0.1:8000",
-                                                    "incarnation-1",
-                                                    "request-1",
-                                                    request));
+    dispatched.store(dispatcher.dispatch_completion(
+        make_routing_decision("127.0.0.1:8000", "incarnation-1"),
+        "request-1",
+        request));
   });
 
   bool factory_was_entered = false;

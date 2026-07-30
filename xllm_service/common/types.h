@@ -40,20 +40,6 @@ using XXH3KeyCacheMap = std::unordered_map<XXH3Key,
                                            FixedStringKeyHash,
                                            FixedStringKeyEqual>;
 
-struct Routing {
-  std::string prefill_name;
-  std::string decode_name;
-
-  nlohmann::json serialize_to_json() const {
-    nlohmann::json json_val;
-    json_val["prefill_name"] = prefill_name;
-    json_val["decode_name"] = decode_name;
-    return json_val;
-  }
-
-  std::string debug_string() const { return serialize_to_json().dump(2); }
-};
-
 enum class ErrorCode : int32_t {
   OK = 0,
   INTERNAL_ERROR = 1,

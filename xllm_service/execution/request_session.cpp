@@ -167,17 +167,17 @@ bool RequestSession::client_disconnected() const {
 
 bool RequestSession::matches(const InstanceFailure& failure) const {
   if (failure.type == InstanceType::DEFAULT) {
-    return request_->routing.prefill_name == failure.instance_name &&
-           request_->prefill_incarnation_id == failure.incarnation_id;
+    return request_->routing.prefill_endpoint == failure.instance_name &&
+           request_->routing.prefill_incarnation == failure.incarnation_id;
   }
   if (failure.type == InstanceType::PREFILL) {
-    return request_->routing.prefill_name == failure.instance_name &&
-           request_->prefill_incarnation_id == failure.incarnation_id &&
+    return request_->routing.prefill_endpoint == failure.instance_name &&
+           request_->routing.prefill_incarnation == failure.incarnation_id &&
            !request_->prefill_stage_finished;
   }
   if (failure.type == InstanceType::DECODE) {
-    return request_->routing.decode_name == failure.instance_name &&
-           request_->decode_incarnation_id == failure.incarnation_id;
+    return request_->routing.decode_endpoint == failure.instance_name &&
+           request_->routing.decode_incarnation == failure.incarnation_id;
   }
   return false;
 }

@@ -20,6 +20,7 @@ limitations under the License.
 #include "backend_http/request_context.h"
 #include "chat_template/jinja_chat_template.h"
 #include "common/types.h"
+#include "routing/routing_decision.h"
 
 namespace xllm_service {
 
@@ -60,10 +61,8 @@ struct Request {
   // token ids of prompt
   std::vector<int32_t> token_ids;
 
-  // instance routing
-  Routing routing;
-  std::string prefill_incarnation_id;
-  std::string decode_incarnation_id;
+  // Versioned execution contract produced by the active routing authority.
+  RoutingDecision routing;
 
   // prefill stage finished
   bool prefill_stage_finished = false;

@@ -224,26 +224,26 @@ bool InstanceMgr::can_route_prefill_without_decode_locked(
   return true;
 }
 
-bool InstanceMgr::get_next_instance_pair(Routing* routing) {
+bool InstanceMgr::get_next_instance_pair(RoutingDecision* routing) {
   std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
   if (prefill_index_.empty()) {
     LOG(ERROR) << "No prefill or default instance found!";
     return false;
   }
 
-  routing->decode_name.clear();
+  routing->decode_endpoint.clear();
   if (suspect_instances_.empty()) {
     // Fast path for the common case: no suspect instances, keep plain RR.
     next_prefill_index_ = next_prefill_index_ % prefill_index_.size();
-    routing->prefill_name = prefill_index_[next_prefill_index_];
+    routing->prefill_endpoint = prefill_index_[next_prefill_index_];
     next_prefill_index_++;
 
     if (decode_index_.empty()) {
-      return can_route_prefill_without_decode_locked(routing->prefill_name);
+      return can_route_prefill_without_decode_locked(routing->prefill_endpoint);
     }
 
     next_decode_index_ = next_decode_index_ % decode_index_.size();
-    routing->decode_name = decode_index_[next_decode_index_];
+    routing->decode_endpoint = decode_index_[next_decode_index_];
     next_decode_index_++;
     return true;
   }
@@ -251,17 +251,19 @@ bool InstanceMgr::get_next_instance_pair(Routing* routing) {
   if (!select_next_schedulable_instance(instances_,
                                         prefill_index_,
                                         &next_prefill_index_,
-                                        &routing->prefill_name)) {
+                                        &routing->prefill_endpoint)) {
     LOG(ERROR) << "No schedulable prefill or default instance found!";
     return false;
   }
 
   if (decode_index_.empty()) {
-    return can_route_prefill_without_decode_locked(routing->prefill_name);
+    return can_route_prefill_without_decode_locked(routing->prefill_endpoint);
   }
 
-  select_next_schedulable_instance(
-      instances_, decode_index_, &next_decode_index_, &routing->decode_name);
+  select_next_schedulable_instance(instances_,
+                                   decode_index_,
+                                   &next_decode_index_,
+                                   &routing->decode_endpoint);
   return true;
 }
 
@@ -436,12 +438,12 @@ void InstanceMgr::record_dispatch(const std::shared_ptr<Request>& request) {
     return;
   }
   std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
-  if (!request->routing.prefill_name.empty()) {
-    ++inflight_request_counts_[request->routing.prefill_name];
+  if (!request->routing.prefill_endpoint.empty()) {
+    ++inflight_request_counts_[request->routing.prefill_endpoint];
   }
-  if (!request->routing.decode_name.empty() &&
-      request->routing.decode_name != request->routing.prefill_name) {
-    ++inflight_request_counts_[request->routing.decode_name];
+  if (!request->routing.decode_endpoint.empty() &&
+      request->routing.decode_endpoint != request->routing.prefill_endpoint) {
+    ++inflight_request_counts_[request->routing.decode_endpoint];
   }
 }
 
@@ -451,14 +453,14 @@ void InstanceMgr::record_prefill_finished(
     return;
   }
   const bool has_separate_decode =
-      !request->routing.decode_name.empty() &&
-      request->routing.decode_name != request->routing.prefill_name;
+      !request->routing.decode_endpoint.empty() &&
+      request->routing.decode_endpoint != request->routing.prefill_endpoint;
   if (!has_separate_decode) {
     return;
   }
 
   std::unique_lock<std::shared_mutex> lock(metrics_mutex_);
-  auto it = inflight_request_counts_.find(request->routing.prefill_name);
+  auto it = inflight_request_counts_.find(request->routing.prefill_endpoint);
   if (it == inflight_request_counts_.end()) {
     return;
   }
@@ -486,17 +488,17 @@ void InstanceMgr::record_request_finished(
       --it->second;
     }
   };
-  if (!request->routing.prefill_name.empty()) {
+  if (!request->routing.prefill_endpoint.empty()) {
     const bool has_separate_decode =
-        !request->routing.decode_name.empty() &&
-        request->routing.decode_name != request->routing.prefill_name;
+        !request->routing.decode_endpoint.empty() &&
+        request->routing.decode_endpoint != request->routing.prefill_endpoint;
     if (!request->prefill_stage_finished || !has_separate_decode) {
-      decrement(request->routing.prefill_name);
+      decrement(request->routing.prefill_endpoint);
     }
   }
-  if (!request->routing.decode_name.empty() &&
-      request->routing.decode_name != request->routing.prefill_name) {
-    decrement(request->routing.decode_name);
+  if (!request->routing.decode_endpoint.empty() &&
+      request->routing.decode_endpoint != request->routing.prefill_endpoint) {
+    decrement(request->routing.decode_endpoint);
   }
 }
 
@@ -505,39 +507,39 @@ bool InstanceMgr::bind_request_instance_incarnations(
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
 
   // Bind the selected routing to a concrete incarnation before dispatch.
-  request->prefill_incarnation_id.clear();
-  request->decode_incarnation_id.clear();
+  request->routing.prefill_incarnation.clear();
+  request->routing.decode_incarnation.clear();
 
-  if (!request->routing.prefill_name.empty()) {
-    auto prefill_it = instances_.find(request->routing.prefill_name);
+  if (!request->routing.prefill_endpoint.empty()) {
+    auto prefill_it = instances_.find(request->routing.prefill_endpoint);
     if (prefill_it == instances_.end()) {
       LOG(ERROR) << "Prefill instance is not registered when binding request: "
-                 << request->routing.prefill_name;
+                 << request->routing.prefill_endpoint;
       return false;
     }
     if (!is_instance_schedulable(prefill_it->second)) {
       LOG(ERROR) << "Prefill instance is not schedulable when binding request: "
-                 << request->routing.prefill_name << ", state: "
+                 << request->routing.prefill_endpoint << ", state: "
                  << runtime_state_name(prefill_it->second.runtime_state);
       return false;
     }
-    request->prefill_incarnation_id = prefill_it->second.incarnation_id;
+    request->routing.prefill_incarnation = prefill_it->second.incarnation_id;
   }
 
-  if (!request->routing.decode_name.empty()) {
-    auto decode_it = instances_.find(request->routing.decode_name);
+  if (!request->routing.decode_endpoint.empty()) {
+    auto decode_it = instances_.find(request->routing.decode_endpoint);
     if (decode_it == instances_.end()) {
       LOG(ERROR) << "Decode instance is not registered when binding request: "
-                 << request->routing.decode_name;
+                 << request->routing.decode_endpoint;
       return false;
     }
     if (!is_instance_schedulable(decode_it->second)) {
       LOG(ERROR) << "Decode instance is not schedulable when binding request: "
-                 << request->routing.decode_name << ", state: "
+                 << request->routing.decode_endpoint << ", state: "
                  << runtime_state_name(decode_it->second.runtime_state);
       return false;
     }
-    request->decode_incarnation_id = decode_it->second.incarnation_id;
+    request->routing.decode_incarnation = decode_it->second.incarnation_id;
   }
 
   return true;
@@ -921,16 +923,16 @@ void InstanceMgr::update_request_metrics(std::shared_ptr<Request> request,
   std::scoped_lock<std::shared_mutex, std::shared_mutex> lock(cluster_mutex_,
                                                               metrics_mutex_);
 
-  auto prefill_it = request_metrics_.find(request->routing.prefill_name);
+  auto prefill_it = request_metrics_.find(request->routing.prefill_endpoint);
   if (prefill_it == request_metrics_.end()) {
     LOG(ERROR) << "Failed to find instance request metrics, instance name : "
-               << request->routing.prefill_name;
+               << request->routing.prefill_endpoint;
     return;
   }
 
-  const std::string decode_name = request->routing.decode_name.empty()
-                                      ? request->routing.prefill_name
-                                      : request->routing.decode_name;
+  const std::string decode_name = request->routing.decode_endpoint.empty()
+                                      ? request->routing.prefill_endpoint
+                                      : request->routing.decode_endpoint;
   auto decode_it = request_metrics_.find(decode_name);
   if (decode_it == request_metrics_.end()) {
     LOG(ERROR) << "Failed to find instance request metrics, instance name : "
@@ -990,8 +992,8 @@ void InstanceMgr::update_request_metrics(std::shared_ptr<Request> request,
   }
 
   if (decode_it->second.decode_request_num == 0 &&
-      !request->routing.decode_name.empty()) {
-    flip_decode_to_prefill(request->routing.decode_name);
+      !request->routing.decode_endpoint.empty()) {
+    flip_decode_to_prefill(request->routing.decode_endpoint);
   }
 }
 
@@ -1063,9 +1065,9 @@ bool InstanceMgr::select_instance_pair_on_slo(
   }
 
   if (!target_decode_instance.empty()) {
-    request->routing.decode_name = target_decode_instance;
+    request->routing.decode_endpoint = target_decode_instance;
   } else {
-    request->routing.decode_name = min_decode_instance;
+    request->routing.decode_endpoint = min_decode_instance;
   }
 
   // select prefill instance
@@ -1080,7 +1082,7 @@ bool InstanceMgr::select_instance_pair_on_slo(
       min_estimated_tpot < FLAGS_target_tpot * tpot_threshold &&
       request_metrics_[min_decode_instance].estimated_prefill_time <
           min_prefill_time) {
-    request->routing.prefill_name = min_decode_instance;
+    request->routing.prefill_endpoint = min_decode_instance;
     // update estimated ttft
     auto& time_predictor = get_time_predictor(min_decode_instance);
     request->estimated_ttft =
@@ -1088,7 +1090,7 @@ bool InstanceMgr::select_instance_pair_on_slo(
     request_metrics_[min_decode_instance].estimated_prefill_time +=
         request->estimated_ttft;
   } else {
-    request->routing.prefill_name = min_prefill_instance;
+    request->routing.prefill_endpoint = min_prefill_instance;
     // update estimated ttft
     auto& time_predictor = get_time_predictor(min_prefill_instance);
     request->estimated_ttft =
@@ -1107,7 +1109,7 @@ bool InstanceMgr::select_instance_pair_on_slo(
   if (target_decode_instance.empty() &&
       (avg_prefill_time < FLAGS_target_ttft * ttft_threshold ||
        schedulable_decode_count < schedulable_prefill_count)) {
-    flip_prefill_to_decode(request->routing.prefill_name);
+    flip_prefill_to_decode(request->routing.prefill_endpoint);
   }
 
   return true;

@@ -26,10 +26,10 @@ namespace {
 std::shared_ptr<Request> make_request() {
   auto request = std::make_shared<Request>();
   request->service_request_id = "request-1";
-  request->routing.prefill_name = "prefill-0";
-  request->routing.decode_name = "decode-0";
-  request->prefill_incarnation_id = "prefill-incarnation";
-  request->decode_incarnation_id = "decode-incarnation";
+  request->routing.prefill_endpoint = "prefill-0";
+  request->routing.decode_endpoint = "decode-0";
+  request->routing.prefill_incarnation = "prefill-incarnation";
+  request->routing.decode_incarnation = "decode-incarnation";
   return request;
 }
 

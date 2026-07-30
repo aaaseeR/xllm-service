@@ -331,15 +331,13 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
   if constexpr (std::is_same_v<T, CompletionCallData>) {
     dispatched = dispatcher_ != nullptr &&
                  dispatcher_->dispatch_completion(
-                     request->routing.prefill_name,
-                     request->prefill_incarnation_id,
+                     request->routing,
                      request->service_request_id,
                      req_pb);
   } else if constexpr (std::is_same_v<T, ChatCallData>) {
     dispatched = dispatcher_ != nullptr &&
                  dispatcher_->dispatch_chat(
-                     request->routing.prefill_name,
-                     request->prefill_incarnation_id,
+                     request->routing,
                      request->service_request_id,
                      req_pb);
   } else {
@@ -447,8 +445,8 @@ void XllmHttpServiceImpl::get_serving_models(
   const bool dispatched =
       dispatcher_ != nullptr &&
       dispatcher_->dispatch_models(
-          service_request->routing.prefill_name,
-          service_request->prefill_incarnation_id,
+          service_request->routing.prefill_endpoint,
+          service_request->routing.prefill_incarnation,
           model_request,
           [call_data](const TransportResult& result,
                       const xllm::proto::ModelListResponse& model_response) {
@@ -518,9 +516,9 @@ void XllmHttpServiceImpl::Completions(
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
   req_pb->mutable_routing()->set_prefill_name(
-      service_request->routing.prefill_name);
+      service_request->routing.prefill_endpoint);
   req_pb->mutable_routing()->set_decode_name(
-      service_request->routing.decode_name);
+      service_request->routing.decode_endpoint);
 
   auto call_data = std::make_shared<CompletionCallData>(
       cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
@@ -602,9 +600,9 @@ void XllmHttpServiceImpl::ChatCompletions(
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
   req_pb->mutable_routing()->set_prefill_name(
-      service_request->routing.prefill_name);
+      service_request->routing.prefill_endpoint);
   req_pb->mutable_routing()->set_decode_name(
-      service_request->routing.decode_name);
+      service_request->routing.decode_endpoint);
 
   auto call_data = std::make_shared<ChatCallData>(
       cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);

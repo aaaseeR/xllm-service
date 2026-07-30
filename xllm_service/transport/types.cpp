@@ -27,6 +27,8 @@ const char* transport_result_code_name(TransportResultCode code) {
       return "rpc_failure";
     case TransportResultCode::DISPATCHER_CLOSED:
       return "dispatcher_closed";
+    case TransportResultCode::INVALID_ROUTING_DECISION:
+      return "invalid_routing_decision";
   }
   return "unknown";
 }

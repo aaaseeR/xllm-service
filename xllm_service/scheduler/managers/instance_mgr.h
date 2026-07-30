@@ -48,7 +48,7 @@ class InstanceMgr final {
 
   InstanceMetaInfo get_instance_info(const std::string& instance_name);
 
-  bool get_next_instance_pair(Routing* routing);
+  bool get_next_instance_pair(RoutingDecision* routing);
 
   std::vector<std::string> get_static_decode_list(
       const std::string& instance_name);

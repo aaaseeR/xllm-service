@@ -1,0 +1,23 @@
+include(cc_library)
+include(cc_test)
+
+cc_library(
+  NAME
+    routing
+  HDRS
+    routing_decision.h
+  SRCS
+    routing_decision.cpp
+  DEPS
+    nlohmann_json::nlohmann_json
+)
+
+cc_test(
+  NAME
+    routing_decision_test
+  SRCS
+    routing_decision_test.cpp
+  DEPS
+    :routing
+    GTest::gtest_main
+)

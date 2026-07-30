@@ -9,6 +9,7 @@ cc_library(
   SRCS
     dispatcher.cpp
   DEPS
+    :routing
     :transport
     glog::glog
     proto_xllm

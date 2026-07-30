@@ -58,6 +58,7 @@ cc_library(
     :loadbalance_policy
     :managers
     :request
+    :routing
     :transport
     :xllm_chat_parse_runtime
     cpprest

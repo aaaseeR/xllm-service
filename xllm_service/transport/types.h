@@ -25,6 +25,7 @@ enum class TransportResultCode : uint8_t {
   CHANNEL_UNAVAILABLE = 1,
   RPC_FAILURE = 2,
   DISPATCHER_CLOSED = 3,
+  INVALID_ROUTING_DECISION = 4,
 };
 
 enum class TransportFailureStage : uint8_t {

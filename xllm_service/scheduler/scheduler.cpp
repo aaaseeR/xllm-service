@@ -207,6 +207,7 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
     }
   }
 
+  request->routing = RoutingDecision{};
   auto ret = lb_policy_->select_instances_pair(request);
   if (!ret) {
     return false;
@@ -215,6 +216,12 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   if (!instance_mgr_->bind_request_instance_incarnations(request)) {
     LOG(ERROR) << "Failed to bind request to instance incarnation ids. "
                << request->routing.debug_string();
+    return false;
+  }
+  const RoutingDecisionValidationResult validation =
+      validate_routing_decision(request->routing);
+  if (!validation.ok()) {
+    LOG(ERROR) << "Invalid routing decision: " << validation.message;
     return false;
   }
   DLOG(INFO) << request->routing.debug_string();

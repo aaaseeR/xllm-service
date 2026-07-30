@@ -71,14 +71,14 @@ bool CacheAwareRouting::select_instances_pair(
   cost_function(lb_infos.overlap_scores,
                 lb_infos.prefill_load_metrics,
                 lb_infos.prefill_max_waiting_requests_num,
-                &request->routing.prefill_name);
+                &request->routing.prefill_endpoint);
 
   // find decode
   if (lb_infos.decode_load_metrics.size()) {
     cost_function(lb_infos.overlap_scores,
                   lb_infos.decode_load_metrics,
                   lb_infos.decode_max_waiting_requests_num,
-                  &request->routing.decode_name);
+                  &request->routing.decode_endpoint);
   }
 
   return true;

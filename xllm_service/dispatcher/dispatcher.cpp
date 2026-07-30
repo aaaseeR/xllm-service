@@ -256,8 +256,7 @@ template <typename Request, typename RpcInvoker>
 bool dispatch_generation(
     const std::shared_ptr<ChannelPool>& channel_pool,
     const std::shared_ptr<DispatcherState>& state,
-    const std::string& endpoint,
-    const std::string& incarnation_id,
+    const RoutingDecision& decision,
     const std::string& request_id,
     const Request& request,
     RpcInvoker invoke) {
@@ -265,12 +264,24 @@ bool dispatch_generation(
     return false;
   }
 
-  const auto channel = channel_pool->get_or_create(endpoint, incarnation_id);
+  const RoutingDecisionValidationResult validation =
+      validate_routing_decision(decision);
+  if (!validation.ok()) {
+    state->complete_generation(make_failure(
+        request_id,
+        TransportResultCode::INVALID_ROUTING_DECISION,
+        validation.message));
+    return true;
+  }
+
+  const auto channel = channel_pool->get_or_create(
+      decision.prefill_endpoint, decision.prefill_incarnation);
   if (channel == nullptr) {
     state->complete_generation(make_failure(
         request_id,
         TransportResultCode::CHANNEL_UNAVAILABLE,
-        "Backend channel is unavailable for endpoint " + endpoint));
+        "Backend channel is unavailable for endpoint " +
+            decision.prefill_endpoint));
     return true;
   }
 
@@ -299,15 +310,13 @@ Dispatcher::Dispatcher(std::shared_ptr<ChannelPool> channel_pool,
 Dispatcher::~Dispatcher() { close(); }
 
 bool Dispatcher::dispatch_completion(
-    const std::string& endpoint,
-    const std::string& incarnation_id,
+    const RoutingDecision& decision,
     const std::string& request_id,
     const xllm::proto::CompletionRequest& request) {
   return dispatch_generation(
       channel_pool_,
       state_,
-      endpoint,
-      incarnation_id,
+      decision,
       request_id,
       request,
       [](xllm::proto::XllmAPIService_Stub& stub,
@@ -319,15 +328,13 @@ bool Dispatcher::dispatch_completion(
 }
 
 bool Dispatcher::dispatch_chat(
-    const std::string& endpoint,
-    const std::string& incarnation_id,
+    const RoutingDecision& decision,
     const std::string& request_id,
     const xllm::proto::ChatRequest& request) {
   return dispatch_generation(
       channel_pool_,
       state_,
-      endpoint,
-      incarnation_id,
+      decision,
       request_id,
       request,
       [](xllm::proto::XllmAPIService_Stub& stub,

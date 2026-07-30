@@ -34,8 +34,8 @@ using namespace std::chrono_literals;
 std::shared_ptr<Request> make_registry_request(const std::string& id) {
   auto request = std::make_shared<Request>();
   request->service_request_id = id;
-  request->routing.prefill_name = "prefill-0";
-  request->prefill_incarnation_id = "prefill-incarnation";
+  request->routing.prefill_endpoint = "prefill-0";
+  request->routing.prefill_incarnation = "prefill-incarnation";
   return request;
 }
 
