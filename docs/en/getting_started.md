@@ -66,6 +66,28 @@ ENABLE_XLLM_DEBUG_LOG=1 \
 
 xllm-service needs to start an http service and an rpc service. The http service is used to receive and process user requests, and the rpc service is used to interact with xllm instances.
 
+### Routing Modes
+
+The default `legacy` mode keeps xllm-service load balancing and KV-aware
+routing. Do not set `external_backend_endpoint` in this mode.
+
+Use `external` mode when llm-d has already selected this adapter pod:
+
+```bash
+./build/xllm_service/xllm_master_serving \
+    --routing_mode=external \
+    --external_backend_endpoint="xllm-runtime:8000" \
+    --etcd_addr="127.0.0.1:2389" \
+    --http_server_port=9888 \
+    --rpc_server_port=9889 \
+    --tokenizer_path=/path/to/tokenizer_config/
+```
+
+`external_backend_endpoint` must exactly match the `host:port` name registered
+by one aggregated (`DEFAULT`) xLLM runtime. In external mode xllm-service does
+not choose another endpoint or maintain its legacy KV routing index. Readiness
+remains unavailable until the configured runtime is registered and healthy.
+
 The complete usage process needs to be used with xllm, please refer to the link: [xLLM PD Disaggregated Deployment](https://xllm.readthedocs.io/zh-cn/latest/zh/getting_started/PD_disagg/)
 
 ### service Parameters

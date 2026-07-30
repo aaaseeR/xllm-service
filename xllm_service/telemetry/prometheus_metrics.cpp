@@ -66,6 +66,19 @@ double read_double_field(const nlohmann::json& object,
   return it->get<double>();
 }
 
+std::string read_string_field(const nlohmann::json& object,
+                              const char* key,
+                              const std::string& default_value) {
+  if (!object.is_object()) {
+    return default_value;
+  }
+  auto it = object.find(key);
+  if (it == object.end() || !it->is_string()) {
+    return default_value;
+  }
+  return it->get<std::string>();
+}
+
 const nlohmann::json& object_field(const nlohmann::json& object,
                                    const char* key) {
   static const nlohmann::json kEmptyObject = nlohmann::json::object();
@@ -138,6 +151,8 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
   snapshot.block_size = block_size;
   snapshot.ready = ready;
   snapshot.runtime_phase = runtime_phase;
+  snapshot.routing_mode =
+      read_string_field(scheduler_summary, "routing_mode", "legacy");
 
   if (scheduler_summary.is_object() &&
       scheduler_summary.contains("service_name") &&
@@ -157,13 +172,35 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
 
   const nlohmann::json& load_metrics =
       object_field(instance_view, "load_metrics");
-  for (auto it = load_metrics.begin(); it != load_metrics.end(); ++it) {
-    const nlohmann::json& metrics = it.value();
-    snapshot.total_waiting_requests +=
-        read_uint64_field(metrics, "waiting_requests_num");
-    snapshot.max_gpu_cache_usage_perc =
-        std::max(snapshot.max_gpu_cache_usage_perc,
-                 read_double_field(metrics, "gpu_cache_usage_perc"));
+  if (snapshot.routing_mode == "external") {
+    const std::string endpoint = read_string_field(
+        scheduler_summary, "external_backend_endpoint", "");
+    auto it = load_metrics.find(endpoint);
+    if (it != load_metrics.end() && it->is_object()) {
+      snapshot.load_metrics_count = 1;
+      snapshot.total_waiting_requests =
+          read_uint64_field(*it, "waiting_requests_num");
+      snapshot.max_gpu_cache_usage_perc =
+          read_double_field(*it, "gpu_cache_usage_perc");
+    } else {
+      snapshot.load_metrics_count = 0;
+    }
+    const nlohmann::json& latency_metrics =
+        object_field(instance_view, "latency_metrics");
+    auto latency_it = latency_metrics.find(endpoint);
+    snapshot.latency_metrics_count =
+        latency_it != latency_metrics.end() && latency_it->is_object() ? 1 : 0;
+    snapshot.instance_count = ready ? 1 : 0;
+    snapshot.suspect_instance_count = 0;
+  } else {
+    for (auto it = load_metrics.begin(); it != load_metrics.end(); ++it) {
+      const nlohmann::json& metrics = it.value();
+      snapshot.total_waiting_requests +=
+          read_uint64_field(metrics, "waiting_requests_num");
+      snapshot.max_gpu_cache_usage_perc =
+          std::max(snapshot.max_gpu_cache_usage_perc,
+                   read_double_field(metrics, "gpu_cache_usage_perc"));
+    }
   }
 
   const nlohmann::json& inflight_request_counts =
@@ -172,6 +209,10 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
        it != inflight_request_counts.end();
        ++it) {
     snapshot.total_running_requests += read_uint64(it.value());
+  }
+  if (snapshot.routing_mode == "external") {
+    snapshot.total_running_requests =
+        read_uint64_field(scheduler_summary, "active_request_sessions");
   }
 
   const nlohmann::json& dispatcher =
@@ -194,6 +235,15 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
       read_uint64_field(cache_index, "dram_instance_count");
   snapshot.ssd_instance_count =
       read_uint64_field(cache_index, "ssd_instance_count");
+  if (snapshot.routing_mode == "external") {
+    snapshot.cache_index_size = 0;
+    snapshot.hbm_entry_count = 0;
+    snapshot.dram_entry_count = 0;
+    snapshot.ssd_entry_count = 0;
+    snapshot.hbm_instance_count = 0;
+    snapshot.dram_instance_count = 0;
+    snapshot.ssd_instance_count = 0;
+  }
   return snapshot;
 }
 

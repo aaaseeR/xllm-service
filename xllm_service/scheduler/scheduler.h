@@ -29,6 +29,7 @@ limitations under the License.
 #include "managers/kv_event_subscriber.h"
 #include "request/request.h"
 #include "response_handler.h"
+#include "routing/routing_configuration.h"
 #include "tokenizer/tokenizer.h"
 #include "tokenizer/tokenizer_args.h"
 
@@ -39,6 +40,7 @@ class Scheduler final {
  public:
   explicit Scheduler(
       const Options& options,
+      const RoutingConfiguration& routing_configuration,
       InstanceLifecycleEventDispatcher::Handler lifecycle_handler = {});
   ~Scheduler();
 
@@ -59,6 +61,7 @@ class Scheduler final {
 
   // Returns true if at least one valid instance group is available.
   bool has_available_instances() const;
+  std::string backend_unavailable_reason() const;
 
   nlohmann::json debug_summary() const;
 
@@ -116,11 +119,14 @@ class Scheduler final {
       const llm::RequestOutput& output);
   void handle_session_terminal(const std::shared_ptr<Request>& request,
                                RequestTerminalReason reason);
+  bool prepare_routing_decision(const std::shared_ptr<Request>& request);
+  bool uses_legacy_routing() const;
 
   Tokenizer* get_tls_tokenizer();
 
  private:
   Options options_;
+  RoutingConfiguration routing_configuration_;
   InstanceLifecycleEventDispatcher lifecycle_events_;
 
   bool exited_ = false;

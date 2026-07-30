@@ -266,7 +266,7 @@ bool dispatch_generation(
 
   const RoutingDecisionValidationResult validation =
       validate_routing_decision(decision);
-  if (!validation.ok()) {
+  if (!routing_decision_validation_ok(validation)) {
     state->complete_generation(make_failure(
         request_id,
         TransportResultCode::INVALID_ROUTING_DECISION,

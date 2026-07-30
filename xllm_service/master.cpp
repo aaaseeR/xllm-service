@@ -24,12 +24,23 @@ limitations under the License.
 
 namespace xllm_service {
 
-Master::Master(const Options& options) : options_(options) {
+Master::Master(const Options& options,
+               const RoutingConfiguration& routing_configuration)
+    : options_(options), routing_configuration_(routing_configuration) {
   channel_pool_ = std::make_shared<ChannelPool>(options);
+  const bool external_routing =
+      routing_configuration_.mode == RoutingMode::EXTERNAL;
+  const std::string external_endpoint =
+      routing_configuration_.external_backend_endpoint;
   scheduler_ = std::make_unique<Scheduler>(
       options,
-      [channel_pool = channel_pool_](const InstanceLifecycleEvent& event) {
+      routing_configuration_,
+      [channel_pool = channel_pool_, external_routing, external_endpoint](
+          const InstanceLifecycleEvent& event) {
         const InstanceMetaInfo& instance = event.instance;
+        if (external_routing && instance.name != external_endpoint) {
+          return;
+        }
         switch (event.type) {
           case InstanceLifecycleEventType::REGISTERED:
           case InstanceLifecycleEventType::REGISTRATION_UPDATED:
@@ -86,7 +97,7 @@ bool Master::start() {
 
   runtime_state_.set_backend_ready(
       scheduler_->has_available_instances(),
-      "no schedulable xLLM endpoint is available");
+      scheduler_->backend_unavailable_reason());
   runtime_state_.mark_running();
   readiness_thread_ = std::make_unique<std::thread>(
       [this]() { reconcile_runtime_readiness(); });
@@ -171,7 +182,7 @@ void Master::reconcile_runtime_readiness() {
   while (!stopped_.load()) {
     runtime_state_.set_backend_ready(
         scheduler_->has_available_instances(),
-        "no schedulable xLLM endpoint is available");
+        scheduler_->backend_unavailable_reason());
 
     const auto end_time =
         std::chrono::steady_clock::now() +
@@ -234,20 +245,18 @@ int main(int argc, char* argv[]) {
 
   LOG(INFO) << "Starting xllm master service.";
 
-  // check port available or not
-  if (!xllm_service::utils::is_port_available(FLAGS_http_server_port)) {
-    LOG(ERROR)
-        << "Http server port " << FLAGS_http_server_port
-        << " is already in use. "
-        << "Please specify a different port using --http_server_port flag.";
+  xllm_service::RoutingConfiguration routing_configuration;
+  const xllm_service::RoutingConfigurationResult routing_result =
+      xllm_service::parse_routing_configuration(
+          FLAGS_routing_mode,
+          FLAGS_external_backend_endpoint,
+          &routing_configuration);
+  if (!xllm_service::routing_configuration_result_ok(routing_result)) {
+    LOG(ERROR) << "Invalid routing configuration: " << routing_result.message;
     return -1;
   }
-  if (!xllm_service::utils::is_port_available(FLAGS_rpc_server_port)) {
-    LOG(ERROR)
-        << "Rpc server port " << FLAGS_rpc_server_port << " is already in use. "
-        << "Please specify a different port using --rpc_server_port flag.";
-    return -1;
-  }
+  LOG(INFO) << "Routing mode: "
+            << xllm_service::routing_mode_name(routing_configuration.mode);
 
   xllm_service::Options options;
   options.server_host(FLAGS_server_host)
@@ -287,7 +296,22 @@ int main(int argc, char* argv[]) {
       .tool_call_parser(FLAGS_tool_call_parser)
       .reasoning_parser(FLAGS_reasoning_parser);
 
-  xllm_service::Master master(options);
+  // Check ports only after all static startup configuration is valid.
+  if (!xllm_service::utils::is_port_available(FLAGS_http_server_port)) {
+    LOG(ERROR)
+        << "Http server port " << FLAGS_http_server_port
+        << " is already in use. "
+        << "Please specify a different port using --http_server_port flag.";
+    return -1;
+  }
+  if (!xllm_service::utils::is_port_available(FLAGS_rpc_server_port)) {
+    LOG(ERROR)
+        << "Rpc server port " << FLAGS_rpc_server_port << " is already in use. "
+        << "Please specify a different port using --rpc_server_port flag.";
+    return -1;
+  }
+
+  xllm_service::Master master(options, routing_configuration);
 
   if (!master.start()) {
     LOG(ERROR) << "Failed to start master service.";

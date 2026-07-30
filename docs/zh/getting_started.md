@@ -67,6 +67,28 @@ ENABLE_XLLM_DEBUG_LOG=1 \
 
 xllm-service需要启动一个http服务和一个rpc服务，http服务用于对外接收与处理用户请求，rpc服务用于和xllm实例进行交互。
 
+### 路由模式
+
+默认的 `legacy` 模式保留 xllm-service 的负载均衡和 KV 感知路由能力，
+该模式下不能设置 `external_backend_endpoint`。
+
+当 llm-d 已经选定当前适配器 Pod 时，使用 `external` 模式：
+
+```bash
+./build/xllm_service/xllm_master_serving \
+    --routing_mode=external \
+    --external_backend_endpoint="xllm-runtime:8000" \
+    --etcd_addr="127.0.0.1:2389" \
+    --http_server_port=9888 \
+    --rpc_server_port=9889 \
+    --tokenizer_path=/path/to/tokenizer_config/
+```
+
+`external_backend_endpoint` 必须与一个聚合式（`DEFAULT`）xLLM Runtime
+注册的 `host:port` 名称完全一致。外部模式下 xllm-service 不会重新选择
+Endpoint，也不会维护旧的 KV 路由索引；在指定 Runtime 完成注册并恢复健康前，
+就绪探针保持不可用。
+
 完整的使用流程需要结合xllm一起使用，请查看链接: [xLLM PD分离部署](https://xllm.readthedocs.io/zh-cn/latest/zh/getting_started/PD_disagg/)
 
 ### service参数

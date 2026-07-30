@@ -37,10 +37,10 @@ struct RoutingDecision {
   std::string prefill_incarnation;
   std::string decode_incarnation;
   uint32_t attempt = 0;
-
-  bool is_disaggregated() const;
-  std::string debug_string() const;
 };
+
+bool routing_decision_is_disaggregated(const RoutingDecision& decision);
+std::string routing_decision_debug_string(const RoutingDecision& decision);
 
 enum class RoutingDecisionError : uint8_t {
   NONE = 0,
@@ -56,9 +56,10 @@ const char* routing_decision_error_name(RoutingDecisionError error);
 struct RoutingDecisionValidationResult {
   RoutingDecisionError error = RoutingDecisionError::NONE;
   std::string message;
-
-  bool ok() const { return error == RoutingDecisionError::NONE; }
 };
+
+bool routing_decision_validation_ok(
+    const RoutingDecisionValidationResult& result);
 
 RoutingDecisionValidationResult validate_routing_decision(
     const RoutingDecision& decision);

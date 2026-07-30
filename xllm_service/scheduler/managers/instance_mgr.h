@@ -60,6 +60,7 @@ class InstanceMgr final {
 
   bool bind_request_instance_incarnations(
       const std::shared_ptr<Request>& request);
+  bool bind_aggregated_instance_incarnation(RoutingDecision* decision) const;
   bool record_instance_heartbeat(const std::string& instance_name,
                                  const std::string& incarnation_id);
   void record_load_metrics_update(const std::string& instance_name,
@@ -92,6 +93,8 @@ class InstanceMgr final {
   // - two MIX instances with complementary current_type (one PREFILL, one
   // DECODE)
   bool has_available_instances() const;
+  bool has_available_aggregated_instance(
+      const std::string& instance_name) const;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(InstanceMgr);

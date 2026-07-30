@@ -109,5 +109,48 @@ TEST(PrometheusMetricsTest, RendersLlmDCompatibleMetrics) {
             std::string::npos);
 }
 
+TEST(PrometheusMetricsTest, UsesAdapterSessionsInExternalRoutingMode) {
+  nlohmann::json summary = {
+      {"routing_mode", "external"},
+      {"external_backend_endpoint", "backend-a:8000"},
+      {"active_request_sessions", 3},
+      {"instance_view",
+       {{"instance_count", 9},
+        {"load_metrics_count", 9},
+        {"latency_metrics_count", 9},
+        {"inflight_request_counts", {{"legacy", 99}}},
+        {"load_metrics",
+         {{"backend-a:8000",
+           {{"waiting_requests_num", 4}, {"gpu_cache_usage_perc", 0.5}}},
+          {"backend-b:8000",
+           {{"waiting_requests_num", 100},
+            {"gpu_cache_usage_perc", 0.99}}}}},
+        {"latency_metrics",
+         {{"backend-a:8000", {{"recent_max_ttft", 1.0}}},
+          {"backend-b:8000", {{"recent_max_ttft", 2.0}}}}}}},
+      {"cache_index", {{"cache_index_size", 1000}}}};
+
+  const PrometheusMetricsSnapshot snapshot =
+      build_prometheus_metrics_snapshot(summary,
+                                        "adapter",
+                                        /*block_size=*/128,
+                                        /*ready=*/true,
+                                        /*runtime_phase=*/"running");
+
+  EXPECT_EQ(snapshot.routing_mode, "external");
+  EXPECT_EQ(snapshot.instance_count, 1);
+  EXPECT_EQ(snapshot.load_metrics_count, 1);
+  EXPECT_EQ(snapshot.latency_metrics_count, 1);
+  EXPECT_EQ(snapshot.total_waiting_requests, 4);
+  EXPECT_EQ(snapshot.total_running_requests, 3);
+  EXPECT_DOUBLE_EQ(snapshot.max_gpu_cache_usage_perc, 0.5);
+  EXPECT_EQ(snapshot.cache_index_size, 0);
+  const std::string output = render_prometheus_metrics(snapshot);
+  EXPECT_NE(output.find(
+                "xllm_service_routing_mode{mode=\"external\"} 1"),
+            std::string::npos);
+  EXPECT_NE(output.find("vllm:num_requests_running 3"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace xllm_service

@@ -57,6 +57,10 @@ DECLARE_string(etcd_namespace);
 
 DECLARE_string(load_balance_policy);
 
+DECLARE_string(routing_mode);
+
+DECLARE_string(external_backend_endpoint);
+
 DECLARE_int32(detect_disconnected_instance_interval);
 
 DECLARE_int32(instance_delete_probe_timeout_ms);

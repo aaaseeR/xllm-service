@@ -29,14 +29,16 @@ RoutingDecision make_valid_decision() {
 
 TEST(RoutingDecisionTest, AcceptsAggregatedAndDisaggregatedDecisions) {
   RoutingDecision aggregated = make_valid_decision();
-  EXPECT_TRUE(validate_routing_decision(aggregated).ok());
-  EXPECT_FALSE(aggregated.is_disaggregated());
+  EXPECT_TRUE(routing_decision_validation_ok(
+      validate_routing_decision(aggregated)));
+  EXPECT_FALSE(routing_decision_is_disaggregated(aggregated));
 
   RoutingDecision disaggregated = aggregated;
   disaggregated.decode_endpoint = "decode:8000";
   disaggregated.decode_incarnation = "decode-v1";
-  EXPECT_TRUE(validate_routing_decision(disaggregated).ok());
-  EXPECT_TRUE(disaggregated.is_disaggregated());
+  EXPECT_TRUE(routing_decision_validation_ok(
+      validate_routing_decision(disaggregated)));
+  EXPECT_TRUE(routing_decision_is_disaggregated(disaggregated));
 }
 
 TEST(RoutingDecisionTest, RejectsUnsupportedVersionAndUnknownSource) {
@@ -77,7 +79,7 @@ TEST(RoutingDecisionTest, DebugStringIncludesContractMetadata) {
   RoutingDecision decision = make_valid_decision();
   decision.source = RoutingDecisionSource::EXTERNAL;
   decision.attempt = 2;
-  const std::string output = decision.debug_string();
+  const std::string output = routing_decision_debug_string(decision);
 
   EXPECT_NE(output.find("\"version\": 1"), std::string::npos);
   EXPECT_NE(output.find("\"source\": \"external\""),

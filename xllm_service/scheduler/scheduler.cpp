@@ -36,8 +36,10 @@ namespace xllm_service {
 
 Scheduler::Scheduler(
     const Options& options,
+    const RoutingConfiguration& routing_configuration,
     InstanceLifecycleEventDispatcher::Handler lifecycle_handler)
     : options_(options),
+      routing_configuration_(routing_configuration),
       lifecycle_events_(
           std::vector<InstanceLifecycleEventDispatcher::Handler>{
               [this](const InstanceLifecycleEvent& event) {
@@ -91,10 +93,13 @@ Scheduler::Scheduler(
     }
   }
 
-  global_kvcache_mgr_ = std::make_shared<GlobalKVCacheMgr>(
-      options, etcd_client_, is_master_service_);
+  if (uses_legacy_routing()) {
+    global_kvcache_mgr_ = std::make_shared<GlobalKVCacheMgr>(
+        options, etcd_client_, is_master_service_);
+  }
 
-  if (options_.enable_peer_service() && options_.kv_event_zmq_enable()) {
+  if (uses_legacy_routing() && options_.enable_peer_service() &&
+      options_.kv_event_zmq_enable()) {
     KvEventSubscriber::Options subscriber_options;
     subscriber_options.enabled(true)
         .poll_interval_ms(options_.kv_event_zmq_poll_interval_ms())
@@ -130,13 +135,15 @@ Scheduler::Scheduler(
         handle_session_terminal(request, reason);
       });
 
-  if (options.load_balance_policy() == "CAR") {
-    lb_policy_ =
-        std::make_unique<CacheAwareRouting>(instance_mgr_, global_kvcache_mgr_);
-  } else if (options.load_balance_policy() == "SLO_AWARE") {
-    lb_policy_ = std::make_unique<SloAwarePolicy>(options, instance_mgr_);
-  } else {
-    lb_policy_ = std::make_unique<RoundRobin>(instance_mgr_);
+  if (uses_legacy_routing()) {
+    if (options.load_balance_policy() == "CAR") {
+      lb_policy_ =
+          std::make_unique<CacheAwareRouting>(instance_mgr_, global_kvcache_mgr_);
+    } else if (options.load_balance_policy() == "SLO_AWARE") {
+      lb_policy_ = std::make_unique<SloAwarePolicy>(options, instance_mgr_);
+    } else {
+      lb_policy_ = std::make_unique<RoundRobin>(instance_mgr_);
+    }
   }
 
   if (options_.enable_peer_service()) {
@@ -207,27 +214,48 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
     }
   }
 
-  request->routing = RoutingDecision{};
-  auto ret = lb_policy_->select_instances_pair(request);
-  if (!ret) {
+  if (!prepare_routing_decision(request)) {
     return false;
   }
 
-  if (!instance_mgr_->bind_request_instance_incarnations(request)) {
+  return true;
+}
+
+bool Scheduler::prepare_routing_decision(
+    const std::shared_ptr<Request>& request) {
+  const RoutingSelectionResult selection = resolve_routing_decision(
+      routing_configuration_,
+      [this, &request]() {
+        return lb_policy_ != nullptr &&
+               lb_policy_->select_instances_pair(request);
+      },
+      &request->routing);
+  if (!routing_selection_result_ok(selection)) {
+    LOG(ERROR) << "Failed to resolve routing authority: "
+               << selection.message;
+    return false;
+  }
+
+  const bool bound = uses_legacy_routing()
+                         ? instance_mgr_->bind_request_instance_incarnations(
+                               request)
+                         : instance_mgr_->bind_aggregated_instance_incarnation(
+                               &request->routing);
+  if (!bound) {
     LOG(ERROR) << "Failed to bind request to instance incarnation ids. "
-               << request->routing.debug_string();
+               << routing_decision_debug_string(request->routing);
     return false;
   }
   const RoutingDecisionValidationResult validation =
       validate_routing_decision(request->routing);
-  if (!validation.ok()) {
+  if (!routing_decision_validation_ok(validation)) {
     LOG(ERROR) << "Invalid routing decision: " << validation.message;
     return false;
   }
-  DLOG(INFO) << request->routing.debug_string();
+  DLOG(INFO) << routing_decision_debug_string(request->routing);
 
   // update request metrics
-  if (request->prompt.size() != 0) {
+  if (uses_legacy_routing() && !request->prompt.empty()) {
     instance_mgr_->update_request_metrics(request, RequestAction::SCHEDULE);
     instance_mgr_->record_dispatch(request);
   }
@@ -235,11 +263,17 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   return true;
 }
 
+bool Scheduler::uses_legacy_routing() const {
+  return routing_configuration_.mode == RoutingMode::LEGACY;
+}
+
 void Scheduler::update_master_service_heartbeat() {
   while (!exited_) {
     std::this_thread::sleep_for(std::chrono::seconds(kHeartbeatInterval));
 
-    global_kvcache_mgr_->upload_kvcache();
+    if (global_kvcache_mgr_ != nullptr) {
+      global_kvcache_mgr_->upload_kvcache();
+    }
 
     instance_mgr_->upload_load_metrics();
   }
@@ -277,8 +311,9 @@ bool Scheduler::handle_instance_heartbeat(const proto::HeartbeatRequest* req) {
   const bool has_heartbeat_cache_event = cache_event.stored_cache_size() > 0 ||
                                          cache_event.removed_cache_size() > 0 ||
                                          cache_event.offload_cache_size() > 0;
-  if (!(options_.enable_peer_service() && options_.kv_event_zmq_enable()) ||
-      has_heartbeat_cache_event) {
+  if (global_kvcache_mgr_ != nullptr &&
+      (!(options_.enable_peer_service() && options_.kv_event_zmq_enable()) ||
+       has_heartbeat_cache_event)) {
     global_kvcache_mgr_->record_updated_kvcaches(req->name(),
                                                  cache_event);
   }
@@ -303,7 +338,9 @@ void Scheduler::handle_master_service_watch(const etcd::Response& response,
     heartbeat_thread_ = std::make_unique<std::thread>(
         &Scheduler::update_master_service_heartbeat, this);
 
-    global_kvcache_mgr_->set_as_master();
+    if (global_kvcache_mgr_ != nullptr) {
+      global_kvcache_mgr_->set_as_master();
+    }
     instance_mgr_->set_as_master();
   }
 }
@@ -432,8 +469,10 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
           [call_data]() { return call_data->is_disconnected(); })) {
     LOG(ERROR) << "The request ID already exists or the registry is closed: "
                << request->service_request_id;
-    instance_mgr_->record_request_finished(request);
-    instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
+    if (uses_legacy_routing()) {
+      instance_mgr_->record_request_finished(request);
+      instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
+    }
     return false;
   }
   COUNTER_INC(server_request_in_total);
@@ -477,8 +516,10 @@ bool Scheduler::record_new_request(
           [call_data]() { return call_data->is_disconnected(); })) {
     LOG(ERROR) << "The request ID already exists or the registry is closed: "
                << request->service_request_id;
-    instance_mgr_->record_request_finished(request);
-    instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
+    if (uses_legacy_routing()) {
+      instance_mgr_->record_request_finished(request);
+      instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
+    }
     return false;
   }
   COUNTER_INC(server_request_in_total);
@@ -595,12 +636,14 @@ void Scheduler::observe_session_generation(
 void Scheduler::handle_session_terminal(
     const std::shared_ptr<Request>& request,
     RequestTerminalReason reason) {
-  instance_mgr_->record_request_finished(request);
-  instance_mgr_->update_request_metrics(
-      request,
-      reason == RequestTerminalReason::COMPLETED
-          ? RequestAction::FINISH_DECODE
-          : RequestAction::CANCEL);
+  if (uses_legacy_routing()) {
+    instance_mgr_->record_request_finished(request);
+    instance_mgr_->update_request_metrics(
+        request,
+        reason == RequestTerminalReason::COMPLETED
+            ? RequestAction::FINISH_DECODE
+            : RequestAction::CANCEL);
+  }
   if (reason != RequestTerminalReason::COMPLETED) {
     LOG(INFO) << "Request session terminated, request id: "
               << request->service_request_id
@@ -612,13 +655,13 @@ void Scheduler::update_request_metrics(std::shared_ptr<Request> request,
                                        bool finished_on_prefill_instance) {
   request->num_generated_tokens += 1;
   if (finished_on_prefill_instance) {
-    instance_mgr_->record_prefill_finished(request);
+    if (uses_legacy_routing()) {
+      instance_mgr_->record_prefill_finished(request);
+      instance_mgr_->update_request_metrics(request,
+                                            RequestAction::FINISH_PREFILL);
+    }
     request->prefill_stage_finished = true;
-    // update instance request metrics for prefill finished request
-    instance_mgr_->update_request_metrics(request,
-                                          RequestAction::FINISH_PREFILL);
-  } else {
-    // update instance request metrics
+  } else if (uses_legacy_routing()) {
     instance_mgr_->update_request_metrics(request, RequestAction::GENERATE);
   }
 }
@@ -638,12 +681,29 @@ void Scheduler::update_token_latency_metrics(
 }
 
 bool Scheduler::has_available_instances() const {
+  if (!uses_legacy_routing()) {
+    return instance_mgr_->has_available_aggregated_instance(
+        routing_configuration_.external_backend_endpoint);
+  }
   return instance_mgr_->has_available_instances();
+}
+
+std::string Scheduler::backend_unavailable_reason() const {
+  if (!uses_legacy_routing()) {
+    return "configured external xLLM endpoint is unavailable: " +
+           routing_configuration_.external_backend_endpoint;
+  }
+  return "no schedulable xLLM endpoint is available";
 }
 
 nlohmann::json Scheduler::debug_summary() const {
   nlohmann::json summary;
   summary["service_name"] = options_.service_name();
+  summary["routing_mode"] = routing_mode_name(routing_configuration_.mode);
+  if (!uses_legacy_routing()) {
+    summary["external_backend_endpoint"] =
+        routing_configuration_.external_backend_endpoint;
+  }
   summary["enable_peer_service"] = options_.enable_peer_service();
   summary["is_master_service"] = is_master_service_;
   summary["instance_view"] =

@@ -92,6 +92,15 @@ DEFINE_string(load_balance_policy,
               "RR",
               "Disaggregated prefill-decode policy.");
 
+DEFINE_string(routing_mode,
+              "legacy",
+              "Routing authority: legacy or external.");
+
+DEFINE_string(external_backend_endpoint,
+              "",
+              "Pod-local aggregated xLLM endpoint used in external routing "
+              "mode, for example 127.0.0.1:8000.");
+
 DEFINE_int32(detect_disconnected_instance_interval,
              15,
              "The interval that server detect the disconnected instance.");

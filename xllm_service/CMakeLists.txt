@@ -27,6 +27,7 @@ cc_binary(
     master.cpp
   DEPS
     :dispatcher
+    :routing
     :xllm_http_service
     :xllm_rpc_service
     :runtime

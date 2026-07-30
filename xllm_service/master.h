@@ -23,6 +23,7 @@ limitations under the License.
 #include "common/options.h"
 #include "dispatcher/dispatcher.h"
 #include "http_service/service.h"
+#include "routing/routing_configuration.h"
 #include "rpc_service/service.h"
 #include "runtime/runtime_state.h"
 #include "scheduler/scheduler.h"
@@ -32,7 +33,8 @@ namespace xllm_service {
 
 class Master {
  public:
-  explicit Master(const Options& options);
+  Master(const Options& options,
+         const RoutingConfiguration& routing_configuration);
   ~Master();
 
   bool start();
@@ -45,6 +47,7 @@ class Master {
 
  private:
   Options options_;
+  RoutingConfiguration routing_configuration_;
   RuntimeState runtime_state_;
 
   std::shared_ptr<ChannelPool> channel_pool_;

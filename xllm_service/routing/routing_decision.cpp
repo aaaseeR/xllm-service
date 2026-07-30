@@ -38,18 +38,19 @@ const char* routing_decision_source_name(RoutingDecisionSource source) {
   return "unknown";
 }
 
-bool RoutingDecision::is_disaggregated() const {
-  return !decode_endpoint.empty();
+bool routing_decision_is_disaggregated(const RoutingDecision& decision) {
+  return !decision.decode_endpoint.empty();
 }
 
-std::string RoutingDecision::debug_string() const {
-  return nlohmann::json{{"version", version},
-                        {"source", routing_decision_source_name(source)},
-                        {"prefill_endpoint", prefill_endpoint},
-                        {"decode_endpoint", decode_endpoint},
-                        {"prefill_incarnation", prefill_incarnation},
-                        {"decode_incarnation", decode_incarnation},
-                        {"attempt", attempt}}
+std::string routing_decision_debug_string(const RoutingDecision& decision) {
+  return nlohmann::json{
+      {"version", decision.version},
+      {"source", routing_decision_source_name(decision.source)},
+      {"prefill_endpoint", decision.prefill_endpoint},
+      {"decode_endpoint", decision.decode_endpoint},
+      {"prefill_incarnation", decision.prefill_incarnation},
+      {"decode_incarnation", decision.decode_incarnation},
+      {"attempt", decision.attempt}}
       .dump(2);
 }
 
@@ -69,6 +70,11 @@ const char* routing_decision_error_name(RoutingDecisionError error) {
       return "incomplete_decode_identity";
   }
   return "unknown";
+}
+
+bool routing_decision_validation_ok(
+    const RoutingDecisionValidationResult& result) {
+  return result.error == RoutingDecisionError::NONE;
 }
 
 RoutingDecisionValidationResult validate_routing_decision(

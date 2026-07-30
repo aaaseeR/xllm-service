@@ -545,6 +545,24 @@ bool InstanceMgr::bind_request_instance_incarnations(
   return true;
 }
 
+bool InstanceMgr::bind_aggregated_instance_incarnation(
+    RoutingDecision* decision) const {
+  if (decision == nullptr || decision->prefill_endpoint.empty() ||
+      !decision->decode_endpoint.empty()) {
+    return false;
+  }
+
+  std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+  auto it = instances_.find(decision->prefill_endpoint);
+  if (it == instances_.end() || !is_instance_schedulable(it->second) ||
+      it->second.type != InstanceType::DEFAULT) {
+    return false;
+  }
+  decision->prefill_incarnation = it->second.incarnation_id;
+  decision->decode_incarnation.clear();
+  return !decision->prefill_incarnation.empty();
+}
+
 bool InstanceMgr::record_instance_heartbeat(const std::string& instance_name,
                                             const std::string& incarnation_id) {
   std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
@@ -1579,6 +1597,14 @@ bool InstanceMgr::has_available_instances() const {
 
   return has_default || (has_prefill && has_decode) ||
          (has_mix_as_prefill && has_mix_as_decode);
+}
+
+bool InstanceMgr::has_available_aggregated_instance(
+    const std::string& instance_name) const {
+  std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+  auto it = instances_.find(instance_name);
+  return it != instances_.end() && is_instance_schedulable(it->second) &&
+         it->second.type == InstanceType::DEFAULT;
 }
 
 nlohmann::json InstanceMgr::debug_summary() const {
