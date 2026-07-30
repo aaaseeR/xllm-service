@@ -662,6 +662,7 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
   if (dispatcher_ != nullptr) {
     const DispatcherStats stats = dispatcher_->stats();
     summary["dispatcher"] = {
+        {"closed", stats.closed},
         {"inflight", stats.inflight},
         {"transport_failure_total", stats.transport_failure_total},
         {"channel_count", stats.channel_count},
@@ -705,6 +706,7 @@ void XllmHttpServiceImpl::DebugSummary(
   if (dispatcher_ != nullptr) {
     const DispatcherStats stats = dispatcher_->stats();
     summary["dispatcher"] = {
+        {"closed", stats.closed},
         {"inflight", stats.inflight},
         {"transport_failure_total", stats.transport_failure_total},
         {"channel_count", stats.channel_count},

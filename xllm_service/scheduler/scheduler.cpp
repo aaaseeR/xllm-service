@@ -173,6 +173,12 @@ Scheduler::~Scheduler() {
   }
 }
 
+void Scheduler::cancel_active_requests() {
+  if (request_registry_ != nullptr) {
+    request_registry_->close();
+  }
+}
+
 bool Scheduler::schedule(std::shared_ptr<Request> request) {
   // apply chat template
   if (request->messages.size() > 0) {

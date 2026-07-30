@@ -134,6 +134,35 @@ TEST(RequestSessionTest, ClassifiesTransportFailureAfterGenerationStarts) {
             RequestTerminalReason::TRANSPORT_FAILURE_AFTER_FIRST_TOKEN);
 }
 
+TEST(RequestSessionTest, RuntimeCancellationWritesErrorAndCompletesOnce) {
+  auto request = make_request();
+  std::vector<llm::StatusCode> status_codes;
+  std::vector<RequestTerminalReason> terminal_reasons;
+  RequestSession session(
+      request,
+      [&status_codes](llm::RequestOutput output) {
+        status_codes.push_back(output.status->code());
+        return true;
+      },
+      []() { return false; },
+      {},
+      [&terminal_reasons](const std::shared_ptr<Request>&,
+                          RequestTerminalReason reason) {
+        terminal_reasons.push_back(reason);
+      });
+
+  ASSERT_TRUE(session.on_dispatched());
+  EXPECT_TRUE(session.on_runtime_cancel("Runtime is shutting down"));
+  EXPECT_FALSE(session.on_runtime_cancel("Duplicate cancellation"));
+
+  EXPECT_EQ(session.state(), RequestSessionState::CANCELLED);
+  EXPECT_EQ(status_codes,
+            (std::vector<llm::StatusCode>{llm::StatusCode::CANCELLED}));
+  EXPECT_EQ(terminal_reasons,
+            (std::vector<RequestTerminalReason>{
+                RequestTerminalReason::RUNTIME_CANCELLED}));
+}
+
 TEST(RequestSessionTest, CancelsDisconnectedClientWithoutOutput) {
   auto request = make_request();
   int output_count = 0;

@@ -79,6 +79,7 @@ class RequestSession final {
   bool on_transport_failure(TransportFailureStage stage,
                             const std::string& message);
   bool on_instance_failure(const InstanceFailure& failure);
+  bool on_runtime_cancel(const std::string& message);
   bool on_client_disconnect();
 
   RequestSessionState state() const { return state_.load(); }

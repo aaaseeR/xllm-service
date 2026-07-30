@@ -42,6 +42,7 @@ class Scheduler final {
       InstanceLifecycleEventDispatcher::Handler lifecycle_handler = {});
   ~Scheduler();
 
+  void cancel_active_requests();
   bool schedule(std::shared_ptr<Request> request);
 
   InstanceMetaInfo get_instance_info(const std::string& instance_name);

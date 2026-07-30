@@ -20,10 +20,13 @@ limitations under the License.
 #include <google/protobuf/message.h>
 #include <google/protobuf/stubs/callback.h>
 
+#include <cerrno>
 #include <condition_variable>
 #include <exception>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "xllm_service.pb.h"
 
@@ -43,8 +46,23 @@ class DispatcherState final {
     return true;
   }
 
-  void complete_generation(const TransportResult& result) {
-    complete(result, [this, &result]() {
+  bool register_call(brpc::CallId call_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) {
+      return false;
+    }
+    active_calls_.emplace(call_id.value, call_id);
+    return true;
+  }
+
+  bool is_closed() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return closed_;
+  }
+
+  void complete_generation(const TransportResult& result,
+                           brpc::CallId call_id = {0}) {
+    complete(result, call_id, [this, &result]() {
       if (transport_observer_) {
         transport_observer_(result);
       }
@@ -53,8 +71,9 @@ class DispatcherState final {
 
   void complete_models(const TransportResult& result,
                        const xllm::proto::ModelListResponse& response,
-                       const Dispatcher::ModelResultCallback& callback) {
-    complete(result, [&result, &response, &callback]() {
+                       const Dispatcher::ModelResultCallback& callback,
+                       brpc::CallId call_id = {0}) {
+    complete(result, call_id, [&result, &response, &callback]() {
       if (callback) {
         callback(result, response);
       }
@@ -62,14 +81,30 @@ class DispatcherState final {
   }
 
   void close() {
+    std::vector<brpc::CallId> active_calls;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!closed_) {
+        closed_ = true;
+        active_calls.reserve(active_calls_.size());
+        for (const auto& item : active_calls_) {
+          active_calls.push_back(item.second);
+        }
+      }
+    }
+
+    for (brpc::CallId call_id : active_calls) {
+      brpc::StartCancel(call_id);
+    }
+
     std::unique_lock<std::mutex> lock(mutex_);
-    closed_ = true;
     condition_.wait(lock, [this]() { return inflight_ == 0; });
   }
 
   DispatcherStats stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     DispatcherStats result;
+    result.closed = closed_;
     result.inflight = inflight_;
     result.transport_failure_total = transport_failure_total_;
     return result;
@@ -77,10 +112,17 @@ class DispatcherState final {
 
  private:
   template <typename Callback>
-  void complete(const TransportResult& result, Callback callback) {
-    if (result.code != TransportResultCode::SUCCESS) {
+  void complete(const TransportResult& result,
+                brpc::CallId call_id,
+                Callback callback) {
+    {
       std::lock_guard<std::mutex> lock(mutex_);
-      ++transport_failure_total_;
+      if (result.code != TransportResultCode::SUCCESS) {
+        ++transport_failure_total_;
+      }
+      if (call_id.value != 0) {
+        active_calls_.erase(call_id.value);
+      }
     }
 
     try {
@@ -106,6 +148,7 @@ class DispatcherState final {
   bool closed_ = false;
   uint64_t inflight_ = 0;
   uint64_t transport_failure_total_ = 0;
+  std::unordered_map<uint64_t, brpc::CallId> active_calls_;
 };
 
 namespace {
@@ -133,16 +176,26 @@ class GenerationRpcClosure final : public google::protobuf::Closure {
         request_id_(std::move(request_id)) {}
 
   brpc::Controller* controller() { return &controller_; }
+  brpc::CallId call_id() { return controller_.call_id(); }
+
+  void reject(const TransportResult& result) {
+    state_->complete_generation(result);
+    delete this;
+  }
 
   void Run() override {
     TransportResult result;
     result.request_id = request_id_;
     if (controller_.Failed()) {
+      const bool dispatcher_closed =
+          controller_.ErrorCode() == ECANCELED && state_->is_closed();
       result = make_failure(request_id_,
-                            TransportResultCode::RPC_FAILURE,
+                            dispatcher_closed
+                                ? TransportResultCode::DISPATCHER_CLOSED
+                                : TransportResultCode::RPC_FAILURE,
                             controller_.ErrorText());
     }
-    state_->complete_generation(result);
+    state_->complete_generation(result, controller_.call_id());
     delete this;
   }
 
@@ -166,16 +219,27 @@ class ModelsRpcClosure final : public google::protobuf::Closure {
         callback_(std::move(callback)) {}
 
   brpc::Controller* controller() { return &controller_; }
+  brpc::CallId call_id() { return controller_.call_id(); }
   xllm::proto::ModelListResponse* response() { return &response_; }
+
+  void reject(const TransportResult& result) {
+    state_->complete_models(result, response_, callback_);
+    delete this;
+  }
 
   void Run() override {
     TransportResult result;
     if (controller_.Failed()) {
+      const bool dispatcher_closed =
+          controller_.ErrorCode() == ECANCELED && state_->is_closed();
       result = make_failure("",
-                            TransportResultCode::RPC_FAILURE,
+                            dispatcher_closed
+                                ? TransportResultCode::DISPATCHER_CLOSED
+                                : TransportResultCode::RPC_FAILURE,
                             controller_.ErrorText());
     }
-    state_->complete_models(result, response_, callback_);
+    state_->complete_models(
+        result, response_, callback_, controller_.call_id());
     delete this;
   }
 
@@ -213,6 +277,12 @@ bool dispatch_generation(
   auto owned_request = std::make_shared<Request>(request);
   auto* closure = new GenerationRpcClosure(
       state, channel, owned_request, request_id);
+  if (!state->register_call(closure->call_id())) {
+    closure->reject(make_failure(request_id,
+                                 TransportResultCode::DISPATCHER_CLOSED,
+                                 "Backend dispatcher is closed"));
+    return true;
+  }
   xllm::proto::XllmAPIService_Stub stub(channel.get());
   invoke(stub, closure->controller(), owned_request.get(), closure);
   return true;
@@ -295,6 +365,12 @@ bool Dispatcher::dispatch_models(
       std::make_shared<xllm::proto::ModelListRequest>(request);
   auto* closure = new ModelsRpcClosure(
       state_, channel, owned_request, std::move(callback));
+  if (!state_->register_call(closure->call_id())) {
+    closure->reject(make_failure("",
+                                 TransportResultCode::DISPATCHER_CLOSED,
+                                 "Backend dispatcher is closed"));
+    return true;
+  }
   xllm::proto::XllmAPIService_Stub stub(channel.get());
   stub.Models(closure->controller(),
               owned_request.get(),

@@ -143,6 +143,19 @@ bool RequestSession::on_instance_failure(const InstanceFailure& failure) {
                 RequestTerminalReason::INSTANCE_FAILURE);
 }
 
+bool RequestSession::on_runtime_cancel(const std::string& message) {
+  if (is_terminal()) {
+    return false;
+  }
+
+  llm::RequestOutput output;
+  output.service_request_id = request_->service_request_id;
+  output.status = llm::Status(llm::StatusCode::CANCELLED, message);
+  deliver_output(std::move(output));
+  return finish(RequestSessionState::CANCELLED,
+                RequestTerminalReason::RUNTIME_CANCELLED);
+}
+
 bool RequestSession::on_client_disconnect() {
   return finish(RequestSessionState::CANCELLED,
                 RequestTerminalReason::CLIENT_DISCONNECTED);

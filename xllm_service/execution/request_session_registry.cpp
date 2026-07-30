@@ -142,6 +142,7 @@ size_t RequestSessionRegistry::size() const {
 }
 
 void RequestSessionRegistry::close() {
+  std::vector<Entry> active_sessions;
   std::vector<std::unique_ptr<ThreadPool>> executors;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -149,6 +150,21 @@ void RequestSessionRegistry::close() {
       return;
     }
     closed_ = true;
+    active_sessions.reserve(sessions_.size());
+    for (const auto& item : sessions_) {
+      active_sessions.push_back(item.second);
+    }
+  }
+
+  for (const Entry& entry : active_sessions) {
+    const auto session = entry.session;
+    executors_[entry.executor_index]->schedule([session]() {
+      session->on_runtime_cancel("Runtime is shutting down");
+    });
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
     executors.swap(executors_);
   }
 

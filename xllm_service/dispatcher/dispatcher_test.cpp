@@ -143,7 +143,7 @@ TEST(DispatcherTest, RejectsDispatchAfterClose) {
   EXPECT_EQ(observer_count, 0);
 }
 
-TEST(DispatcherTest, CloseWaitsForInflightRpcCompletion) {
+TEST(DispatcherTest, CloseCancelsInflightRpc) {
   DelayedCompletionService service;
   brpc::Server server;
   ASSERT_EQ(server.AddService(
@@ -162,10 +162,14 @@ TEST(DispatcherTest, CloseWaitsForInflightRpcCompletion) {
   ASSERT_TRUE(pool->activate(endpoint, "incarnation-1"));
 
   std::atomic<int32_t> observer_count{0};
-  Dispatcher dispatcher(pool, [&observer_count](const TransportResult& result) {
-    EXPECT_EQ(result.code, TransportResultCode::SUCCESS);
-    ++observer_count;
-  });
+  std::atomic<TransportResultCode> observed_code{
+      TransportResultCode::SUCCESS};
+  Dispatcher dispatcher(
+      pool,
+      [&observer_count, &observed_code](const TransportResult& result) {
+        observed_code.store(result.code);
+        ++observer_count;
+      });
   xllm::proto::CompletionRequest request;
   request.set_service_request_id("request-owned-by-dispatcher");
   ASSERT_TRUE(dispatcher.dispatch_completion(endpoint,
@@ -183,21 +187,101 @@ TEST(DispatcherTest, CloseWaitsForInflightRpcCompletion) {
   EXPECT_EQ(service.request_id(), "request-owned-by-dispatcher");
 
   std::atomic<bool> close_returned{false};
-  std::thread close_thread([&dispatcher, &close_returned]() {
+  std::mutex close_mutex;
+  std::condition_variable close_condition;
+  std::thread close_thread([&]() {
     dispatcher.close();
-    close_returned.store(true);
+    {
+      std::lock_guard<std::mutex> lock(close_mutex);
+      close_returned.store(true);
+    }
+    close_condition.notify_all();
   });
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  EXPECT_FALSE(close_returned.load());
+
+  bool cancelled = false;
+  {
+    std::unique_lock<std::mutex> lock(close_mutex);
+    cancelled = close_condition.wait_for(
+        lock,
+        std::chrono::seconds(2),
+        [&close_returned]() { return close_returned.load(); });
+  }
 
   service.finish();
   close_thread.join();
 
-  EXPECT_TRUE(close_returned.load());
+  EXPECT_TRUE(cancelled);
   EXPECT_EQ(observer_count.load(), 1);
+  EXPECT_EQ(observed_code.load(), TransportResultCode::DISPATCHER_CLOSED);
   EXPECT_EQ(dispatcher.stats().inflight, 0);
   server.Stop(0);
   server.Join();
+}
+
+TEST(DispatcherTest, CloseRejectsDispatchWaitingForChannelCreation) {
+  std::mutex factory_mutex;
+  std::condition_variable factory_condition;
+  bool factory_entered = false;
+  bool release_factory = false;
+  auto pool = std::make_shared<ChannelPool>(
+      [&](const std::string&) -> std::shared_ptr<brpc::Channel> {
+        std::unique_lock<std::mutex> lock(factory_mutex);
+        factory_entered = true;
+        factory_condition.notify_all();
+        factory_condition.wait(
+            lock, [&release_factory]() { return release_factory; });
+        return std::make_shared<brpc::Channel>();
+      });
+  ASSERT_TRUE(pool->activate("127.0.0.1:8000", "incarnation-1"));
+
+  TransportResult observed;
+  std::atomic<int32_t> observer_count{0};
+  Dispatcher dispatcher(
+      pool,
+      [&](const TransportResult& result) {
+        observed = result;
+        ++observer_count;
+      });
+  xllm::proto::CompletionRequest request;
+  std::atomic<bool> dispatched{false};
+  std::thread dispatch_thread([&]() {
+    dispatched.store(dispatcher.dispatch_completion("127.0.0.1:8000",
+                                                    "incarnation-1",
+                                                    "request-1",
+                                                    request));
+  });
+
+  bool factory_was_entered = false;
+  {
+    std::unique_lock<std::mutex> lock(factory_mutex);
+    factory_was_entered = factory_condition.wait_for(
+        lock,
+        std::chrono::seconds(2),
+        [&factory_entered]() { return factory_entered; });
+  }
+  EXPECT_TRUE(factory_was_entered);
+
+  std::thread close_thread([&dispatcher]() { dispatcher.close(); });
+  const auto close_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!dispatcher.stats().closed &&
+         std::chrono::steady_clock::now() < close_deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_TRUE(dispatcher.stats().closed);
+  {
+    std::lock_guard<std::mutex> lock(factory_mutex);
+    release_factory = true;
+  }
+  factory_condition.notify_all();
+
+  dispatch_thread.join();
+  close_thread.join();
+
+  EXPECT_TRUE(dispatched.load());
+  EXPECT_EQ(observer_count.load(), 1);
+  EXPECT_EQ(observed.code, TransportResultCode::DISPATCHER_CLOSED);
+  EXPECT_EQ(dispatcher.stats().inflight, 0);
 }
 
 }  // namespace

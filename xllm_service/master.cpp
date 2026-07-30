@@ -112,6 +112,10 @@ void Master::stop() {
     readiness_thread_->join();
   }
 
+  // Backend callbacks must release inbound RPCs before Server::Join waits.
+  dispatcher_->close();
+  scheduler_->cancel_active_requests();
+
   if (http_server_started_) {
     http_server_.Join();
     http_server_started_ = false;
@@ -120,8 +124,6 @@ void Master::stop() {
     rpc_server_.Join();
     rpc_server_started_ = false;
   }
-
-  dispatcher_->close();
 
   runtime_state_.mark_stopped();
 }

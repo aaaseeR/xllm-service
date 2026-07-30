@@ -179,6 +179,34 @@ TEST(RequestSessionRegistryTest, CloseDrainsEventsAndRejectsNewWork) {
       []() { return false; }));
 }
 
+TEST(RequestSessionRegistryTest, CloseCancelsActiveSessions) {
+  std::vector<llm::StatusCode> status_codes;
+  std::vector<RequestTerminalReason> terminal_reasons;
+  RequestSessionRegistry registry(
+      {},
+      [&terminal_reasons](const std::shared_ptr<Request>&,
+                          RequestTerminalReason reason) {
+        terminal_reasons.push_back(reason);
+      },
+      1);
+  ASSERT_TRUE(registry.register_request(
+      make_registry_request("request-active"),
+      [&status_codes](llm::RequestOutput output) {
+        status_codes.push_back(output.status->code());
+        return true;
+      },
+      []() { return false; }));
+
+  registry.close();
+
+  EXPECT_EQ(status_codes,
+            (std::vector<llm::StatusCode>{llm::StatusCode::CANCELLED}));
+  EXPECT_EQ(terminal_reasons,
+            (std::vector<RequestTerminalReason>{
+                RequestTerminalReason::RUNTIME_CANCELLED}));
+  EXPECT_EQ(registry.size(), 0);
+}
+
 TEST(RequestSessionRegistryTest, ReportsClientDisconnectWithoutOutput) {
   int32_t output_count = 0;
   RequestTerminalReason terminal_reason = RequestTerminalReason::COMPLETED;

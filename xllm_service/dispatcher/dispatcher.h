@@ -30,6 +30,7 @@ limitations under the License.
 namespace xllm_service {
 
 struct DispatcherStats {
+  bool closed = false;
   uint64_t inflight = 0;
   uint64_t transport_failure_total = 0;
   size_t channel_count = 0;
