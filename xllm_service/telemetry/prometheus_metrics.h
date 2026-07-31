@@ -16,9 +16,8 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
-#include <string>
-
 #include <nlohmann/json.hpp>
+#include <string>
 
 namespace xllm_service {
 
@@ -37,6 +36,7 @@ struct PrometheusMetricsSnapshot {
   double max_gpu_cache_usage_perc = 0.0;
   uint64_t transport_inflight = 0;
   uint64_t transport_failure_total = 0;
+  uint64_t stale_routing_decision_total = 0;
   uint64_t channel_count = 0;
   uint64_t endpoint_count = 0;
   uint64_t cache_index_size = 0;

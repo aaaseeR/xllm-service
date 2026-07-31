@@ -77,6 +77,7 @@ xllm-service需要启动一个http服务和一个rpc服务，http服务用于对
 ```bash
 ./build/xllm_service/xllm_master_serving \
     --routing_mode=external \
+    --external_routing_topology=aggregated \
     --external_backend_endpoint="xllm-runtime:8000" \
     --etcd_addr="127.0.0.1:2389" \
     --http_server_port=9888 \
@@ -89,6 +90,42 @@ xllm-service需要启动一个http服务和一个rpc服务，http服务用于对
 Endpoint，也不会维护旧的 KV 路由索引；在指定 Runtime 完成注册并恢复健康前，
 就绪探针保持不可用。
 
+外部 P/D 选路使用 `--external_routing_topology=pd`。此时配置的后端仍是当前
+adapter 自己持有的 Prefill Runtime。Gateway/EPP 必须先删除客户端携带的内部
+路由头，再为每个请求注入以下可信头：
+
+| Header | 必需值 |
+| --- | --- |
+| `x-llm-d-routing-decision-version` | `1` |
+| `x-llm-d-prefill-endpoint` | 与 adapter owner 配置完全相同 |
+| `x-llm-d-decode-endpoint` | 不同于 Prefill 的已注册 Decode Runtime |
+| `x-llm-d-routing-attempt` | 非负重试序号（可选） |
+
+xllm-service 在发送前校验角色、Endpoint 健康状态、incarnation、block size、
+KV hash seed 和 KV split size。格式错误或发送到错误 owner 的指令返回 HTTP 400
+和 `x-llm-d-error-code: invalid_routing_directive`；发送前已经过期的决策返回
+HTTP 503、`x-llm-d-error-code: stale_routing_decision`、
+`x-llm-d-retryable: true` 和 `Retry-After: 0`。Gateway 必须在有限重试次数和
+总 deadline 内重新请求 EPP 决策，不能复用原内部 P/D 路由头。可执行契约见
+[重试 smoke client](../../deploy/smoke/README.md)。
+
+xllm-service 与 xLLM 配套请求协议现在会传递期望的 Decode incarnation。Prefill
+在发起分离式 RPC 前拒绝已经变化的 Decode 注册，Decode 也会在构造请求和分配 KV
+block 前，用自己的 XService incarnation 校验期望值。仅为兼容旧发送方，空期望值在
+滚动升级期间仍被接受；生产 P/D 必须固定匹配的 service 与 Runtime 构建版本，并在
+开启功能门禁前通过预发 Decode 替换竞态测试。
+
+### 生产退出
+
+master 进程收到 `SIGTERM` 后会进入 draining 状态，`/readyz` 立即返回 `503`，
+同时拒绝新的推理请求，并允许正在执行的请求完成。可通过
+`--shutdown_grace_period_s` 设置平台允许的最大退出等待时间（默认 30 秒）。
+超过该时间仍未完成的请求会被取消，进程随后退出。Kubernetes 的
+`terminationGracePeriodSeconds` 应大于该参数，确保进程有足够时间完成清理。
+
+参数化的 Deployment、Service、PDB、InferencePool 以及可选 HTTPRoute 清单见
+[Kubernetes 部署契约](../../deploy/kubernetes/README.md)。
+
 完整的使用流程需要结合xllm一起使用，请查看链接: [xLLM PD分离部署](https://xllm.readthedocs.io/zh-cn/latest/zh/getting_started/PD_disagg/)
 
 ### service参数
@@ -100,6 +137,10 @@ http服务：用于对外接收以及处理用户请求。
 | http_server_idle_timeout_s | http 服务超时时间 | -1 |
 | http_server_num_threads | http 服务线程数 | 32 |
 | http_server_max_concurrency | http 服务最大请求并发数 | 128 |
+| shutdown_grace_period_s | 活动请求的优雅退出等待时间（秒） | 30 |
+| routing_mode | 路由权威：`legacy` 或 `external` | legacy |
+| external_routing_topology | 外部拓扑：`aggregated` 或 `pd` | aggregated |
+| external_backend_endpoint | external 模式下 adapter 持有的 Runtime `host:port` | "" |
 
 rpc服务：用于与xllm之间交互，管理xllm实例集群状态等。
 | 参数 | 说明 | 默认值 |

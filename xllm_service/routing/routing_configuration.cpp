@@ -66,8 +66,17 @@ const char* routing_mode_name(RoutingMode mode) {
   return "unknown";
 }
 
-const char* routing_configuration_error_name(
-    RoutingConfigurationError error) {
+const char* external_routing_topology_name(ExternalRoutingTopology topology) {
+  switch (topology) {
+    case ExternalRoutingTopology::AGGREGATED:
+      return "aggregated";
+    case ExternalRoutingTopology::DISAGGREGATED:
+      return "pd";
+  }
+  return "unknown";
+}
+
+const char* routing_configuration_error_name(RoutingConfigurationError error) {
   switch (error) {
     case RoutingConfigurationError::NONE:
       return "none";
@@ -79,19 +88,23 @@ const char* routing_configuration_error_name(
       return "external_backend_endpoint_in_legacy_mode";
     case RoutingConfigurationError::INVALID_EXTERNAL_BACKEND_ENDPOINT:
       return "invalid_external_backend_endpoint";
+    case RoutingConfigurationError::UNKNOWN_EXTERNAL_ROUTING_TOPOLOGY:
+      return "unknown_external_routing_topology";
+    case RoutingConfigurationError::EXTERNAL_ROUTING_TOPOLOGY_IN_LEGACY_MODE:
+      return "external_routing_topology_in_legacy_mode";
     case RoutingConfigurationError::NULL_OUTPUT:
       return "null_output";
   }
   return "unknown";
 }
 
-bool routing_configuration_result_ok(
-    const RoutingConfigurationResult& result) {
+bool routing_configuration_result_ok(const RoutingConfigurationResult& result) {
   return result.error == RoutingConfigurationError::NONE;
 }
 
 RoutingConfigurationResult parse_routing_configuration(
     const std::string& mode,
+    const std::string& external_routing_topology,
     const std::string& external_backend_endpoint,
     RoutingConfiguration* configuration) {
   if (configuration == nullptr) {
@@ -100,11 +113,26 @@ RoutingConfigurationResult parse_routing_configuration(
   }
 
   RoutingConfiguration parsed;
+  if (external_routing_topology == "aggregated") {
+    parsed.external_topology = ExternalRoutingTopology::AGGREGATED;
+  } else if (external_routing_topology == "pd") {
+    parsed.external_topology = ExternalRoutingTopology::DISAGGREGATED;
+  } else {
+    return make_configuration_error(
+        RoutingConfigurationError::UNKNOWN_EXTERNAL_ROUTING_TOPOLOGY,
+        "Unsupported external routing topology: " + external_routing_topology);
+  }
+
   if (mode == "legacy") {
     if (!external_backend_endpoint.empty()) {
       return make_configuration_error(
           RoutingConfigurationError::EXTERNAL_BACKEND_ENDPOINT_IN_LEGACY_MODE,
           "external_backend_endpoint is only valid in external routing mode");
+    }
+    if (parsed.external_topology != ExternalRoutingTopology::AGGREGATED) {
+      return make_configuration_error(
+          RoutingConfigurationError::EXTERNAL_ROUTING_TOPOLOGY_IN_LEGACY_MODE,
+          "external routing topology pd is only valid in external mode");
     }
   } else if (mode == "external") {
     if (external_backend_endpoint.empty()) {
@@ -120,9 +148,8 @@ RoutingConfigurationResult parse_routing_configuration(
     parsed.mode = RoutingMode::EXTERNAL;
     parsed.external_backend_endpoint = external_backend_endpoint;
   } else {
-    return make_configuration_error(
-        RoutingConfigurationError::UNKNOWN_MODE,
-        "Unsupported routing mode: " + mode);
+    return make_configuration_error(RoutingConfigurationError::UNKNOWN_MODE,
+                                    "Unsupported routing mode: " + mode);
   }
 
   *configuration = std::move(parsed);
@@ -137,12 +164,23 @@ RoutingDecision make_external_aggregated_routing_decision(
   return decision;
 }
 
+RoutingDecision make_external_pd_routing_decision(
+    const ExternalRoutingDirective& directive) {
+  RoutingDecision decision;
+  decision.source = RoutingDecisionSource::EXTERNAL;
+  decision.prefill_endpoint = directive.prefill_endpoint;
+  decision.decode_endpoint = directive.decode_endpoint;
+  decision.attempt = directive.attempt;
+  return decision;
+}
+
 bool routing_selection_result_ok(const RoutingSelectionResult& result) {
   return result.error == RoutingSelectionError::NONE;
 }
 
 RoutingSelectionResult resolve_routing_decision(
     const RoutingConfiguration& configuration,
+    const ExternalRoutingDirective& external_directive,
     const LegacyRoutingSelector& legacy_selector,
     RoutingDecision* decision) {
   if (decision == nullptr) {
@@ -152,6 +190,11 @@ RoutingSelectionResult resolve_routing_decision(
 
   switch (configuration.mode) {
     case RoutingMode::LEGACY:
+      if (external_directive.present) {
+        return make_selection_error(
+            RoutingSelectionError::EXTERNAL_DIRECTIVE_IN_LEGACY_MODE,
+            "External routing directive is not accepted in legacy mode");
+      }
       if (!legacy_selector) {
         return make_selection_error(
             RoutingSelectionError::LEGACY_SELECTOR_UNAVAILABLE,
@@ -165,8 +208,51 @@ RoutingSelectionResult resolve_routing_decision(
       }
       return {};
     case RoutingMode::EXTERNAL:
-      *decision =
-          make_external_aggregated_routing_decision(configuration);
+      if (configuration.external_topology ==
+          ExternalRoutingTopology::AGGREGATED) {
+        if (external_directive.present) {
+          return make_selection_error(
+              RoutingSelectionError::EXTERNAL_DIRECTIVE_IN_AGGREGATED_MODE,
+              "External P/D directive is not accepted in aggregated mode");
+        }
+        *decision = make_external_aggregated_routing_decision(configuration);
+        return {};
+      }
+      if (!external_directive.present) {
+        return make_selection_error(
+            RoutingSelectionError::MISSING_EXTERNAL_DIRECTIVE,
+            "External P/D routing requires a routing directive");
+      }
+      if (!external_directive.valid) {
+        return make_selection_error(
+            RoutingSelectionError::INVALID_EXTERNAL_DIRECTIVE,
+            external_directive.error.empty()
+                ? "External P/D routing directive is invalid"
+                : external_directive.error);
+      }
+      if (external_directive.version != kRoutingDecisionVersion) {
+        return make_selection_error(
+            RoutingSelectionError::UNSUPPORTED_EXTERNAL_DIRECTIVE_VERSION,
+            "Unsupported external routing directive version: " +
+                std::to_string(external_directive.version));
+      }
+      if (!valid_backend_endpoint(external_directive.prefill_endpoint) ||
+          !valid_backend_endpoint(external_directive.decode_endpoint) ||
+          external_directive.prefill_endpoint ==
+              external_directive.decode_endpoint) {
+        return make_selection_error(
+            RoutingSelectionError::INVALID_EXTERNAL_DIRECTIVE,
+            "External P/D routing requires distinct host:port prefill and "
+            "decode endpoints");
+      }
+      if (external_directive.prefill_endpoint !=
+          configuration.external_backend_endpoint) {
+        return make_selection_error(
+            RoutingSelectionError::EXTERNAL_OWNER_MISMATCH,
+            "External P/D prefill endpoint does not match this adapter "
+            "owner");
+      }
+      *decision = make_external_pd_routing_decision(external_directive);
       return {};
   }
   return make_selection_error(RoutingSelectionError::UNKNOWN_MODE,

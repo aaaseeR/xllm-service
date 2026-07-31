@@ -76,6 +76,7 @@ Use `external` mode when llm-d has already selected this adapter pod:
 ```bash
 ./build/xllm_service/xllm_master_serving \
     --routing_mode=external \
+    --external_routing_topology=aggregated \
     --external_backend_endpoint="xllm-runtime:8000" \
     --etcd_addr="127.0.0.1:2389" \
     --http_server_port=9888 \
@@ -88,6 +89,52 @@ by one aggregated (`DEFAULT`) xLLM runtime. In external mode xllm-service does
 not choose another endpoint or maintain its legacy KV routing index. Readiness
 remains unavailable until the configured runtime is registered and healthy.
 
+For externally selected P/D routing, set
+`--external_routing_topology=pd`. The configured backend remains the adapter's
+owned prefill Runtime. Gateway/EPP must strip client-supplied internal routing
+headers and inject all of the following headers on every request:
+
+| Header | Required value |
+| --- | --- |
+| `x-llm-d-routing-decision-version` | `1` |
+| `x-llm-d-prefill-endpoint` | Exact configured adapter owner |
+| `x-llm-d-decode-endpoint` | Distinct registered decode Runtime |
+| `x-llm-d-routing-attempt` | Non-negative attempt number (optional) |
+
+xllm-service validates the selected roles, endpoint health, incarnation,
+block size, KV hash seed, and KV split size before dispatch. A malformed or
+foreign directive returns HTTP 400 with
+`x-llm-d-error-code: invalid_routing_directive`. A decision that became stale
+before dispatch returns HTTP 503 with
+`x-llm-d-error-code: stale_routing_decision`,
+`x-llm-d-retryable: true`, and `Retry-After: 0`. Gateway must obtain a fresh
+EPP decision within a bounded retry budget; it must not replay the same
+internal P/D headers. See the
+[retry smoke client](../../deploy/smoke/README.md) for the executable contract.
+
+The paired xllm-service and xLLM request protocol carries the expected Decode
+incarnation. Prefill rejects a changed Decode registration before issuing the
+disaggregated RPC, and Decode checks the expected value against its own
+XService incarnation before constructing requests or allocating KV blocks.
+An empty expected value is accepted only for rolling compatibility with an
+older sender. Production P/D must pin matching service and Runtime builds and
+pass a replacement-race test in pre-production before the feature gate is
+enabled.
+
+### Production shutdown
+
+The master process handles `SIGTERM` by marking the instance draining. The
+`/readyz` probe immediately returns `503`, and new inference requests are
+rejected while in-flight requests are allowed to finish. Set
+`--shutdown_grace_period_s` to the maximum drain window supported by the
+platform (default: 30 seconds). Requests still active when the deadline
+expires are cancelled before the process exits. Configure the Kubernetes
+`terminationGracePeriodSeconds` to be longer than this value so the process can
+finish its cleanup.
+
+For the parameterized Deployment, Service, PDB, InferencePool, and optional
+HTTPRoute, see the [Kubernetes deployment contract](../../deploy/kubernetes/README.md).
+
 The complete usage process needs to be used with xllm, please refer to the link: [xLLM PD Disaggregated Deployment](https://xllm.readthedocs.io/zh-cn/latest/zh/getting_started/PD_disagg/)
 
 ### service Parameters
@@ -99,6 +146,10 @@ http service：It is used to receive and process user requests.
 | http_server_idle_timeout_s | http service timeout | -1 |
 | http_server_num_threads | http service thread number | 32 |
 | http_server_max_concurrency | http service max concurrency | 128 |
+| shutdown_grace_period_s | maximum graceful shutdown wait for active requests (seconds) | 30 |
+| routing_mode | routing authority: `legacy` or `external` | legacy |
+| external_routing_topology | external topology: `aggregated` or `pd` | aggregated |
+| external_backend_endpoint | exact adapter-owned Runtime `host:port` in external mode | "" |
 
 rpc service：It is used to interact with xllm, manage the status of xllm instance clusters, etc.
 | Parameter | Description | Default Value |

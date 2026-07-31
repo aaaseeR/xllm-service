@@ -29,6 +29,8 @@ const char* transport_result_code_name(TransportResultCode code) {
       return "dispatcher_closed";
     case TransportResultCode::INVALID_ROUTING_DECISION:
       return "invalid_routing_decision";
+    case TransportResultCode::STALE_ROUTING_DECISION:
+      return "stale_routing_decision";
   }
   return "unknown";
 }
@@ -41,6 +43,22 @@ const char* transport_failure_stage_name(TransportFailureStage stage) {
       return "after_first_token";
   }
   return "unknown";
+}
+
+const char* transport_retryability_name(TransportRetryability retryability) {
+  switch (retryability) {
+    case TransportRetryability::NOT_RETRYABLE:
+      return "not_retryable";
+    case TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN:
+      return "retryable_before_first_token";
+  }
+  return "unknown";
+}
+
+bool transport_result_is_retryable(const TransportResult& result) {
+  return result.retryability ==
+             TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN &&
+         result.failure_stage == TransportFailureStage::BEFORE_FIRST_TOKEN;
 }
 
 }  // namespace xllm_service

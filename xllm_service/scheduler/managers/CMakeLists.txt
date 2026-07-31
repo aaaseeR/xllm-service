@@ -19,6 +19,7 @@ cc_library(
     :common
     :etcd_client
     :request
+    :routing
     absl::random_random
     absl::strings
     glog::glog

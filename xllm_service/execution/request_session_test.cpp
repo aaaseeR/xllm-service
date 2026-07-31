@@ -74,9 +74,9 @@ TEST(RequestSessionTest, ProcessesGenerationAndCompletesOnce) {
 
   EXPECT_EQ(output_count, 2);
   EXPECT_EQ(generation_count, 2);
-  EXPECT_EQ(terminal_reasons,
-            (std::vector<RequestTerminalReason>{
-                RequestTerminalReason::COMPLETED}));
+  EXPECT_EQ(
+      terminal_reasons,
+      (std::vector<RequestTerminalReason>{RequestTerminalReason::COMPLETED}));
 }
 
 TEST(RequestSessionTest, TransportFailureWritesErrorAndFailsOnce) {
@@ -107,14 +107,63 @@ TEST(RequestSessionTest, TransportFailureWritesErrorAndFailsOnce) {
             (std::vector<llm::StatusCode>{llm::StatusCode::UNAVAILABLE}));
   EXPECT_EQ(terminal_reasons,
             (std::vector<RequestTerminalReason>{
-                RequestTerminalReason::
-                    TRANSPORT_FAILURE_BEFORE_FIRST_TOKEN}));
+                RequestTerminalReason::TRANSPORT_FAILURE_BEFORE_FIRST_TOKEN}));
+}
+
+TEST(RequestSessionTest, PreservesRetryableStaleFailureBeforeFirstToken) {
+  auto request = make_request();
+  RequestTerminalReason terminal_reason = RequestTerminalReason::COMPLETED;
+  RequestSession session(
+      request,
+      [](llm::RequestOutput) { return true; },
+      []() { return false; },
+      {},
+      [&terminal_reason](const std::shared_ptr<Request>&,
+                         RequestTerminalReason reason) {
+        terminal_reason = reason;
+      });
+
+  TransportResult result;
+  result.request_id = request->service_request_id;
+  result.code = TransportResultCode::STALE_ROUTING_DECISION;
+  result.retryability = TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN;
+  result.message = "Backend endpoint incarnation is stale";
+
+  ASSERT_TRUE(session.on_dispatched());
+  EXPECT_TRUE(session.on_transport_failure(result));
+  EXPECT_EQ(request->last_transport_result_code,
+            TransportResultCode::STALE_ROUTING_DECISION);
+  EXPECT_EQ(request->last_transport_retryability,
+            TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN);
+  EXPECT_EQ(terminal_reason,
+            RequestTerminalReason::TRANSPORT_FAILURE_BEFORE_FIRST_TOKEN);
+}
+
+TEST(RequestSessionTest, RemovesRetryabilityAfterGenerationStarts) {
+  auto request = make_request();
+  RequestSession session(
+      request,
+      [](llm::RequestOutput) { return true; },
+      []() { return false; },
+      {},
+      {});
+
+  TransportResult result;
+  result.request_id = request->service_request_id;
+  result.code = TransportResultCode::STALE_ROUTING_DECISION;
+  result.retryability = TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN;
+  result.message = "Backend endpoint incarnation changed";
+
+  ASSERT_TRUE(session.on_dispatched());
+  ASSERT_TRUE(session.on_generation(make_output(true, false)));
+  EXPECT_TRUE(session.on_transport_failure(result));
+  EXPECT_EQ(request->last_transport_retryability,
+            TransportRetryability::NOT_RETRYABLE);
 }
 
 TEST(RequestSessionTest, ClassifiesTransportFailureAfterGenerationStarts) {
   auto request = make_request();
-  RequestTerminalReason terminal_reason =
-      RequestTerminalReason::COMPLETED;
+  RequestTerminalReason terminal_reason = RequestTerminalReason::COMPLETED;
   RequestSession session(
       request,
       [](llm::RequestOutput) { return true; },
@@ -185,8 +234,7 @@ TEST(RequestSessionTest, CancelsDisconnectedClientWithoutOutput) {
 
   EXPECT_EQ(session.state(), RequestSessionState::CANCELLED);
   EXPECT_EQ(output_count, 0);
-  EXPECT_EQ(terminal_reason,
-            RequestTerminalReason::CLIENT_DISCONNECTED);
+  EXPECT_EQ(terminal_reason, RequestTerminalReason::CLIENT_DISCONNECTED);
 }
 
 TEST(RequestSessionTest, PrefillFailureOnlyMatchesBeforePrefillCompletes) {

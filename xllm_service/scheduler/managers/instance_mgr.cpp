@@ -39,6 +39,7 @@ limitations under the License.
 #include "common/xllm/output.h"
 #include "common/xllm/status.h"
 #include "disagg_pd.pb.h"
+#include "routing/pd_compatibility.h"
 
 namespace {
 using xllm_service::InstanceRuntimeState;
@@ -105,8 +106,9 @@ size_t count_schedulable_instances(
   return count;
 }
 
-void validate_instance_cache_config(const xllm_service::Options& options,
-                                    const xllm_service::InstanceMetaInfo& info) {
+void validate_instance_cache_config(
+    const xllm_service::Options& options,
+    const xllm_service::InstanceMetaInfo& info) {
   if (info.block_size > 0 && info.block_size != options.block_size()) {
     LOG(WARNING) << "Instance block_size does not match xllm-service config, "
                  << "instance: " << info.name
@@ -117,8 +119,7 @@ void validate_instance_cache_config(const xllm_service::Options& options,
       info.xxh3_128bits_seed != options.xxh3_128bits_seed()) {
     LOG(WARNING) << "Instance xxh3_128bits_seed does not match "
                     "xllm-service config, instance: "
-                 << info.name << ", instance_seed: "
-                 << info.xxh3_128bits_seed
+                 << info.name << ", instance_seed: " << info.xxh3_128bits_seed
                  << ", service_seed: " << options.xxh3_128bits_seed();
   }
 }
@@ -376,16 +377,14 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos) {
 
   if (infos->prefill_load_metrics.size() == 0 &&
       !least_loaded_prefill_instance.empty()) {
-    infos->prefill_load_metrics.insert(
-        std::make_pair(least_loaded_prefill_instance,
-                       least_loaded_prefill_metrics));
+    infos->prefill_load_metrics.insert(std::make_pair(
+        least_loaded_prefill_instance, least_loaded_prefill_metrics));
   }
 
   if (infos->decode_load_metrics.size() == 0 &&
       !least_loaded_decode_instance.empty()) {
-    infos->decode_load_metrics.insert(
-        std::make_pair(least_loaded_decode_instance,
-                       least_loaded_decode_metrics));
+    infos->decode_load_metrics.insert(std::make_pair(
+        least_loaded_decode_instance, least_loaded_decode_metrics));
   }
 }
 
@@ -545,22 +544,53 @@ bool InstanceMgr::bind_request_instance_incarnations(
   return true;
 }
 
-bool InstanceMgr::bind_aggregated_instance_incarnation(
-    RoutingDecision* decision) const {
-  if (decision == nullptr || decision->prefill_endpoint.empty() ||
-      !decision->decode_endpoint.empty()) {
+bool InstanceMgr::bind_external_routing_decision(
+    RoutingDecision* decision,
+    ExternalRoutingTopology topology) const {
+  if (decision == nullptr || decision->prefill_endpoint.empty()) {
     return false;
   }
 
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
-  auto it = instances_.find(decision->prefill_endpoint);
-  if (it == instances_.end() || !is_instance_schedulable(it->second) ||
-      it->second.type != InstanceType::DEFAULT) {
+  auto prefill_it = instances_.find(decision->prefill_endpoint);
+  if (prefill_it == instances_.end() ||
+      !is_instance_schedulable(prefill_it->second)) {
     return false;
   }
-  decision->prefill_incarnation = it->second.incarnation_id;
+  decision->prefill_incarnation.clear();
   decision->decode_incarnation.clear();
-  return !decision->prefill_incarnation.empty();
+
+  if (topology == ExternalRoutingTopology::AGGREGATED) {
+    if (!decision->decode_endpoint.empty() ||
+        prefill_it->second.type != InstanceType::DEFAULT) {
+      return false;
+    }
+    decision->prefill_incarnation = prefill_it->second.incarnation_id;
+    return !decision->prefill_incarnation.empty();
+  }
+
+  if (decision->decode_endpoint.empty()) {
+    return false;
+  }
+  auto decode_it = instances_.find(decision->decode_endpoint);
+  if (decode_it == instances_.end() ||
+      !is_instance_schedulable(decode_it->second)) {
+    return false;
+  }
+  const PdCompatibilityResult compatibility =
+      validate_external_pd_compatibility(prefill_it->second,
+                                         decode_it->second,
+                                         options_.block_size(),
+                                         options_.xxh3_128bits_seed());
+  if (!pd_compatibility_result_ok(compatibility)) {
+    LOG(ERROR) << "External P/D routing is incompatible: "
+               << compatibility.message;
+    return false;
+  }
+  decision->prefill_incarnation = prefill_it->second.incarnation_id;
+  decision->decode_incarnation = decode_it->second.incarnation_id;
+  return !decision->prefill_incarnation.empty() &&
+         !decision->decode_incarnation.empty();
 }
 
 bool InstanceMgr::record_instance_heartbeat(const std::string& instance_name,
@@ -1346,8 +1376,7 @@ void InstanceMgr::deregister_instance(
     gather_unlink_operations(name, info, &unlink_ops);
   }
 
-  lifecycle_events_.publish(
-      {InstanceLifecycleEventType::DEREGISTERING, info});
+  lifecycle_events_.publish({InstanceLifecycleEventType::DEREGISTERING, info});
 
   for (const auto& op : unlink_ops) {
     call_unlink_instance(op.first, op.second);
@@ -1599,12 +1628,31 @@ bool InstanceMgr::has_available_instances() const {
          (has_mix_as_prefill && has_mix_as_decode);
 }
 
-bool InstanceMgr::has_available_aggregated_instance(
-    const std::string& instance_name) const {
+bool InstanceMgr::has_available_external_endpoint(
+    const std::string& instance_name,
+    ExternalRoutingTopology topology) const {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
   auto it = instances_.find(instance_name);
-  return it != instances_.end() && is_instance_schedulable(it->second) &&
-         it->second.type == InstanceType::DEFAULT;
+  if (it == instances_.end() || !is_instance_schedulable(it->second)) {
+    return false;
+  }
+  if (topology == ExternalRoutingTopology::AGGREGATED) {
+    return it->second.type == InstanceType::DEFAULT;
+  }
+
+  for (const auto& [decode_name, decode] : instances_) {
+    if (decode_name == instance_name || !is_instance_schedulable(decode)) {
+      continue;
+    }
+    if (pd_compatibility_result_ok(
+            validate_external_pd_compatibility(it->second,
+                                               decode,
+                                               options_.block_size(),
+                                               options_.xxh3_128bits_seed()))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 nlohmann::json InstanceMgr::debug_summary() const {
@@ -1638,9 +1686,8 @@ nlohmann::json InstanceMgr::debug_summary() const {
   }
 
   for (const auto& [name, metrics] : latency_metrics_) {
-    latency_metrics_json[name] = {
-        {"recent_max_ttft", metrics.recent_max_ttft},
-        {"recent_max_tbt", metrics.recent_max_tbt}};
+    latency_metrics_json[name] = {{"recent_max_ttft", metrics.recent_max_ttft},
+                                  {"recent_max_tbt", metrics.recent_max_tbt}};
   }
 
   summary["instances"] = std::move(instances_json);

@@ -45,15 +45,16 @@ TEST(PrometheusMetricsTest, BuildsSnapshotFromLegacyDebugSummary) {
       {"dispatcher",
        {{"inflight", 3},
         {"transport_failure_total", 7},
+        {"stale_routing_decision_total", 2},
         {"channel_count", 2},
         {"endpoint_count", 4}}}};
 
-  PrometheusMetricsSnapshot snapshot = build_prometheus_metrics_snapshot(
-      summary,
-      "fallback",
-      /*block_size=*/128,
-      /*ready=*/true,
-      /*runtime_phase=*/"running");
+  PrometheusMetricsSnapshot snapshot =
+      build_prometheus_metrics_snapshot(summary,
+                                        "fallback",
+                                        /*block_size=*/128,
+                                        /*ready=*/true,
+                                        /*runtime_phase=*/"running");
 
   EXPECT_EQ(snapshot.service_name, "127.0.0.1:8889");
   EXPECT_TRUE(snapshot.ready);
@@ -65,6 +66,7 @@ TEST(PrometheusMetricsTest, BuildsSnapshotFromLegacyDebugSummary) {
   EXPECT_DOUBLE_EQ(snapshot.max_gpu_cache_usage_perc, 0.75);
   EXPECT_EQ(snapshot.transport_inflight, 3);
   EXPECT_EQ(snapshot.transport_failure_total, 7);
+  EXPECT_EQ(snapshot.stale_routing_decision_total, 2);
   EXPECT_EQ(snapshot.channel_count, 2);
   EXPECT_EQ(snapshot.endpoint_count, 4);
   EXPECT_EQ(snapshot.cache_index_size, 10);
@@ -82,6 +84,7 @@ TEST(PrometheusMetricsTest, RendersLlmDCompatibleMetrics) {
   snapshot.max_gpu_cache_usage_perc = 0.75;
   snapshot.transport_inflight = 3;
   snapshot.transport_failure_total = 7;
+  snapshot.stale_routing_decision_total = 2;
   snapshot.channel_count = 2;
   snapshot.endpoint_count = 4;
 
@@ -95,18 +98,20 @@ TEST(PrometheusMetricsTest, RendersLlmDCompatibleMetrics) {
   EXPECT_NE(output.find("vllm:num_requests_waiting 8"), std::string::npos);
   EXPECT_NE(output.find("vllm:num_requests_running 6"), std::string::npos);
   EXPECT_NE(output.find("vllm:kv_cache_usage_perc 0.75"), std::string::npos);
-  EXPECT_NE(output.find("xllm_service_block_size 128"),
-            std::string::npos);
+  EXPECT_NE(output.find("xllm_service_block_size 128"), std::string::npos);
   EXPECT_NE(output.find("xllm_service_transport_inflight 3"),
             std::string::npos);
   EXPECT_NE(output.find("# TYPE xllm_service_transport_failures_total counter"),
             std::string::npos);
   EXPECT_NE(output.find("xllm_service_transport_failures_total 7"),
             std::string::npos);
-  EXPECT_NE(output.find("xllm_service_channel_count 2"),
+  EXPECT_NE(
+      output.find("# TYPE xllm_service_stale_routing_decisions_total counter"),
+      std::string::npos);
+  EXPECT_NE(output.find("xllm_service_stale_routing_decisions_total 2"),
             std::string::npos);
-  EXPECT_NE(output.find("xllm_service_endpoint_count 4"),
-            std::string::npos);
+  EXPECT_NE(output.find("xllm_service_channel_count 2"), std::string::npos);
+  EXPECT_NE(output.find("xllm_service_endpoint_count 4"), std::string::npos);
 }
 
 TEST(PrometheusMetricsTest, UsesAdapterSessionsInExternalRoutingMode) {
@@ -123,8 +128,7 @@ TEST(PrometheusMetricsTest, UsesAdapterSessionsInExternalRoutingMode) {
          {{"backend-a:8000",
            {{"waiting_requests_num", 4}, {"gpu_cache_usage_perc", 0.5}}},
           {"backend-b:8000",
-           {{"waiting_requests_num", 100},
-            {"gpu_cache_usage_perc", 0.99}}}}},
+           {{"waiting_requests_num", 100}, {"gpu_cache_usage_perc", 0.99}}}}},
         {"latency_metrics",
          {{"backend-a:8000", {{"recent_max_ttft", 1.0}}},
           {"backend-b:8000", {{"recent_max_ttft", 2.0}}}}}}},
@@ -146,8 +150,7 @@ TEST(PrometheusMetricsTest, UsesAdapterSessionsInExternalRoutingMode) {
   EXPECT_DOUBLE_EQ(snapshot.max_gpu_cache_usage_perc, 0.5);
   EXPECT_EQ(snapshot.cache_index_size, 0);
   const std::string output = render_prometheus_metrics(snapshot);
-  EXPECT_NE(output.find(
-                "xllm_service_routing_mode{mode=\"external\"} 1"),
+  EXPECT_NE(output.find("xllm_service_routing_mode{mode=\"external\"} 1"),
             std::string::npos);
   EXPECT_NE(output.find("vllm:num_requests_running 3"), std::string::npos);
 }

@@ -45,10 +45,12 @@ cc_library(
     scheduler
   HDRS
     response_handler.h
+    schedule_result.h
     scheduler.h
     xllm_chat_parse_bridge.h
   SRCS
     response_handler.cpp
+    schedule_result.cpp
     scheduler.cpp
   DEPS
     :chat_template

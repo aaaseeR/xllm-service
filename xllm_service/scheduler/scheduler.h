@@ -30,6 +30,7 @@ limitations under the License.
 #include "request/request.h"
 #include "response_handler.h"
 #include "routing/routing_configuration.h"
+#include "schedule_result.h"
 #include "tokenizer/tokenizer.h"
 #include "tokenizer/tokenizer_args.h"
 
@@ -45,7 +46,8 @@ class Scheduler final {
   ~Scheduler();
 
   void cancel_active_requests();
-  bool schedule(std::shared_ptr<Request> request);
+  size_t active_request_count() const;
+  ScheduleResult schedule(std::shared_ptr<Request> request);
 
   InstanceMetaInfo get_instance_info(const std::string& instance_name);
 
@@ -72,6 +74,7 @@ class Scheduler final {
                           std::shared_ptr<Request> request);
   bool record_new_request(std::shared_ptr<CompletionCallData> call_data,
                           std::shared_ptr<Request> request);
+  bool handle_transport_failure(const TransportResult& result);
   bool handle_transport_failure(const std::string& service_request_id,
                                 TransportFailureStage stage,
                                 const std::string& message);
@@ -100,8 +103,7 @@ class Scheduler final {
   void handle_xservice_watch(const etcd::Response& response,
                              const uint64_t& prefix_len);
 
-  void handle_instance_lifecycle_event(
-      const InstanceLifecycleEvent& event);
+  void handle_instance_lifecycle_event(const InstanceLifecycleEvent& event);
   void clear_requests_on_failed_instance(const std::string& instance_name,
                                          const std::string& incarnation_id,
                                          InstanceType type);
@@ -111,15 +113,14 @@ class Scheduler final {
                               const std::string& incarnation_id = "");
   void record_instance_cache_event(const std::string& instance_name,
                                    const proto::KvCacheEvent& cache_event);
-  void replace_instance_cache_snapshot(
-      const std::string& instance_name,
-      const proto::KvCacheEvent& cache_event);
-  void observe_session_generation(
-      const std::shared_ptr<Request>& request,
-      const llm::RequestOutput& output);
+  void replace_instance_cache_snapshot(const std::string& instance_name,
+                                       const proto::KvCacheEvent& cache_event);
+  void observe_session_generation(const std::shared_ptr<Request>& request,
+                                  const llm::RequestOutput& output);
   void handle_session_terminal(const std::shared_ptr<Request>& request,
                                RequestTerminalReason reason);
-  bool prepare_routing_decision(const std::shared_ptr<Request>& request);
+  ScheduleResult prepare_routing_decision(
+      const std::shared_ptr<Request>& request);
   bool uses_legacy_routing() const;
 
   Tokenizer* get_tls_tokenizer();

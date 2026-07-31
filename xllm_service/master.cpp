@@ -60,9 +60,7 @@ Master::Master(const Options& options,
         if (result.code == TransportResultCode::SUCCESS) {
           return;
         }
-        scheduler->handle_transport_failure(result.request_id,
-                                            result.failure_stage,
-                                            result.message);
+        scheduler->handle_transport_failure(result);
       });
 
   rpc_service_ =
@@ -95,9 +93,8 @@ bool Master::start() {
     return false;
   }
 
-  runtime_state_.set_backend_ready(
-      scheduler_->has_available_instances(),
-      scheduler_->backend_unavailable_reason());
+  runtime_state_.set_backend_ready(scheduler_->has_available_instances(),
+                                   scheduler_->backend_unavailable_reason());
   runtime_state_.mark_running();
   readiness_thread_ = std::make_unique<std::thread>(
       [this]() { reconcile_runtime_readiness(); });
@@ -123,9 +120,22 @@ void Master::stop() {
     readiness_thread_->join();
   }
 
+  const auto drain_deadline =
+      std::chrono::steady_clock::now() +
+      std::chrono::seconds(FLAGS_shutdown_grace_period_s);
+  while (scheduler_->active_request_count() > 0 &&
+         std::chrono::steady_clock::now() < drain_deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (scheduler_->active_request_count() > 0) {
+    LOG(WARNING) << "Graceful shutdown deadline reached with "
+                 << scheduler_->active_request_count()
+                 << " active request(s); cancelling them.";
+  }
+  scheduler_->cancel_active_requests();
+
   // Backend callbacks must release inbound RPCs before Server::Join waits.
   dispatcher_->close();
-  scheduler_->cancel_active_requests();
 
   if (http_server_started_) {
     http_server_.Join();
@@ -180,9 +190,8 @@ bool Master::setup_http_server() {
 
 void Master::reconcile_runtime_readiness() {
   while (!stopped_.load()) {
-    runtime_state_.set_backend_ready(
-        scheduler_->has_available_instances(),
-        scheduler_->backend_unavailable_reason());
+    runtime_state_.set_backend_ready(scheduler_->has_available_instances(),
+                                     scheduler_->backend_unavailable_reason());
 
     const auto end_time =
         std::chrono::steady_clock::now() +
@@ -231,9 +240,7 @@ bool Master::start_rpc_server() {
 }  // namespace xllm_service
 
 static volatile std::sig_atomic_t g_shutdown_signal = 0;
-void shutdown_handler(int signal) {
-  g_shutdown_signal = signal;
-}
+void shutdown_handler(int signal) { g_shutdown_signal = signal; }
 
 int main(int argc, char* argv[]) {
   // Initialize gflags
@@ -247,16 +254,19 @@ int main(int argc, char* argv[]) {
 
   xllm_service::RoutingConfiguration routing_configuration;
   const xllm_service::RoutingConfigurationResult routing_result =
-      xllm_service::parse_routing_configuration(
-          FLAGS_routing_mode,
-          FLAGS_external_backend_endpoint,
-          &routing_configuration);
+      xllm_service::parse_routing_configuration(FLAGS_routing_mode,
+                                                FLAGS_external_routing_topology,
+                                                FLAGS_external_backend_endpoint,
+                                                &routing_configuration);
   if (!xllm_service::routing_configuration_result_ok(routing_result)) {
     LOG(ERROR) << "Invalid routing configuration: " << routing_result.message;
     return -1;
   }
   LOG(INFO) << "Routing mode: "
-            << xllm_service::routing_mode_name(routing_configuration.mode);
+            << xllm_service::routing_mode_name(routing_configuration.mode)
+            << ", external topology: "
+            << xllm_service::external_routing_topology_name(
+                   routing_configuration.external_topology);
 
   xllm_service::Options options;
   options.server_host(FLAGS_server_host)

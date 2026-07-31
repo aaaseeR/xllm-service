@@ -27,8 +27,7 @@ TEST(RequestContextTest, ParsesCanonicalLlmDHeaders) {
                                       "tenant-a");
   controller.http_request().SetHeader("x-llm-d-inference-objective",
                                       "premium-traffic");
-  controller.http_request().SetHeader("x-llm-d-model-name-rewrite",
-                                      "qwen3");
+  controller.http_request().SetHeader("x-llm-d-model-name-rewrite", "qwen3");
   controller.http_request().SetHeader("x-llm-d-slo-ttft-ms", "275");
   controller.http_request().SetHeader("x-llm-d-slo-tpot-ms", "40");
 
@@ -91,6 +90,41 @@ TEST(RequestContextTest, ModelNameRewriteOverridesRequestBodyModel) {
   context.model_name_rewrite.clear();
   EXPECT_EQ(resolve_effective_model_name("public-model", context),
             "public-model");
+}
+
+TEST(RequestContextTest, ParsesVersionedExternalPdDirective) {
+  brpc::Controller controller;
+  controller.http_request().SetHeader("x-llm-d-routing-decision-version", "1");
+  controller.http_request().SetHeader("x-llm-d-prefill-endpoint",
+                                      "prefill:8000");
+  controller.http_request().SetHeader("x-llm-d-decode-endpoint", "decode:8000");
+  controller.http_request().SetHeader("x-llm-d-routing-attempt", "2");
+
+  const RequestContext context = parse_request_context(controller);
+
+  EXPECT_TRUE(context.has_llm_d_context);
+  EXPECT_TRUE(context.external_routing.present);
+  EXPECT_TRUE(context.external_routing.valid);
+  EXPECT_EQ(context.external_routing.version, 1);
+  EXPECT_EQ(context.external_routing.prefill_endpoint, "prefill:8000");
+  EXPECT_EQ(context.external_routing.decode_endpoint, "decode:8000");
+  EXPECT_EQ(context.external_routing.attempt, 2);
+}
+
+TEST(RequestContextTest, RejectsMalformedExternalPdDirectiveNumbers) {
+  brpc::Controller controller;
+  controller.http_request().SetHeader("x-llm-d-routing-decision-version",
+                                      "latest");
+  controller.http_request().SetHeader("x-llm-d-prefill-endpoint",
+                                      "prefill:8000");
+  controller.http_request().SetHeader("x-llm-d-decode-endpoint", "decode:8000");
+  controller.http_request().SetHeader("x-llm-d-routing-attempt", "-1");
+
+  const RequestContext context = parse_request_context(controller);
+
+  EXPECT_TRUE(context.external_routing.present);
+  EXPECT_FALSE(context.external_routing.valid);
+  EXPECT_FALSE(context.external_routing.error.empty());
 }
 
 }  // namespace

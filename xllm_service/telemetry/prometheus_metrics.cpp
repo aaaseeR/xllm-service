@@ -134,8 +134,8 @@ void append_labeled_gauge(std::ostringstream* out,
                           double value) {
   *out << "# HELP " << name << " " << help << "\n";
   *out << "# TYPE " << name << " gauge\n";
-  *out << name << "{" << label_name << "=\""
-       << escape_label_value(label_value) << "\"} " << value << "\n";
+  *out << name << "{" << label_name << "=\"" << escape_label_value(label_value)
+       << "\"} " << value << "\n";
 }
 
 }  // namespace
@@ -157,7 +157,8 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
   if (scheduler_summary.is_object() &&
       scheduler_summary.contains("service_name") &&
       scheduler_summary["service_name"].is_string()) {
-    snapshot.service_name = scheduler_summary["service_name"].get<std::string>();
+    snapshot.service_name =
+        scheduler_summary["service_name"].get<std::string>();
   }
 
   const nlohmann::json& instance_view =
@@ -173,8 +174,8 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
   const nlohmann::json& load_metrics =
       object_field(instance_view, "load_metrics");
   if (snapshot.routing_mode == "external") {
-    const std::string endpoint = read_string_field(
-        scheduler_summary, "external_backend_endpoint", "");
+    const std::string endpoint =
+        read_string_field(scheduler_summary, "external_backend_endpoint", "");
     auto it = load_metrics.find(endpoint);
     if (it != load_metrics.end() && it->is_object()) {
       snapshot.load_metrics_count = 1;
@@ -220,14 +221,18 @@ PrometheusMetricsSnapshot build_prometheus_metrics_snapshot(
   snapshot.transport_inflight = read_uint64_field(dispatcher, "inflight");
   snapshot.transport_failure_total =
       read_uint64_field(dispatcher, "transport_failure_total");
+  snapshot.stale_routing_decision_total =
+      read_uint64_field(dispatcher, "stale_routing_decision_total");
   snapshot.channel_count = read_uint64_field(dispatcher, "channel_count");
   snapshot.endpoint_count = read_uint64_field(dispatcher, "endpoint_count");
 
   const nlohmann::json& cache_index =
       object_field(scheduler_summary, "cache_index");
-  snapshot.cache_index_size = read_uint64_field(cache_index, "cache_index_size");
+  snapshot.cache_index_size =
+      read_uint64_field(cache_index, "cache_index_size");
   snapshot.hbm_entry_count = read_uint64_field(cache_index, "hbm_entry_count");
-  snapshot.dram_entry_count = read_uint64_field(cache_index, "dram_entry_count");
+  snapshot.dram_entry_count =
+      read_uint64_field(cache_index, "dram_entry_count");
   snapshot.ssd_entry_count = read_uint64_field(cache_index, "ssd_entry_count");
   snapshot.hbm_instance_count =
       read_uint64_field(cache_index, "hbm_instance_count");
@@ -281,10 +286,11 @@ std::string render_prometheus_metrics(
                "xllm_service_suspect_instance_count",
                "Number of suspect instances in the local xllm-service view.",
                static_cast<double>(snapshot.suspect_instance_count));
-  append_gauge(&out,
-               "xllm_service_cache_index_size",
-               "Number of prefix cache entries in the local legacy cache index.",
-               static_cast<double>(snapshot.cache_index_size));
+  append_gauge(
+      &out,
+      "xllm_service_cache_index_size",
+      "Number of prefix cache entries in the local legacy cache index.",
+      static_cast<double>(snapshot.cache_index_size));
   append_gauge(&out,
                "xllm_service_hbm_entry_count",
                "Number of prefix cache entries resident in HBM.",
@@ -321,6 +327,11 @@ std::string render_prometheus_metrics(
                  "xllm_service_transport_failures_total",
                  "Number of failed backend transport dispatches.",
                  snapshot.transport_failure_total);
+  append_counter(&out,
+                 "xllm_service_stale_routing_decisions_total",
+                 "Number of backend requests rejected because their routing "
+                 "decision was stale.",
+                 snapshot.stale_routing_decision_total);
   append_gauge(&out,
                "xllm_service_channel_count",
                "Number of initialized backend channels.",

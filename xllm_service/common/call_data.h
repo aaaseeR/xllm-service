@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include <brpc/controller.h>
+#include <brpc/http_status_code.h>
 #include <butil/iobuf.h>
 #include <glog/logging.h>
 #include <json2pb/pb_to_json.h>
@@ -85,15 +86,9 @@ class StreamCallData : public CallData {
     get_x_request_time(x_request_time, controller_);
 
     if (stream_) {
-      pa_ = controller_->CreateProgressiveAttachment();
-
-      controller_->http_response().set_content_type("text/event-stream");
-      controller_->http_response().set_status_code(200);
-      controller_->http_response().SetHeader("Connection", "keep-alive");
-      controller_->http_response().SetHeader("Cache-Control", "no-cache");
-      // Done Run first for steam response
-      done_->Run();
-
+      // Delay committing the HTTP 200 response until the first token. This
+      // preserves the ability to return a retryable 503 before generation
+      // produces any client-visible output.
     } else {
       controller_->http_response().SetHeader("Content-Type",
                                              "text/javascript; charset=utf-8");
@@ -112,7 +107,7 @@ class StreamCallData : public CallData {
 
   bool proceed(bool rpc_ok) override { return true; }
 
-  // For non stream response
+  // For non-stream response
   bool write_and_finish(const std::string& attachment /*json string*/) {
     if (trace_callback_) trace_callback_(attachment);
     controller_->response_attachment() = attachment;
@@ -137,10 +132,40 @@ class StreamCallData : public CallData {
     return true;
   }
 
-  // For non stream response
-  bool finish_with_error(const std::string& error_message) {
+  // Finish a terminal response error. Streaming errors before the first token
+  // can still use the normal HTTP status path because headers are deferred.
+  bool finish_with_error(const std::string& error_message,
+                         int http_status_code = 0,
+                         const std::string& error_code = "",
+                         bool retryable = false) {
     if (!stream_) {
       controller_->SetFailed(error_message);
+      if (http_status_code != 0) {
+        controller_->http_response().set_status_code(http_status_code);
+      }
+      if (!error_code.empty()) {
+        controller_->http_response().SetHeader("x-llm-d-error-code",
+                                               error_code);
+      }
+      if (retryable) {
+        controller_->http_response().SetHeader("x-llm-d-retryable", "true");
+        controller_->http_response().SetHeader("Retry-After", "0");
+      }
+    } else if (!stream_started_) {
+      controller_->SetFailed(error_message);
+      if (http_status_code != 0) {
+        controller_->http_response().set_status_code(http_status_code);
+      }
+      if (!error_code.empty()) {
+        controller_->http_response().SetHeader("x-llm-d-error-code",
+                                               error_code);
+      }
+      if (retryable) {
+        controller_->http_response().SetHeader("x-llm-d-retryable", "true");
+        controller_->http_response().SetHeader("Retry-After", "0");
+      }
+      controller_->response_attachment() = error_message;
+      finish_done();
     } else {
       io_buf_.clear();
       io_buf_.append(error_message);
@@ -152,6 +177,7 @@ class StreamCallData : public CallData {
 
   // For stream response
   bool write(const butil::IOBuf& attachment_iobuf) {
+    start_stream_response();
     if (trace_callback_) {
       std::string str;
       attachment_iobuf.copy_to(&str);
@@ -163,6 +189,7 @@ class StreamCallData : public CallData {
 
   // For stream response
   bool write(const std::string& attachment) {
+    start_stream_response();
     if (trace_callback_) trace_callback_(attachment);
     io_buf_.clear();
     io_buf_.append(attachment);
@@ -175,6 +202,7 @@ class StreamCallData : public CallData {
   }
 
   bool write(Response& response) {
+    start_stream_response();
     io_buf_.clear();
     io_buf_.append("data: ");
     butil::IOBufAsZeroCopyOutputStream json_output(&io_buf_);
@@ -197,6 +225,7 @@ class StreamCallData : public CallData {
   }
 
   bool finish() {
+    start_stream_response();
     io_buf_.clear();
     io_buf_.append("data: [DONE]\n\n");
 
@@ -221,6 +250,26 @@ class StreamCallData : public CallData {
   bool finished() { return finished_; }
 
  private:
+  void start_stream_response() {
+    if (!stream_ || stream_started_) {
+      return;
+    }
+    pa_ = controller_->CreateProgressiveAttachment();
+    controller_->http_response().set_content_type("text/event-stream");
+    controller_->http_response().set_status_code(200);
+    controller_->http_response().SetHeader("Connection", "keep-alive");
+    controller_->http_response().SetHeader("Cache-Control", "no-cache");
+    stream_started_ = true;
+    finish_done();
+  }
+
+  void finish_done() {
+    if (!done_called_ && done_ != nullptr) {
+      done_called_ = true;
+      done_->Run();
+    }
+  }
+
   brpc::Controller* controller_;
   ::google::protobuf::Closure* done_;
 
@@ -228,6 +277,8 @@ class StreamCallData : public CallData {
   Response* response_ = nullptr;
 
   bool stream_ = false;
+  bool stream_started_ = false;
+  bool done_called_ = false;
   butil::intrusive_ptr<brpc::ProgressiveAttachment> pa_;
   butil::IOBuf io_buf_;
 

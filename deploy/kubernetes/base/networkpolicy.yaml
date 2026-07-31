@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: xllm-service
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: xllm-service
+      app.kubernetes.io/component: adapter
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8888
+    # The current xLLM Runtime sends heartbeats to the elected adapter master.
+    # A same-pod Runtime inherits these pod labels, so only pool members need
+    # cross-pod access to the internal RPC endpoint.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: xllm-service
+              app.kubernetes.io/component: adapter
+      ports:
+        - protocol: TCP
+          port: 8889

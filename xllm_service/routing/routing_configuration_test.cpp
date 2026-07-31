@@ -23,7 +23,7 @@ namespace {
 TEST(RoutingConfigurationTest, ParsesLegacyModeWithoutExternalEndpoint) {
   RoutingConfiguration configuration;
   const RoutingConfigurationResult result =
-      parse_routing_configuration("legacy", "", &configuration);
+      parse_routing_configuration("legacy", "aggregated", "", &configuration);
 
   EXPECT_TRUE(routing_configuration_result_ok(result));
   EXPECT_EQ(configuration.mode, RoutingMode::LEGACY);
@@ -33,10 +33,12 @@ TEST(RoutingConfigurationTest, ParsesLegacyModeWithoutExternalEndpoint) {
 TEST(RoutingConfigurationTest, ParsesExternalAggregatedEndpoint) {
   RoutingConfiguration configuration;
   const RoutingConfigurationResult result = parse_routing_configuration(
-      "external", "127.0.0.1:8000", &configuration);
+      "external", "aggregated", "127.0.0.1:8000", &configuration);
 
   ASSERT_TRUE(routing_configuration_result_ok(result));
   EXPECT_EQ(configuration.mode, RoutingMode::EXTERNAL);
+  EXPECT_EQ(configuration.external_topology,
+            ExternalRoutingTopology::AGGREGATED);
   EXPECT_EQ(configuration.external_backend_endpoint, "127.0.0.1:8000");
 
   const RoutingDecision decision =
@@ -49,29 +51,42 @@ TEST(RoutingConfigurationTest, ParsesExternalAggregatedEndpoint) {
 
 TEST(RoutingConfigurationTest, RejectsAmbiguousOrIncompleteConfiguration) {
   RoutingConfiguration configuration;
+  EXPECT_EQ(
+      parse_routing_configuration(
+          "legacy", "aggregated", "127.0.0.1:8000", &configuration)
+          .error,
+      RoutingConfigurationError::EXTERNAL_BACKEND_ENDPOINT_IN_LEGACY_MODE);
+  EXPECT_EQ(
+      parse_routing_configuration("external", "aggregated", "", &configuration)
+          .error,
+      RoutingConfigurationError::MISSING_EXTERNAL_BACKEND_ENDPOINT);
+  EXPECT_EQ(
+      parse_routing_configuration(
+          "external", "aggregated", "https://backend:8000", &configuration)
+          .error,
+      RoutingConfigurationError::INVALID_EXTERNAL_BACKEND_ENDPOINT);
   EXPECT_EQ(parse_routing_configuration(
-                "legacy", "127.0.0.1:8000", &configuration)
-                .error,
-            RoutingConfigurationError::
-                EXTERNAL_BACKEND_ENDPOINT_IN_LEGACY_MODE);
-  EXPECT_EQ(parse_routing_configuration("external", "", &configuration).error,
-            RoutingConfigurationError::MISSING_EXTERNAL_BACKEND_ENDPOINT);
-  EXPECT_EQ(parse_routing_configuration(
-                "external", "https://backend:8000", &configuration)
+                "external", "aggregated", "backend:not-a-port", &configuration)
                 .error,
             RoutingConfigurationError::INVALID_EXTERNAL_BACKEND_ENDPOINT);
   EXPECT_EQ(parse_routing_configuration(
-                "external", "backend:not-a-port", &configuration)
+                "external", "aggregated", "backend:70000", &configuration)
                 .error,
             RoutingConfigurationError::INVALID_EXTERNAL_BACKEND_ENDPOINT);
+  EXPECT_EQ(
+      parse_routing_configuration("shadow", "aggregated", "", &configuration)
+          .error,
+      RoutingConfigurationError::UNKNOWN_MODE);
   EXPECT_EQ(parse_routing_configuration(
-                "external", "backend:70000", &configuration)
+                "external", "hybrid", "backend:8000", &configuration)
                 .error,
-            RoutingConfigurationError::INVALID_EXTERNAL_BACKEND_ENDPOINT);
-  EXPECT_EQ(parse_routing_configuration("shadow", "", &configuration).error,
-            RoutingConfigurationError::UNKNOWN_MODE);
-  EXPECT_EQ(parse_routing_configuration("legacy", "", nullptr).error,
-            RoutingConfigurationError::NULL_OUTPUT);
+            RoutingConfigurationError::UNKNOWN_EXTERNAL_ROUTING_TOPOLOGY);
+  EXPECT_EQ(
+      parse_routing_configuration("legacy", "pd", "", &configuration).error,
+      RoutingConfigurationError::EXTERNAL_ROUTING_TOPOLOGY_IN_LEGACY_MODE);
+  EXPECT_EQ(
+      parse_routing_configuration("legacy", "aggregated", "", nullptr).error,
+      RoutingConfigurationError::NULL_OUTPUT);
 }
 
 TEST(RoutingConfigurationTest, ExternalAuthorityDoesNotInvokeLegacySelector) {
@@ -83,6 +98,7 @@ TEST(RoutingConfigurationTest, ExternalAuthorityDoesNotInvokeLegacySelector) {
 
   const RoutingSelectionResult result = resolve_routing_decision(
       configuration,
+      {},
       [&legacy_selector_called]() {
         legacy_selector_called = true;
         return true;
@@ -100,6 +116,7 @@ TEST(RoutingConfigurationTest, LegacyAuthorityUsesOnlyLegacySelector) {
   RoutingDecision decision;
   const RoutingSelectionResult result = resolve_routing_decision(
       configuration,
+      {},
       [&decision]() {
         decision.prefill_endpoint = "legacy:8000";
         return true;
@@ -109,6 +126,62 @@ TEST(RoutingConfigurationTest, LegacyAuthorityUsesOnlyLegacySelector) {
   EXPECT_TRUE(routing_selection_result_ok(result));
   EXPECT_EQ(decision.source, RoutingDecisionSource::LEGACY);
   EXPECT_EQ(decision.prefill_endpoint, "legacy:8000");
+}
+
+TEST(RoutingConfigurationTest, ExternalPdRequiresVersionedOwnedPair) {
+  RoutingConfiguration configuration;
+  configuration.mode = RoutingMode::EXTERNAL;
+  configuration.external_topology = ExternalRoutingTopology::DISAGGREGATED;
+  configuration.external_backend_endpoint = "prefill:8000";
+  ExternalRoutingDirective directive;
+  directive.present = true;
+  directive.version = kRoutingDecisionVersion;
+  directive.prefill_endpoint = "prefill:8000";
+  directive.decode_endpoint = "decode:8000";
+  directive.attempt = 3;
+  RoutingDecision decision;
+
+  const RoutingSelectionResult result =
+      resolve_routing_decision(configuration, directive, {}, &decision);
+
+  EXPECT_TRUE(routing_selection_result_ok(result));
+  EXPECT_EQ(decision.source, RoutingDecisionSource::EXTERNAL);
+  EXPECT_EQ(decision.prefill_endpoint, "prefill:8000");
+  EXPECT_EQ(decision.decode_endpoint, "decode:8000");
+  EXPECT_EQ(decision.attempt, 3);
+}
+
+TEST(RoutingConfigurationTest,
+     ExternalPdRejectsMissingStaleOrForeignDirective) {
+  RoutingConfiguration configuration;
+  configuration.mode = RoutingMode::EXTERNAL;
+  configuration.external_topology = ExternalRoutingTopology::DISAGGREGATED;
+  configuration.external_backend_endpoint = "prefill:8000";
+  RoutingDecision decision;
+
+  EXPECT_EQ(resolve_routing_decision(configuration, {}, {}, &decision).error,
+            RoutingSelectionError::MISSING_EXTERNAL_DIRECTIVE);
+
+  ExternalRoutingDirective directive;
+  directive.present = true;
+  directive.version = kRoutingDecisionVersion + 1;
+  directive.prefill_endpoint = "prefill:8000";
+  directive.decode_endpoint = "decode:8000";
+  EXPECT_EQ(
+      resolve_routing_decision(configuration, directive, {}, &decision).error,
+      RoutingSelectionError::UNSUPPORTED_EXTERNAL_DIRECTIVE_VERSION);
+
+  directive.version = kRoutingDecisionVersion;
+  directive.prefill_endpoint = "other-prefill:8000";
+  EXPECT_EQ(
+      resolve_routing_decision(configuration, directive, {}, &decision).error,
+      RoutingSelectionError::EXTERNAL_OWNER_MISMATCH);
+
+  directive.prefill_endpoint = "prefill:8000";
+  directive.decode_endpoint = "prefill:8000";
+  EXPECT_EQ(
+      resolve_routing_decision(configuration, directive, {}, &decision).error,
+      RoutingSelectionError::INVALID_EXTERNAL_DIRECTIVE);
 }
 
 }  // namespace

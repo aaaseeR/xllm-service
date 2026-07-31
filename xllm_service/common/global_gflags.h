@@ -61,6 +61,8 @@ DECLARE_string(routing_mode);
 
 DECLARE_string(external_backend_endpoint);
 
+DECLARE_string(external_routing_topology);
+
 DECLARE_int32(detect_disconnected_instance_interval);
 
 DECLARE_int32(instance_delete_probe_timeout_ms);
@@ -94,3 +96,7 @@ DECLARE_string(tool_call_parser);
 DECLARE_string(reasoning_parser);
 
 DECLARE_int32(readiness_check_interval_s);
+
+// Maximum time to let in-flight requests finish after SIGTERM. New requests
+// are rejected as soon as the runtime enters draining.
+DECLARE_int32(shutdown_grace_period_s);

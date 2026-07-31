@@ -41,8 +41,7 @@ RoutingDecision make_routing_decision(const std::string& endpoint,
   return decision;
 }
 
-class DelayedCompletionService final
-    : public xllm::proto::XllmAPIService {
+class DelayedCompletionService final : public xllm::proto::XllmAPIService {
  public:
   void Completions(google::protobuf::RpcController*,
                    const xllm::proto::CompletionRequest* request,
@@ -84,14 +83,13 @@ class DelayedCompletionService final
   google::protobuf::Closure* done_ = nullptr;
 };
 
-TEST(DispatcherTest, ReportsUnavailableGenerationChannel) {
-  auto pool = std::make_shared<ChannelPool>([](const std::string&) {
-    return std::shared_ptr<brpc::Channel>();
-  });
+TEST(DispatcherTest, ReportsStaleGenerationDecisionAsRetryable) {
+  auto pool = std::make_shared<ChannelPool>(
+      [](const std::string&) { return std::shared_ptr<brpc::Channel>(); });
   std::vector<TransportResult> results;
-  Dispatcher dispatcher(
-      pool,
-      [&results](const TransportResult& result) { results.push_back(result); });
+  Dispatcher dispatcher(pool, [&results](const TransportResult& result) {
+    results.push_back(result);
+  });
 
   xllm::proto::CompletionRequest request;
   EXPECT_TRUE(dispatcher.dispatch_completion(
@@ -101,17 +99,40 @@ TEST(DispatcherTest, ReportsUnavailableGenerationChannel) {
 
   ASSERT_EQ(results.size(), 1);
   EXPECT_EQ(results[0].request_id, "request-1");
-  EXPECT_EQ(results[0].code, TransportResultCode::CHANNEL_UNAVAILABLE);
+  EXPECT_EQ(results[0].code, TransportResultCode::STALE_ROUTING_DECISION);
   EXPECT_EQ(results[0].failure_stage,
             TransportFailureStage::BEFORE_FIRST_TOKEN);
+  EXPECT_EQ(results[0].retryability,
+            TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN);
+  EXPECT_TRUE(transport_result_is_retryable(results[0]));
   EXPECT_EQ(dispatcher.stats().inflight, 0);
   EXPECT_EQ(dispatcher.stats().transport_failure_total, 1);
+  EXPECT_EQ(dispatcher.stats().stale_routing_decision_total, 1);
+}
+
+TEST(DispatcherTest, ReportsChannelInitializationFailureAsNonRetryable) {
+  auto pool = std::make_shared<ChannelPool>(
+      [](const std::string&) { return std::shared_ptr<brpc::Channel>(); });
+  ASSERT_TRUE(pool->activate("127.0.0.1:8000", "incarnation-1"));
+  TransportResult observed;
+  Dispatcher dispatcher(
+      pool, [&observed](const TransportResult& result) { observed = result; });
+
+  xllm::proto::CompletionRequest request;
+  EXPECT_TRUE(dispatcher.dispatch_completion(
+      make_routing_decision("127.0.0.1:8000", "incarnation-1"),
+      "request-1",
+      request));
+
+  EXPECT_EQ(observed.code, TransportResultCode::CHANNEL_UNAVAILABLE);
+  EXPECT_EQ(observed.retryability, TransportRetryability::NOT_RETRYABLE);
+  EXPECT_FALSE(transport_result_is_retryable(observed));
+  EXPECT_EQ(dispatcher.stats().stale_routing_decision_total, 0);
 }
 
 TEST(DispatcherTest, ReportsInvalidRoutingDecision) {
-  auto pool = std::make_shared<ChannelPool>([](const std::string&) {
-    return std::shared_ptr<brpc::Channel>();
-  });
+  auto pool = std::make_shared<ChannelPool>(
+      [](const std::string&) { return std::shared_ptr<brpc::Channel>(); });
   TransportResult observed;
   int observer_count = 0;
   Dispatcher dispatcher(pool, [&](const TransportResult& result) {
@@ -122,21 +143,18 @@ TEST(DispatcherTest, ReportsInvalidRoutingDecision) {
   RoutingDecision decision;
   decision.prefill_endpoint = "127.0.0.1:8000";
   xllm::proto::CompletionRequest request;
-  EXPECT_TRUE(
-      dispatcher.dispatch_completion(decision, "request-1", request));
+  EXPECT_TRUE(dispatcher.dispatch_completion(decision, "request-1", request));
 
   EXPECT_EQ(observer_count, 1);
   EXPECT_EQ(observed.request_id, "request-1");
-  EXPECT_EQ(observed.code,
-            TransportResultCode::INVALID_ROUTING_DECISION);
+  EXPECT_EQ(observed.code, TransportResultCode::INVALID_ROUTING_DECISION);
   EXPECT_EQ(dispatcher.stats().inflight, 0);
   EXPECT_EQ(dispatcher.stats().transport_failure_total, 1);
 }
 
 TEST(DispatcherTest, ReportsUnavailableModelsChannelToCaller) {
-  auto pool = std::make_shared<ChannelPool>([](const std::string&) {
-    return std::shared_ptr<brpc::Channel>();
-  });
+  auto pool = std::make_shared<ChannelPool>(
+      [](const std::string&) { return std::shared_ptr<brpc::Channel>(); });
   Dispatcher dispatcher(pool, {});
   TransportResult observed;
   int callback_count = 0;
@@ -146,26 +164,25 @@ TEST(DispatcherTest, ReportsUnavailableModelsChannelToCaller) {
       "127.0.0.1:8000",
       "incarnation-1",
       request,
-      [&observed, &callback_count](
-          const TransportResult& result,
-          const xllm::proto::ModelListResponse&) {
+      [&observed, &callback_count](const TransportResult& result,
+                                   const xllm::proto::ModelListResponse&) {
         observed = result;
         ++callback_count;
       }));
 
   EXPECT_EQ(callback_count, 1);
-  EXPECT_EQ(observed.code, TransportResultCode::CHANNEL_UNAVAILABLE);
+  EXPECT_EQ(observed.code, TransportResultCode::STALE_ROUTING_DECISION);
+  EXPECT_EQ(observed.retryability,
+            TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN);
   EXPECT_EQ(dispatcher.stats().inflight, 0);
 }
 
 TEST(DispatcherTest, RejectsDispatchAfterClose) {
-  auto pool = std::make_shared<ChannelPool>([](const std::string&) {
-    return std::shared_ptr<brpc::Channel>();
-  });
+  auto pool = std::make_shared<ChannelPool>(
+      [](const std::string&) { return std::shared_ptr<brpc::Channel>(); });
   int observer_count = 0;
-  Dispatcher dispatcher(pool, [&observer_count](const TransportResult&) {
-    ++observer_count;
-  });
+  Dispatcher dispatcher(
+      pool, [&observer_count](const TransportResult&) { ++observer_count; });
   dispatcher.close();
 
   xllm::proto::ChatRequest request;
@@ -179,12 +196,8 @@ TEST(DispatcherTest, RejectsDispatchAfterClose) {
 TEST(DispatcherTest, CloseCancelsInflightRpc) {
   DelayedCompletionService service;
   brpc::Server server;
-  ASSERT_EQ(server.AddService(
-                &service, brpc::SERVER_DOESNT_OWN_SERVICE),
-            0);
-  ASSERT_EQ(server.Start("127.0.0.1",
-                         brpc::PortRange(19000, 19999),
-                         nullptr),
+  ASSERT_EQ(server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE), 0);
+  ASSERT_EQ(server.Start("127.0.0.1", brpc::PortRange(20000, 40000), nullptr),
             0);
 
   const std::string endpoint =
@@ -195,20 +208,16 @@ TEST(DispatcherTest, CloseCancelsInflightRpc) {
   ASSERT_TRUE(pool->activate(endpoint, "incarnation-1"));
 
   std::atomic<int32_t> observer_count{0};
-  std::atomic<TransportResultCode> observed_code{
-      TransportResultCode::SUCCESS};
+  std::atomic<TransportResultCode> observed_code{TransportResultCode::SUCCESS};
   Dispatcher dispatcher(
-      pool,
-      [&observer_count, &observed_code](const TransportResult& result) {
+      pool, [&observer_count, &observed_code](const TransportResult& result) {
         observed_code.store(result.code);
         ++observer_count;
       });
   xllm::proto::CompletionRequest request;
   request.set_service_request_id("request-owned-by-dispatcher");
   ASSERT_TRUE(dispatcher.dispatch_completion(
-      make_routing_decision(endpoint, "incarnation-1"),
-      "request-1",
-      request));
+      make_routing_decision(endpoint, "incarnation-1"), "request-1", request));
   const bool request_received = service.wait_until_received();
   EXPECT_TRUE(request_received);
   if (!request_received) {
@@ -235,9 +244,9 @@ TEST(DispatcherTest, CloseCancelsInflightRpc) {
   {
     std::unique_lock<std::mutex> lock(close_mutex);
     cancelled = close_condition.wait_for(
-        lock,
-        std::chrono::seconds(2),
-        [&close_returned]() { return close_returned.load(); });
+        lock, std::chrono::seconds(2), [&close_returned]() {
+          return close_returned.load();
+        });
   }
 
   service.finish();
@@ -269,12 +278,10 @@ TEST(DispatcherTest, CloseRejectsDispatchWaitingForChannelCreation) {
 
   TransportResult observed;
   std::atomic<int32_t> observer_count{0};
-  Dispatcher dispatcher(
-      pool,
-      [&](const TransportResult& result) {
-        observed = result;
-        ++observer_count;
-      });
+  Dispatcher dispatcher(pool, [&](const TransportResult& result) {
+    observed = result;
+    ++observer_count;
+  });
   xllm::proto::CompletionRequest request;
   std::atomic<bool> dispatched{false};
   std::thread dispatch_thread([&]() {
@@ -288,9 +295,9 @@ TEST(DispatcherTest, CloseRejectsDispatchWaitingForChannelCreation) {
   {
     std::unique_lock<std::mutex> lock(factory_mutex);
     factory_was_entered = factory_condition.wait_for(
-        lock,
-        std::chrono::seconds(2),
-        [&factory_entered]() { return factory_entered; });
+        lock, std::chrono::seconds(2), [&factory_entered]() {
+          return factory_entered;
+        });
   }
   EXPECT_TRUE(factory_was_entered);
 

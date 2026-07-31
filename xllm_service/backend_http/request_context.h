@@ -18,6 +18,8 @@ limitations under the License.
 #include <cstdint>
 #include <string>
 
+#include "routing/routing_configuration.h"
+
 namespace brpc {
 class Controller;
 }  // namespace brpc
@@ -31,6 +33,7 @@ struct RequestContext {
   std::string model_name_rewrite;
   int64_t slo_ttft_ms = -1;
   int64_t slo_tpot_ms = -1;
+  ExternalRoutingDirective external_routing;
 };
 
 RequestContext parse_request_context(const brpc::Controller& controller);

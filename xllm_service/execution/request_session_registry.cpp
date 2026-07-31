@@ -44,11 +44,11 @@ bool RequestSessionRegistry::register_request(
   }
 
   const std::string request_id = request->service_request_id;
-  auto terminal_observer =
-      [this](const std::shared_ptr<Request>& terminal_request,
-             RequestTerminalReason reason) {
-        handle_terminal(terminal_request, reason);
-      };
+  auto terminal_observer = [this](
+                               const std::shared_ptr<Request>& terminal_request,
+                               RequestTerminalReason reason) {
+    handle_terminal(terminal_request, reason);
+  };
   auto session = std::make_shared<RequestSession>(request,
                                                   std::move(output_callback),
                                                   std::move(disconnect_check),
@@ -96,29 +96,37 @@ GenerationDispatchResult RequestSessionRegistry::on_generation(
         [session]() { session->on_client_disconnect(); });
     return GenerationDispatchResult::CLIENT_DISCONNECTED;
   }
-  executors_[it->second.executor_index]->schedule(
-      [session, output]() mutable { session->on_generation(std::move(output)); });
+  executors_[it->second.executor_index]->schedule([session, output]() mutable {
+    session->on_generation(std::move(output));
+  });
   return GenerationDispatchResult::ACCEPTED;
 }
 
 bool RequestSessionRegistry::on_transport_failure(
-    const std::string& request_id,
-    TransportFailureStage stage,
-    const std::string& message) {
+    const TransportResult& result) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (closed_) {
     return false;
   }
-  auto it = sessions_.find(request_id);
+  auto it = sessions_.find(result.request_id);
   if (it == sessions_.end()) {
     return false;
   }
   const auto session = it->second.session;
   executors_[it->second.executor_index]->schedule(
-      [session, stage, message]() {
-        session->on_transport_failure(stage, message);
-      });
+      [session, result]() { session->on_transport_failure(result); });
   return true;
+}
+
+bool RequestSessionRegistry::on_transport_failure(const std::string& request_id,
+                                                  TransportFailureStage stage,
+                                                  const std::string& message) {
+  TransportResult result;
+  result.request_id = request_id;
+  result.code = TransportResultCode::RPC_FAILURE;
+  result.failure_stage = stage;
+  result.message = message;
+  return on_transport_failure(result);
 }
 
 size_t RequestSessionRegistry::on_instance_failure(

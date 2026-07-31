@@ -17,8 +17,10 @@ limitations under the License.
 
 #include <brpc/controller.h>
 
+#include <charconv>
 #include <cstddef>
 #include <exception>
+#include <system_error>
 #include <utility>
 
 namespace xllm_service {
@@ -34,6 +36,10 @@ constexpr char kSloTtftMsHeader[] = "x-llm-d-slo-ttft-ms";
 constexpr char kSloTtftMsAlias[] = "x-slo-ttft-ms";
 constexpr char kSloTpotMsHeader[] = "x-llm-d-slo-tpot-ms";
 constexpr char kSloTpotMsAlias[] = "x-slo-tpot-ms";
+constexpr char kRoutingVersionHeader[] = "x-llm-d-routing-decision-version";
+constexpr char kPrefillEndpointHeader[] = "x-llm-d-prefill-endpoint";
+constexpr char kDecodeEndpointHeader[] = "x-llm-d-decode-endpoint";
+constexpr char kRoutingAttemptHeader[] = "x-llm-d-routing-attempt";
 
 const std::string* get_header(const brpc::Controller& controller,
                               const char* header,
@@ -85,6 +91,34 @@ int64_t get_non_negative_int_header(const brpc::Controller& controller,
   }
 }
 
+const std::string* get_exact_header(const brpc::Controller& controller,
+                                    const char* header,
+                                    bool* found) {
+  const std::string* value = controller.http_request().GetHeader(header);
+  if (value != nullptr) {
+    *found = true;
+  }
+  return value;
+}
+
+bool parse_uint32_header(const std::string* value, uint32_t* output) {
+  if (value == nullptr || value->empty() || output == nullptr) {
+    return false;
+  }
+  const char* begin = value->data();
+  const char* end = begin + value->size();
+  const std::from_chars_result result = std::from_chars(begin, end, *output);
+  return result.ec == std::errc() && result.ptr == end;
+}
+
+void invalidate_directive(ExternalRoutingDirective* directive,
+                          const std::string& error) {
+  if (directive->valid) {
+    directive->valid = false;
+    directive->error = error;
+  }
+}
+
 }  // namespace
 
 RequestContext parse_request_context(const brpc::Controller& controller) {
@@ -105,6 +139,44 @@ RequestContext parse_request_context(const brpc::Controller& controller) {
       controller, kSloTtftMsHeader, kSloTtftMsAlias, &found);
   context.slo_tpot_ms = get_non_negative_int_header(
       controller, kSloTpotMsHeader, kSloTpotMsAlias, &found);
+
+  bool has_routing_version = false;
+  bool has_prefill_endpoint = false;
+  bool has_decode_endpoint = false;
+  bool has_routing_attempt = false;
+  const std::string* routing_version =
+      get_exact_header(controller, kRoutingVersionHeader, &has_routing_version);
+  const std::string* prefill_endpoint = get_exact_header(
+      controller, kPrefillEndpointHeader, &has_prefill_endpoint);
+  const std::string* decode_endpoint =
+      get_exact_header(controller, kDecodeEndpointHeader, &has_decode_endpoint);
+  const std::string* routing_attempt =
+      get_exact_header(controller, kRoutingAttemptHeader, &has_routing_attempt);
+
+  context.external_routing.present = has_routing_version ||
+                                     has_prefill_endpoint ||
+                                     has_decode_endpoint || has_routing_attempt;
+  found = found || context.external_routing.present;
+  if (context.external_routing.present) {
+    if (!parse_uint32_header(routing_version,
+                             &context.external_routing.version)) {
+      invalidate_directive(&context.external_routing,
+                           "Routing decision version header is missing or "
+                           "invalid");
+    }
+    if (prefill_endpoint != nullptr) {
+      context.external_routing.prefill_endpoint = *prefill_endpoint;
+    }
+    if (decode_endpoint != nullptr) {
+      context.external_routing.decode_endpoint = *decode_endpoint;
+    }
+    if (has_routing_attempt &&
+        !parse_uint32_header(routing_attempt,
+                             &context.external_routing.attempt)) {
+      invalidate_directive(&context.external_routing,
+                           "Routing attempt header is invalid");
+    }
+  }
   context.has_llm_d_context = found;
   return context;
 }

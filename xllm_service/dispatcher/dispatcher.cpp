@@ -107,6 +107,7 @@ class DispatcherState final {
     result.closed = closed_;
     result.inflight = inflight_;
     result.transport_failure_total = transport_failure_total_;
+    result.stale_routing_decision_total = stale_routing_decision_total_;
     return result;
   }
 
@@ -119,6 +120,9 @@ class DispatcherState final {
       std::lock_guard<std::mutex> lock(mutex_);
       if (result.code != TransportResultCode::SUCCESS) {
         ++transport_failure_total_;
+      }
+      if (result.code == TransportResultCode::STALE_ROUTING_DECISION) {
+        ++stale_routing_decision_total_;
       }
       if (call_id.value != 0) {
         active_calls_.erase(call_id.value);
@@ -148,18 +152,22 @@ class DispatcherState final {
   bool closed_ = false;
   uint64_t inflight_ = 0;
   uint64_t transport_failure_total_ = 0;
+  uint64_t stale_routing_decision_total_ = 0;
   std::unordered_map<uint64_t, brpc::CallId> active_calls_;
 };
 
 namespace {
 
-TransportResult make_failure(const std::string& request_id,
-                             TransportResultCode code,
-                             const std::string& message) {
+TransportResult make_failure(
+    const std::string& request_id,
+    TransportResultCode code,
+    const std::string& message,
+    TransportRetryability retryability = TransportRetryability::NOT_RETRYABLE) {
   TransportResult result;
   result.request_id = request_id;
   result.code = code;
   result.failure_stage = TransportFailureStage::BEFORE_FIRST_TOKEN;
+  result.retryability = retryability;
   result.message = message;
   return result;
 }
@@ -253,13 +261,12 @@ class ModelsRpcClosure final : public google::protobuf::Closure {
 };
 
 template <typename Request, typename RpcInvoker>
-bool dispatch_generation(
-    const std::shared_ptr<ChannelPool>& channel_pool,
-    const std::shared_ptr<DispatcherState>& state,
-    const RoutingDecision& decision,
-    const std::string& request_id,
-    const Request& request,
-    RpcInvoker invoke) {
+bool dispatch_generation(const std::shared_ptr<ChannelPool>& channel_pool,
+                         const std::shared_ptr<DispatcherState>& state,
+                         const RoutingDecision& decision,
+                         const std::string& request_id,
+                         const Request& request,
+                         RpcInvoker invoke) {
   if (!state->begin_dispatch()) {
     return false;
   }
@@ -267,34 +274,38 @@ bool dispatch_generation(
   const RoutingDecisionValidationResult validation =
       validate_routing_decision(decision);
   if (!routing_decision_validation_ok(validation)) {
-    state->complete_generation(make_failure(
-        request_id,
-        TransportResultCode::INVALID_ROUTING_DECISION,
-        validation.message));
+    state->complete_generation(
+        make_failure(request_id,
+                     TransportResultCode::INVALID_ROUTING_DECISION,
+                     validation.message));
     return true;
   }
 
-  const auto channel = channel_pool->get_or_create(
-      decision.prefill_endpoint, decision.prefill_incarnation);
-  if (channel == nullptr) {
-    state->complete_generation(make_failure(
-        request_id,
-        TransportResultCode::CHANNEL_UNAVAILABLE,
-        "Backend channel is unavailable for endpoint " +
-            decision.prefill_endpoint));
+  const ChannelLookupResult channel_result =
+      channel_pool->get_or_create_with_status(decision.prefill_endpoint,
+                                              decision.prefill_incarnation);
+  if (!channel_result.available()) {
+    const bool stale = channel_result.stale();
+    state->complete_generation(
+        make_failure(request_id,
+                     stale ? TransportResultCode::STALE_ROUTING_DECISION
+                           : TransportResultCode::CHANNEL_UNAVAILABLE,
+                     channel_result.message,
+                     stale ? TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN
+                           : TransportRetryability::NOT_RETRYABLE));
     return true;
   }
 
   auto owned_request = std::make_shared<Request>(request);
   auto* closure = new GenerationRpcClosure(
-      state, channel, owned_request, request_id);
+      state, channel_result.channel, owned_request, request_id);
   if (!state->register_call(closure->call_id())) {
     closure->reject(make_failure(request_id,
                                  TransportResultCode::DISPATCHER_CLOSED,
                                  "Backend dispatcher is closed"));
     return true;
   }
-  xllm::proto::XllmAPIService_Stub stub(channel.get());
+  xllm::proto::XllmAPIService_Stub stub(channel_result.channel.get());
   invoke(stub, closure->controller(), owned_request.get(), closure);
   return true;
 }
@@ -304,8 +315,8 @@ bool dispatch_generation(
 Dispatcher::Dispatcher(std::shared_ptr<ChannelPool> channel_pool,
                        TransportObserver transport_observer)
     : channel_pool_(std::move(channel_pool)),
-      state_(std::make_shared<DispatcherState>(
-          std::move(transport_observer))) {}
+      state_(std::make_shared<DispatcherState>(std::move(transport_observer))) {
+}
 
 Dispatcher::~Dispatcher() { close(); }
 
@@ -327,62 +338,60 @@ bool Dispatcher::dispatch_completion(
       });
 }
 
-bool Dispatcher::dispatch_chat(
-    const RoutingDecision& decision,
-    const std::string& request_id,
-    const xllm::proto::ChatRequest& request) {
-  return dispatch_generation(
-      channel_pool_,
-      state_,
-      decision,
-      request_id,
-      request,
-      [](xllm::proto::XllmAPIService_Stub& stub,
-         brpc::Controller* controller,
-         const xllm::proto::ChatRequest* owned_request,
-         google::protobuf::Closure* closure) {
-        stub.ChatCompletions(controller, owned_request, nullptr, closure);
-      });
+bool Dispatcher::dispatch_chat(const RoutingDecision& decision,
+                               const std::string& request_id,
+                               const xllm::proto::ChatRequest& request) {
+  return dispatch_generation(channel_pool_,
+                             state_,
+                             decision,
+                             request_id,
+                             request,
+                             [](xllm::proto::XllmAPIService_Stub& stub,
+                                brpc::Controller* controller,
+                                const xllm::proto::ChatRequest* owned_request,
+                                google::protobuf::Closure* closure) {
+                               stub.ChatCompletions(
+                                   controller, owned_request, nullptr, closure);
+                             });
 }
 
-bool Dispatcher::dispatch_models(
-    const std::string& endpoint,
-    const std::string& incarnation_id,
-    const xllm::proto::ModelListRequest& request,
-    ModelResultCallback callback) {
+bool Dispatcher::dispatch_models(const std::string& endpoint,
+                                 const std::string& incarnation_id,
+                                 const xllm::proto::ModelListRequest& request,
+                                 ModelResultCallback callback) {
   if (!state_->begin_dispatch()) {
     return false;
   }
 
-  const auto channel =
-      channel_pool_->get_or_create(endpoint, incarnation_id);
-  if (channel == nullptr) {
+  const ChannelLookupResult channel_result =
+      channel_pool_->get_or_create_with_status(endpoint, incarnation_id);
+  if (!channel_result.available()) {
+    const bool stale = channel_result.stale();
     const xllm::proto::ModelListResponse response;
     state_->complete_models(
         make_failure("",
-                     TransportResultCode::CHANNEL_UNAVAILABLE,
-                     "Backend channel is unavailable for endpoint " +
-                         endpoint),
+                     stale ? TransportResultCode::STALE_ROUTING_DECISION
+                           : TransportResultCode::CHANNEL_UNAVAILABLE,
+                     channel_result.message,
+                     stale ? TransportRetryability::RETRYABLE_BEFORE_FIRST_TOKEN
+                           : TransportRetryability::NOT_RETRYABLE),
         response,
         callback);
     return true;
   }
 
-  auto owned_request =
-      std::make_shared<xllm::proto::ModelListRequest>(request);
+  auto owned_request = std::make_shared<xllm::proto::ModelListRequest>(request);
   auto* closure = new ModelsRpcClosure(
-      state_, channel, owned_request, std::move(callback));
+      state_, channel_result.channel, owned_request, std::move(callback));
   if (!state_->register_call(closure->call_id())) {
     closure->reject(make_failure("",
                                  TransportResultCode::DISPATCHER_CLOSED,
                                  "Backend dispatcher is closed"));
     return true;
   }
-  xllm::proto::XllmAPIService_Stub stub(channel.get());
-  stub.Models(closure->controller(),
-              owned_request.get(),
-              closure->response(),
-              closure);
+  xllm::proto::XllmAPIService_Stub stub(channel_result.channel.get());
+  stub.Models(
+      closure->controller(), owned_request.get(), closure->response(), closure);
   return true;
 }
 

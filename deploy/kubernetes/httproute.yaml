@@ -1,0 +1,23 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: xllm-service
+spec:
+  parentRefs:
+    - name: inference-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/chat/completions
+        - path:
+            type: PathPrefix
+            value: /v1/completions
+        - path:
+            type: PathPrefix
+            value: /v1/models
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: xllm-service
+          port: 8888

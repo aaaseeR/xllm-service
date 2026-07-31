@@ -15,6 +15,10 @@ limitations under the License.
 
 #include "scheduler/scheduler.h"
 
+#include <brpc/http_status_code.h>
+
+#include <utility>
+
 #include "common/metrics.h"
 #include "common/utils.h"
 #include "common/xllm/status.h"
@@ -22,8 +26,6 @@ limitations under the License.
 #include "loadbalance_policy/round_robin.h"
 #include "loadbalance_policy/slo_aware_policy.h"
 #include "tokenizer/tokenizer_factory.h"
-
-#include <utility>
 
 namespace {
 constexpr int32_t kHeartbeatInterval = 3;  // in seconds
@@ -33,6 +35,35 @@ constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
 }  // namespace
 
 namespace xllm_service {
+namespace {
+
+ScheduleResult make_schedule_error(ScheduleError error,
+                                   const std::string& message) {
+  return {error, message};
+}
+
+ScheduleError schedule_error_from_selection(RoutingSelectionError error) {
+  switch (error) {
+    case RoutingSelectionError::NONE:
+      return ScheduleError::NONE;
+    case RoutingSelectionError::LEGACY_SELECTOR_UNAVAILABLE:
+    case RoutingSelectionError::LEGACY_SELECTION_FAILED:
+      return ScheduleError::BACKEND_UNAVAILABLE;
+    case RoutingSelectionError::EXTERNAL_DIRECTIVE_IN_LEGACY_MODE:
+    case RoutingSelectionError::EXTERNAL_DIRECTIVE_IN_AGGREGATED_MODE:
+    case RoutingSelectionError::MISSING_EXTERNAL_DIRECTIVE:
+    case RoutingSelectionError::INVALID_EXTERNAL_DIRECTIVE:
+    case RoutingSelectionError::UNSUPPORTED_EXTERNAL_DIRECTIVE_VERSION:
+    case RoutingSelectionError::EXTERNAL_OWNER_MISMATCH:
+      return ScheduleError::INVALID_ROUTING_DIRECTIVE;
+    case RoutingSelectionError::UNKNOWN_MODE:
+    case RoutingSelectionError::NULL_OUTPUT:
+      return ScheduleError::INTERNAL_ERROR;
+  }
+  return ScheduleError::INTERNAL_ERROR;
+}
+
+}  // namespace
 
 Scheduler::Scheduler(
     const Options& options,
@@ -40,12 +71,11 @@ Scheduler::Scheduler(
     InstanceLifecycleEventDispatcher::Handler lifecycle_handler)
     : options_(options),
       routing_configuration_(routing_configuration),
-      lifecycle_events_(
-          std::vector<InstanceLifecycleEventDispatcher::Handler>{
-              [this](const InstanceLifecycleEvent& event) {
-                handle_instance_lifecycle_event(event);
-              },
-              std::move(lifecycle_handler)}) {
+      lifecycle_events_(std::vector<InstanceLifecycleEventDispatcher::Handler>{
+          [this](const InstanceLifecycleEvent& event) {
+            handle_instance_lifecycle_event(event);
+          },
+          std::move(lifecycle_handler)}) {
   GAUGE_SET(peer_service_enabled, options_.enable_peer_service() ? 1.0 : 0.0);
 
   tokenizer_ = TokenizerFactory::create_tokenizer(options_.tokenizer_path(),
@@ -137,8 +167,8 @@ Scheduler::Scheduler(
 
   if (uses_legacy_routing()) {
     if (options.load_balance_policy() == "CAR") {
-      lb_policy_ =
-          std::make_unique<CacheAwareRouting>(instance_mgr_, global_kvcache_mgr_);
+      lb_policy_ = std::make_unique<CacheAwareRouting>(instance_mgr_,
+                                                       global_kvcache_mgr_);
     } else if (options.load_balance_policy() == "SLO_AWARE") {
       lb_policy_ = std::make_unique<SloAwarePolicy>(options, instance_mgr_);
     } else {
@@ -186,12 +216,17 @@ void Scheduler::cancel_active_requests() {
   }
 }
 
-bool Scheduler::schedule(std::shared_ptr<Request> request) {
+size_t Scheduler::active_request_count() const {
+  return request_registry_ == nullptr ? 0 : request_registry_->size();
+}
+
+ScheduleResult Scheduler::schedule(std::shared_ptr<Request> request) {
   // apply chat template
   if (request->messages.size() > 0) {
     if (chat_template_ == nullptr) {
       LOG(ERROR) << "Chat template has not configured.";
-      return false;
+      return make_schedule_error(ScheduleError::INTERNAL_ERROR,
+                                 "Chat template is not configured");
     }
 
     const std::vector<JsonTool> empty_tools;
@@ -201,7 +236,8 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
         request->messages, tools_for_template, request->chat_template_kwargs);
     if (!prompt.has_value()) {
       LOG(ERROR) << "Failed to construct prompt from messages";
-      return false;
+      return make_schedule_error(ScheduleError::INVALID_REQUEST,
+                                 "Failed to construct prompt from messages");
     }
     request->prompt = prompt.value();
   }
@@ -210,47 +246,52 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   if (request->prompt.size() != 0) {
     if (!get_tls_tokenizer()->encode(request->prompt, &request->token_ids)) {
       LOG(ERROR) << "Encode prompt failed: " << request->prompt;
-      return false;
+      return make_schedule_error(ScheduleError::INVALID_REQUEST,
+                                 "Failed to tokenize prompt");
     }
   }
 
-  if (!prepare_routing_decision(request)) {
-    return false;
-  }
-
-  return true;
+  return prepare_routing_decision(request);
 }
 
-bool Scheduler::prepare_routing_decision(
+ScheduleResult Scheduler::prepare_routing_decision(
     const std::shared_ptr<Request>& request) {
   const RoutingSelectionResult selection = resolve_routing_decision(
       routing_configuration_,
+      request->request_context.external_routing,
       [this, &request]() {
         return lb_policy_ != nullptr &&
                lb_policy_->select_instances_pair(request);
       },
       &request->routing);
   if (!routing_selection_result_ok(selection)) {
-    LOG(ERROR) << "Failed to resolve routing authority: "
-               << selection.message;
-    return false;
+    LOG(ERROR) << "Failed to resolve routing authority: " << selection.message;
+    return make_schedule_error(schedule_error_from_selection(selection.error),
+                               selection.message);
   }
 
-  const bool bound = uses_legacy_routing()
-                         ? instance_mgr_->bind_request_instance_incarnations(
-                               request)
-                         : instance_mgr_->bind_aggregated_instance_incarnation(
-                               &request->routing);
+  const bool bound =
+      uses_legacy_routing()
+          ? instance_mgr_->bind_request_instance_incarnations(request)
+          : instance_mgr_->bind_external_routing_decision(
+                &request->routing, routing_configuration_.external_topology);
   if (!bound) {
     LOG(ERROR) << "Failed to bind request to instance incarnation ids. "
                << routing_decision_debug_string(request->routing);
-    return false;
+    return make_schedule_error(
+        uses_legacy_routing() ? ScheduleError::BACKEND_UNAVAILABLE
+                              : ScheduleError::STALE_ROUTING_DECISION,
+        uses_legacy_routing()
+            ? "No schedulable backend instance is available"
+            : "External routing decision no longer matches a schedulable "
+              "backend incarnation");
   }
   const RoutingDecisionValidationResult validation =
       validate_routing_decision(request->routing);
   if (!routing_decision_validation_ok(validation)) {
     LOG(ERROR) << "Invalid routing decision: " << validation.message;
-    return false;
+    return make_schedule_error(ScheduleError::INTERNAL_ERROR,
+                               validation.message);
   }
   DLOG(INFO) << routing_decision_debug_string(request->routing);
 
@@ -260,7 +301,7 @@ bool Scheduler::prepare_routing_decision(
     instance_mgr_->record_dispatch(request);
   }
 
-  return true;
+  return {};
 }
 
 bool Scheduler::uses_legacy_routing() const {
@@ -314,8 +355,7 @@ bool Scheduler::handle_instance_heartbeat(const proto::HeartbeatRequest* req) {
   if (global_kvcache_mgr_ != nullptr &&
       (!(options_.enable_peer_service() && options_.kv_event_zmq_enable()) ||
        has_heartbeat_cache_event)) {
-    global_kvcache_mgr_->record_updated_kvcaches(req->name(),
-                                                 cache_event);
+    global_kvcache_mgr_->record_updated_kvcaches(req->name(), cache_event);
   }
   instance_mgr_->record_load_metrics_update(
       req->name(), req->incarnation_id(), req->load_metrics());
@@ -417,16 +457,17 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
   auto reasoning_parser_pref = options_.reasoning_parser();
   std::shared_ptr<ChatStreamParseState> stream_state;
   if (request->stream) {
-    stream_state = response_handler_.create_chat_stream_parse_state(
-        tools_for_parse,
-        request->model,
-        tool_call_parser_pref,
-        reasoning_parser_pref);
+    stream_state =
+        response_handler_.create_chat_stream_parse_state(tools_for_parse,
+                                                         request->model,
+                                                         tool_call_parser_pref,
+                                                         reasoning_parser_pref);
   }
 
   OutputCallback output_callback =
       [this,
        call_data,
+       request,
        model = request->model,
        stream = request->stream,
        include_usage = request->include_usage,
@@ -436,37 +477,49 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
        stream_state = std::move(stream_state),
        created_time = absl::ToUnixSeconds(request->latest_generate_time)](
           const llm::RequestOutput& req_output) mutable -> bool {
-      if (req_output.status.has_value()) {
-        const auto& status = req_output.status.value();
-        if (!status.ok()) {
-          return call_data->finish_with_error(status.message());
-        }
+    if (req_output.status.has_value()) {
+      const auto& status = req_output.status.value();
+      if (!status.ok()) {
+        const bool retryable = transport_result_is_retryable(
+            TransportResult{request->service_request_id,
+                            request->last_transport_result_code,
+                            TransportFailureStage::BEFORE_FIRST_TOKEN,
+                            request->last_transport_retryability,
+                            status.message()});
+        return call_data->finish_with_error(
+            status.message(),
+            retryable ? brpc::HTTP_STATUS_SERVICE_UNAVAILABLE : 0,
+            retryable ? transport_result_code_name(
+                            request->last_transport_result_code)
+                      : "",
+            retryable);
       }
+    }
 
-      if (stream) {
-        return response_handler_.send_delta_to_client(call_data,
-                                                      include_usage,
-                                                      created_time,
-                                                      model,
-                                                      req_output,
-                                                      stream_state);
-      } else if (!req_output.finished_on_prefill_instance) {
-        // for non-stream request, only send final result from decode instance
-        return response_handler_.send_result_to_client(call_data,
-                                                       created_time,
-                                                       model,
-                                                       req_output,
-                                                       tools,
-                                                       tool_call_parser,
-                                                       reasoning_parser);
-      }
-      return true;
+    if (stream) {
+      return response_handler_.send_delta_to_client(call_data,
+                                                    include_usage,
+                                                    created_time,
+                                                    model,
+                                                    req_output,
+                                                    stream_state);
+    } else if (!req_output.finished_on_prefill_instance) {
+      // for non-stream request, only send final result from decode instance
+      return response_handler_.send_result_to_client(call_data,
+                                                     created_time,
+                                                     model,
+                                                     req_output,
+                                                     tools,
+                                                     tool_call_parser,
+                                                     reasoning_parser);
+    }
+    return true;
   };
 
   if (!request_registry_->register_request(
-          request,
-          std::move(output_callback),
-          [call_data]() { return call_data->is_disconnected(); })) {
+          request, std::move(output_callback), [call_data]() {
+            return call_data->is_disconnected();
+          })) {
     LOG(ERROR) << "The request ID already exists or the registry is closed: "
                << request->service_request_id;
     if (uses_legacy_routing()) {
@@ -487,33 +540,46 @@ bool Scheduler::record_new_request(
   OutputCallback output_callback =
       [this,
        call_data,
+       request,
        model = request->model,
        stream = request->stream,
        include_usage = request->include_usage,
        created_time = absl::ToUnixSeconds(request->latest_generate_time)](
           const llm::RequestOutput& req_output) mutable -> bool {
-      if (req_output.status.has_value()) {
-        const auto& status = req_output.status.value();
-        if (!status.ok()) {
-          return call_data->finish_with_error(status.message());
-        }
+    if (req_output.status.has_value()) {
+      const auto& status = req_output.status.value();
+      if (!status.ok()) {
+        const bool retryable = transport_result_is_retryable(
+            TransportResult{request->service_request_id,
+                            request->last_transport_result_code,
+                            TransportFailureStage::BEFORE_FIRST_TOKEN,
+                            request->last_transport_retryability,
+                            status.message()});
+        return call_data->finish_with_error(
+            status.message(),
+            retryable ? brpc::HTTP_STATUS_SERVICE_UNAVAILABLE : 0,
+            retryable ? transport_result_code_name(
+                            request->last_transport_result_code)
+                      : "",
+            retryable);
       }
+    }
 
-      if (stream) {
-        return response_handler_.send_delta_to_client(
-            call_data, include_usage, created_time, model, req_output);
-      } else if (!req_output.finished_on_prefill_instance) {
-        // for non-stream request, only send final result from decode instance
-        return response_handler_.send_result_to_client(
-            call_data, created_time, model, req_output);
-      }
-      return true;
+    if (stream) {
+      return response_handler_.send_delta_to_client(
+          call_data, include_usage, created_time, model, req_output);
+    } else if (!req_output.finished_on_prefill_instance) {
+      // for non-stream request, only send final result from decode instance
+      return response_handler_.send_result_to_client(
+          call_data, created_time, model, req_output);
+    }
+    return true;
   };
 
   if (!request_registry_->register_request(
-          request,
-          std::move(output_callback),
-          [call_data]() { return call_data->is_disconnected(); })) {
+          request, std::move(output_callback), [call_data]() {
+            return call_data->is_disconnected();
+          })) {
     LOG(ERROR) << "The request ID already exists or the registry is closed: "
                << request->service_request_id;
     if (uses_legacy_routing()) {
@@ -527,10 +593,13 @@ bool Scheduler::record_new_request(
   return true;
 }
 
-bool Scheduler::handle_transport_failure(
-    const std::string& service_request_id,
-    TransportFailureStage stage,
-    const std::string& message) {
+bool Scheduler::handle_transport_failure(const TransportResult& result) {
+  return request_registry_->on_transport_failure(result);
+}
+
+bool Scheduler::handle_transport_failure(const std::string& service_request_id,
+                                         TransportFailureStage stage,
+                                         const std::string& message) {
   return request_registry_->on_transport_failure(
       service_request_id, stage, message);
 }
@@ -551,11 +620,11 @@ void Scheduler::handle_instance_lifecycle_event(
       remove_kv_event_source(instance.name, instance.incarnation_id);
       return;
     case InstanceLifecycleEventType::DEREGISTERED:
-      clear_requests_on_failed_instance(
-          instance.name,
-          instance.incarnation_id,
-          instance.type == InstanceType::MIX ? instance.current_type
-                                             : instance.type);
+      clear_requests_on_failed_instance(instance.name,
+                                        instance.incarnation_id,
+                                        instance.type == InstanceType::MIX
+                                            ? instance.current_type
+                                            : instance.type);
       clear_instance_cache(instance.name);
       return;
   }
@@ -565,8 +634,7 @@ void Scheduler::clear_requests_on_failed_instance(
     const std::string& instance_name,
     const std::string& incarnation_id,
     InstanceType type) {
-  request_registry_->on_instance_failure(
-      {instance_name, incarnation_id, type});
+  request_registry_->on_instance_failure({instance_name, incarnation_id, type});
 }
 
 void Scheduler::clear_instance_cache(const std::string& instance_name) {
@@ -581,9 +649,8 @@ void Scheduler::add_kv_event_source(const InstanceMetaInfo& info) {
   }
 }
 
-void Scheduler::remove_kv_event_source(
-    const std::string& instance_name,
-    const std::string& incarnation_id) {
+void Scheduler::remove_kv_event_source(const std::string& instance_name,
+                                       const std::string& incarnation_id) {
   if (kv_event_subscriber_ != nullptr) {
     kv_event_subscriber_->remove_source(instance_name, incarnation_id);
   }
@@ -633,9 +700,8 @@ void Scheduler::observe_session_generation(
   update_token_latency_metrics(request, output.finished_on_prefill_instance);
 }
 
-void Scheduler::handle_session_terminal(
-    const std::shared_ptr<Request>& request,
-    RequestTerminalReason reason) {
+void Scheduler::handle_session_terminal(const std::shared_ptr<Request>& request,
+                                        RequestTerminalReason reason) {
   if (uses_legacy_routing()) {
     instance_mgr_->record_request_finished(request);
     instance_mgr_->update_request_metrics(
@@ -682,8 +748,9 @@ void Scheduler::update_token_latency_metrics(
 
 bool Scheduler::has_available_instances() const {
   if (!uses_legacy_routing()) {
-    return instance_mgr_->has_available_aggregated_instance(
-        routing_configuration_.external_backend_endpoint);
+    return instance_mgr_->has_available_external_endpoint(
+        routing_configuration_.external_backend_endpoint,
+        routing_configuration_.external_topology);
   }
   return instance_mgr_->has_available_instances();
 }
@@ -703,6 +770,8 @@ nlohmann::json Scheduler::debug_summary() const {
   if (!uses_legacy_routing()) {
     summary["external_backend_endpoint"] =
         routing_configuration_.external_backend_endpoint;
+    summary["external_routing_topology"] = external_routing_topology_name(
+        routing_configuration_.external_topology);
   }
   summary["enable_peer_service"] = options_.enable_peer_service();
   summary["is_master_service"] = is_master_service_;
@@ -711,9 +780,9 @@ nlohmann::json Scheduler::debug_summary() const {
   summary["cache_index"] = global_kvcache_mgr_
                                ? global_kvcache_mgr_->debug_summary()
                                : nlohmann::json::object();
-  summary["kv_event_subscriber"] =
-      kv_event_subscriber_ ? kv_event_subscriber_->debug_summary()
-                           : nlohmann::json::object();
+  summary["kv_event_subscriber"] = kv_event_subscriber_
+                                       ? kv_event_subscriber_->debug_summary()
+                                       : nlohmann::json::object();
   summary["active_request_sessions"] =
       request_registry_ ? request_registry_->size() : 0;
   return summary;

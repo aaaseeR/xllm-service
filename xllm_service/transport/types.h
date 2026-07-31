@@ -26,6 +26,7 @@ enum class TransportResultCode : uint8_t {
   RPC_FAILURE = 2,
   DISPATCHER_CLOSED = 3,
   INVALID_ROUTING_DECISION = 4,
+  STALE_ROUTING_DECISION = 5,
 };
 
 enum class TransportFailureStage : uint8_t {
@@ -33,15 +34,23 @@ enum class TransportFailureStage : uint8_t {
   AFTER_FIRST_TOKEN = 1,
 };
 
+enum class TransportRetryability : uint8_t {
+  NOT_RETRYABLE = 0,
+  RETRYABLE_BEFORE_FIRST_TOKEN = 1,
+};
+
 struct TransportResult {
   std::string request_id;
   TransportResultCode code = TransportResultCode::SUCCESS;
   TransportFailureStage failure_stage =
       TransportFailureStage::BEFORE_FIRST_TOKEN;
+  TransportRetryability retryability = TransportRetryability::NOT_RETRYABLE;
   std::string message;
 };
 
 const char* transport_result_code_name(TransportResultCode code);
 const char* transport_failure_stage_name(TransportFailureStage stage);
+const char* transport_retryability_name(TransportRetryability retryability);
+bool transport_result_is_retryable(const TransportResult& result);
 
 }  // namespace xllm_service

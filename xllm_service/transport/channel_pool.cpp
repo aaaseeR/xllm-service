@@ -39,6 +39,22 @@ ChannelPool::ChannelFactory make_channel_factory(const Options& options) {
 
 }  // namespace
 
+const char* channel_lookup_status_name(ChannelLookupStatus status) {
+  switch (status) {
+    case ChannelLookupStatus::AVAILABLE:
+      return "available";
+    case ChannelLookupStatus::ENDPOINT_NOT_FOUND:
+      return "endpoint_not_found";
+    case ChannelLookupStatus::INCARNATION_MISMATCH:
+      return "incarnation_mismatch";
+    case ChannelLookupStatus::CHANNEL_INITIALIZATION_FAILED:
+      return "channel_initialization_failed";
+    case ChannelLookupStatus::MEMBERSHIP_CHANGED:
+      return "membership_changed";
+  }
+  return "unknown";
+}
+
 ChannelPool::ChannelPool(const Options& options)
     : ChannelPool(make_channel_factory(options)) {}
 
@@ -70,46 +86,69 @@ bool ChannelPool::remove(const std::string& endpoint,
                          const std::string& incarnation_id) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = entries_.find(endpoint);
-  if (it == entries_.end() ||
-      it->second.incarnation_id != incarnation_id) {
+  if (it == entries_.end() || it->second.incarnation_id != incarnation_id) {
     return false;
   }
   entries_.erase(it);
   return true;
 }
 
-std::shared_ptr<brpc::Channel> ChannelPool::get_or_create(
+ChannelLookupResult ChannelPool::get_or_create_with_status(
     const std::string& endpoint,
     const std::string& incarnation_id) {
   uint64_t version = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = entries_.find(endpoint);
-    if (it == entries_.end() ||
-        it->second.incarnation_id != incarnation_id) {
-      return nullptr;
+    if (it == entries_.end()) {
+      return {ChannelLookupStatus::ENDPOINT_NOT_FOUND,
+              nullptr,
+              "Backend endpoint is not an active pool member: " + endpoint};
+    }
+    if (it->second.incarnation_id != incarnation_id) {
+      return {ChannelLookupStatus::INCARNATION_MISMATCH,
+              nullptr,
+              "Backend endpoint incarnation is stale for: " + endpoint};
     }
     if (it->second.channel != nullptr) {
-      return it->second.channel;
+      return {ChannelLookupStatus::AVAILABLE, it->second.channel, ""};
     }
     version = it->second.version;
   }
 
   std::shared_ptr<brpc::Channel> channel = channel_factory_(endpoint);
   if (channel == nullptr) {
-    return nullptr;
+    return {ChannelLookupStatus::CHANNEL_INITIALIZATION_FAILED,
+            nullptr,
+            "Failed to initialize backend channel for endpoint: " + endpoint};
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = entries_.find(endpoint);
-  if (it == entries_.end() || it->second.version != version ||
+  if (it == entries_.end()) {
+    return {
+        ChannelLookupStatus::MEMBERSHIP_CHANGED,
+        nullptr,
+        "Backend endpoint was removed while creating its channel: " + endpoint};
+  }
+  if (it->second.version != version ||
       it->second.incarnation_id != incarnation_id) {
-    return nullptr;
+    return {
+        ChannelLookupStatus::MEMBERSHIP_CHANGED,
+        nullptr,
+        "Backend endpoint incarnation changed while creating its channel: " +
+            endpoint};
   }
   if (it->second.channel == nullptr) {
     it->second.channel = std::move(channel);
   }
-  return it->second.channel;
+  return {ChannelLookupStatus::AVAILABLE, it->second.channel, ""};
+}
+
+std::shared_ptr<brpc::Channel> ChannelPool::get_or_create(
+    const std::string& endpoint,
+    const std::string& incarnation_id) {
+  return get_or_create_with_status(endpoint, incarnation_id).channel;
 }
 
 size_t ChannelPool::channel_count() const {

@@ -34,6 +34,10 @@ namespace xllm_service {
 class Scheduler;
 class Dispatcher;
 class RuntimeState;
+struct ScheduleResult;
+
+void apply_schedule_failure(brpc::Controller* controller,
+                            const ScheduleResult& result);
 
 class XllmHttpServiceImpl : public proto::XllmHttpService {
  public:

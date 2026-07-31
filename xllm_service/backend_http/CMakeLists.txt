@@ -9,6 +9,7 @@ cc_library(
   SRCS
     request_context.cpp
   DEPS
+    :routing
     gflags::gflags
 )
 target_link_libraries(backend_http PRIVATE brpc-static)

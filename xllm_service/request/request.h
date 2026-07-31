@@ -21,6 +21,7 @@ limitations under the License.
 #include "chat_template/jinja_chat_template.h"
 #include "common/types.h"
 #include "routing/routing_decision.h"
+#include "transport/types.h"
 
 namespace xllm_service {
 
@@ -63,6 +64,12 @@ struct Request {
 
   // Versioned execution contract produced by the active routing authority.
   RoutingDecision routing;
+
+  // Last transport outcome observed by the session.  This is consumed by the
+  // HTTP adapter while serializing the terminal error response.
+  TransportResultCode last_transport_result_code = TransportResultCode::SUCCESS;
+  TransportRetryability last_transport_retryability =
+      TransportRetryability::NOT_RETRYABLE;
 
   // prefill stage finished
   bool prefill_stage_finished = false;

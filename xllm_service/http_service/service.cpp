@@ -27,12 +27,12 @@ limitations under the License.
 #include <cctype>
 #include <functional>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <utility>
-#include <nlohmann/json.hpp>
 
 #include "backend_http/request_context.h"
 #include "chat.pb.h"
@@ -48,6 +48,41 @@ limitations under the License.
 #include "telemetry/prometheus_metrics.h"
 
 namespace xllm_service {
+
+void apply_schedule_failure(brpc::Controller* controller,
+                            const ScheduleResult& result) {
+  if (controller == nullptr || schedule_result_ok(result)) {
+    return;
+  }
+
+  int status_code = brpc::HTTP_STATUS_INTERNAL_SERVER_ERROR;
+  switch (result.error) {
+    case ScheduleError::INVALID_REQUEST:
+    case ScheduleError::INVALID_ROUTING_DIRECTIVE:
+      status_code = brpc::HTTP_STATUS_BAD_REQUEST;
+      break;
+    case ScheduleError::BACKEND_UNAVAILABLE:
+    case ScheduleError::STALE_ROUTING_DECISION:
+      status_code = brpc::HTTP_STATUS_SERVICE_UNAVAILABLE;
+      break;
+    case ScheduleError::INTERNAL_ERROR:
+    case ScheduleError::NONE:
+      break;
+  }
+
+  const char* error_code = schedule_error_code(result.error);
+  const bool retryable = schedule_result_is_retryable(result);
+  nlohmann::json error = {
+      {"error", {{"message", result.message}, {"type", error_code}}}};
+  controller->http_response().set_content_type("application/json");
+  controller->http_response().set_status_code(status_code);
+  controller->http_response().SetHeader("x-llm-d-error-code", error_code);
+  if (retryable) {
+    controller->http_response().SetHeader("x-llm-d-retryable", "true");
+    controller->http_response().SetHeader("Retry-After", "0");
+  }
+  controller->response_attachment().append(error.dump());
+}
 
 namespace {
 thread_local llm::ShortUUID short_uuid;
@@ -157,8 +192,8 @@ void XllmHttpServiceImpl::Health(::google::protobuf::RpcController* controller,
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     if (controller) {
-      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
-          "brpc request | response | controller is null");
+      reinterpret_cast<brpc::Controller*>(controller)
+          ->SetFailed("brpc request | response | controller is null");
     }
     return;
   }
@@ -169,8 +204,7 @@ void XllmHttpServiceImpl::Health(::google::protobuf::RpcController* controller,
   cntl->http_response().set_status_code(
       snapshot.ready ? brpc::HTTP_STATUS_OK
                      : brpc::HTTP_STATUS_SERVICE_UNAVAILABLE);
-  cntl->response_attachment().append(snapshot.ready ? "ok\n"
-                                                    : "unavailable\n");
+  cntl->response_attachment().append(snapshot.ready ? "ok\n" : "unavailable\n");
 }
 
 void XllmHttpServiceImpl::Liveness(
@@ -183,8 +217,8 @@ void XllmHttpServiceImpl::Liveness(
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     if (controller) {
-      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
-          "brpc request | response | controller is null");
+      reinterpret_cast<brpc::Controller*>(controller)
+          ->SetFailed("brpc request | response | controller is null");
     }
     return;
   }
@@ -208,8 +242,8 @@ void XllmHttpServiceImpl::Readiness(
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     if (controller) {
-      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
-          "brpc request | response | controller is null");
+      reinterpret_cast<brpc::Controller*>(controller)
+          ->SetFailed("brpc request | response | controller is null");
     }
     return;
   }
@@ -233,8 +267,8 @@ bool XllmHttpServiceImpl::ensure_backend_ready(
 
   nlohmann::json error = {
       {"error",
-       {{"message", snapshot.reason.empty() ? "backend is not ready"
-                                             : snapshot.reason},
+       {{"message",
+         snapshot.reason.empty() ? "backend is not ready" : snapshot.reason},
         {"type", "service_unavailable"}}}};
   controller->http_response().set_content_type("application/json");
   controller->http_response().set_status_code(
@@ -255,8 +289,9 @@ bool TryParseContentLength(const char* header_name,
   try {
     size_t parsed_size = 0;
     const auto parsed_value = std::stoull(header_value, &parsed_size, 10);
-    while (parsed_size < header_value.size() &&
-           std::isspace(static_cast<unsigned char>(header_value[parsed_size]))) {
+    while (
+        parsed_size < header_value.size() &&
+        std::isspace(static_cast<unsigned char>(header_value[parsed_size]))) {
       ++parsed_size;
     }
     if (parsed_size != header_value.size() ||
@@ -276,8 +311,8 @@ bool TryParseContentLength(const char* header_name,
     return true;
   } catch (const std::exception& e) {
     LOG(WARNING) << "Invalid " << header_name
-                 << " header value: " << header_value << ", error: "
-                 << e.what();
+                 << " header value: " << header_value
+                 << ", error: " << e.what();
     return false;
   }
 }
@@ -287,20 +322,18 @@ size_t GetJsonContentLength(const brpc::Controller* ctrl,
   const auto infer_content_len =
       ctrl->http_request().GetHeader(kInferContentLength);
   size_t content_len = 0;
-  if (infer_content_len != nullptr &&
-      TryParseContentLength(kInferContentLength,
-                            *infer_content_len,
-                            attachment_size,
-                            &content_len)) {
+  if (infer_content_len != nullptr && TryParseContentLength(kInferContentLength,
+                                                            *infer_content_len,
+                                                            attachment_size,
+                                                            &content_len)) {
     return content_len;
   }
 
-  const auto content_len_header = ctrl->http_request().GetHeader(kContentLength);
+  const auto content_len_header =
+      ctrl->http_request().GetHeader(kContentLength);
   if (content_len_header != nullptr &&
-      TryParseContentLength(kContentLength,
-                            *content_len_header,
-                            attachment_size,
-                            &content_len)) {
+      TryParseContentLength(
+          kContentLength, *content_len_header, attachment_size, &content_len)) {
     return content_len;
   }
 
@@ -331,15 +364,11 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
   if constexpr (std::is_same_v<T, CompletionCallData>) {
     dispatched = dispatcher_ != nullptr &&
                  dispatcher_->dispatch_completion(
-                     request->routing,
-                     request->service_request_id,
-                     req_pb);
+                     request->routing, request->service_request_id, req_pb);
   } else if constexpr (std::is_same_v<T, ChatCallData>) {
     dispatched = dispatcher_ != nullptr &&
                  dispatcher_->dispatch_chat(
-                     request->routing,
-                     request->service_request_id,
-                     req_pb);
+                     request->routing, request->service_request_id, req_pb);
   } else {
     LOG(ERROR) << "Unknown call_data type";
   }
@@ -391,13 +420,17 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
 }
 
 namespace {
-void handle_get_model_response(
-    std::shared_ptr<CompletionCallData> call_data,
-    const TransportResult& result,
-    const xllm::proto::ModelListResponse& response) {
+void handle_get_model_response(std::shared_ptr<CompletionCallData> call_data,
+                               const TransportResult& result,
+                               const xllm::proto::ModelListResponse& response) {
   if (result.code != TransportResultCode::SUCCESS) {
     LOG(ERROR) << "Failed to get serving models: " << result.message;
-    call_data->finish_with_error(result.message);
+    const bool retryable = transport_result_is_retryable(result);
+    call_data->finish_with_error(
+        result.message,
+        retryable ? brpc::HTTP_STATUS_SERVICE_UNAVAILABLE : 0,
+        retryable ? transport_result_code_name(result.code) : "",
+        retryable);
     return;
   }
   std::string err_msg;
@@ -435,9 +468,11 @@ void XllmHttpServiceImpl::get_serving_models(
       cntl, false, done_guard.release(), nullptr, nullptr);
 
   auto service_request = std::make_shared<Request>();
-  if (!scheduler_->schedule(service_request)) {
-    cntl->SetFailed("Schedule request failed!");
-    LOG(ERROR) << "Schedule request failed!";
+  service_request->request_context = parse_request_context(*cntl);
+  const ScheduleResult schedule_result = scheduler_->schedule(service_request);
+  if (!schedule_result_ok(schedule_result)) {
+    apply_schedule_failure(cntl, schedule_result);
+    LOG(ERROR) << "Schedule request failed: " << schedule_result.message;
     return;
   }
 
@@ -499,9 +534,11 @@ void XllmHttpServiceImpl::Completions(
   if (!req_pb->prompt().empty()) {
     service_request->prompt = req_pb->prompt();
     // select instance for request
-    if (!scheduler_->schedule(service_request)) {
-      cntl->SetFailed("Schedule request failed!");
-      LOG(ERROR) << "Schedule request failed!";
+    const ScheduleResult schedule_result =
+        scheduler_->schedule(service_request);
+    if (!schedule_result_ok(schedule_result)) {
+      apply_schedule_failure(cntl, schedule_result);
+      LOG(ERROR) << "Schedule request failed: " << schedule_result.message;
       return;
     }
   } else {
@@ -519,6 +556,10 @@ void XllmHttpServiceImpl::Completions(
       service_request->routing.prefill_endpoint);
   req_pb->mutable_routing()->set_decode_name(
       service_request->routing.decode_endpoint);
+  req_pb->mutable_routing()->set_prefill_incarnation(
+      service_request->routing.prefill_incarnation);
+  req_pb->mutable_routing()->set_decode_incarnation(
+      service_request->routing.decode_incarnation);
 
   auto call_data = std::make_shared<CompletionCallData>(
       cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
@@ -567,7 +608,8 @@ void XllmHttpServiceImpl::ChatCompletions(
     return;
   }
 
-  auto service_request = generate_request(req_pb, *cntl, "/v1/chat/completions");
+  auto service_request =
+      generate_request(req_pb, *cntl, "/v1/chat/completions");
 
   if (req_pb->messages_size() > 0) {
     service_request->messages.reserve(req_pb->messages_size());
@@ -583,9 +625,11 @@ void XllmHttpServiceImpl::ChatCompletions(
       service_request->tool_choice = req_pb->tool_choice();
     }
 
-    if (!scheduler_->schedule(service_request)) {
-      cntl->SetFailed("Schedule request failed!");
-      LOG(ERROR) << "Schedule request failed!";
+    const ScheduleResult schedule_result =
+        scheduler_->schedule(service_request);
+    if (!schedule_result_ok(schedule_result)) {
+      apply_schedule_failure(cntl, schedule_result);
+      LOG(ERROR) << "Schedule request failed: " << schedule_result.message;
       return;
     }
   } else {
@@ -603,6 +647,10 @@ void XllmHttpServiceImpl::ChatCompletions(
       service_request->routing.prefill_endpoint);
   req_pb->mutable_routing()->set_decode_name(
       service_request->routing.decode_endpoint);
+  req_pb->mutable_routing()->set_prefill_incarnation(
+      service_request->routing.prefill_incarnation);
+  req_pb->mutable_routing()->set_decode_incarnation(
+      service_request->routing.decode_incarnation);
 
   auto call_data = std::make_shared<ChatCallData>(
       cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
@@ -646,8 +694,8 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     if (controller) {
-      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
-          "brpc request | response | controller is null");
+      reinterpret_cast<brpc::Controller*>(controller)
+          ->SetFailed("brpc request | response | controller is null");
     }
     return;
   }
@@ -663,17 +711,18 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
         {"closed", stats.closed},
         {"inflight", stats.inflight},
         {"transport_failure_total", stats.transport_failure_total},
+        {"stale_routing_decision_total", stats.stale_routing_decision_total},
         {"channel_count", stats.channel_count},
         {"endpoint_count", stats.endpoint_count}};
   }
 
   const RuntimeHealthSnapshot health = runtime_state_.health_snapshot();
-  PrometheusMetricsSnapshot snapshot = build_prometheus_metrics_snapshot(
-      summary,
-      options_.service_name(),
-      options_.block_size(),
-      health.ready,
-      runtime_phase_name(health.phase));
+  PrometheusMetricsSnapshot snapshot =
+      build_prometheus_metrics_snapshot(summary,
+                                        options_.service_name(),
+                                        options_.block_size(),
+                                        health.ready,
+                                        runtime_phase_name(health.phase));
   cntl->http_response().set_content_type("text/plain; version=0.0.4");
   cntl->response_attachment().append(render_prometheus_metrics(snapshot));
 }
@@ -688,8 +737,8 @@ void XllmHttpServiceImpl::DebugSummary(
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | response | controller is null";
     if (controller) {
-      reinterpret_cast<brpc::Controller*>(controller)->SetFailed(
-          "brpc request | response | controller is null");
+      reinterpret_cast<brpc::Controller*>(controller)
+          ->SetFailed("brpc request | response | controller is null");
     }
     return;
   }
@@ -707,6 +756,7 @@ void XllmHttpServiceImpl::DebugSummary(
         {"closed", stats.closed},
         {"inflight", stats.inflight},
         {"transport_failure_total", stats.transport_failure_total},
+        {"stale_routing_decision_total", stats.stale_routing_decision_total},
         {"channel_count", stats.channel_count},
         {"endpoint_count", stats.endpoint_count}};
   }

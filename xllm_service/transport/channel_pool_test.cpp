@@ -35,10 +35,8 @@ TEST(ChannelPoolTest, ReusesChannelForActiveIncarnation) {
   });
 
   ASSERT_TRUE(pool.activate("127.0.0.1:8000", "incarnation-1"));
-  const auto first =
-      pool.get_or_create("127.0.0.1:8000", "incarnation-1");
-  const auto second =
-      pool.get_or_create("127.0.0.1:8000", "incarnation-1");
+  const auto first = pool.get_or_create("127.0.0.1:8000", "incarnation-1");
+  const auto second = pool.get_or_create("127.0.0.1:8000", "incarnation-1");
 
   ASSERT_NE(first, nullptr);
   EXPECT_EQ(first, second);
@@ -47,10 +45,39 @@ TEST(ChannelPoolTest, ReusesChannelForActiveIncarnation) {
   EXPECT_EQ(pool.endpoint_count(), 1);
 }
 
+TEST(ChannelPoolTest, ReportsMissingAndStaleMembership) {
+  ChannelPool pool(
+      [](const std::string&) { return std::make_shared<brpc::Channel>(); });
+
+  const auto missing =
+      pool.get_or_create_with_status("127.0.0.1:8000", "incarnation-1");
+  EXPECT_EQ(missing.status, ChannelLookupStatus::ENDPOINT_NOT_FOUND);
+  EXPECT_TRUE(missing.stale());
+  EXPECT_FALSE(missing.available());
+
+  ASSERT_TRUE(pool.activate("127.0.0.1:8000", "incarnation-2"));
+  const auto stale =
+      pool.get_or_create_with_status("127.0.0.1:8000", "incarnation-1");
+  EXPECT_EQ(stale.status, ChannelLookupStatus::INCARNATION_MISMATCH);
+  EXPECT_TRUE(stale.stale());
+  EXPECT_FALSE(stale.available());
+}
+
+TEST(ChannelPoolTest, SeparatesChannelInitializationFailure) {
+  ChannelPool pool(
+      [](const std::string&) { return std::shared_ptr<brpc::Channel>(); });
+  ASSERT_TRUE(pool.activate("127.0.0.1:8000", "incarnation-1"));
+
+  const auto result =
+      pool.get_or_create_with_status("127.0.0.1:8000", "incarnation-1");
+  EXPECT_EQ(result.status, ChannelLookupStatus::CHANNEL_INITIALIZATION_FAILED);
+  EXPECT_FALSE(result.stale());
+  EXPECT_FALSE(result.available());
+}
+
 TEST(ChannelPoolTest, ReplacesIncarnationAndIgnoresStaleRemoval) {
-  ChannelPool pool([](const std::string&) {
-    return std::make_shared<brpc::Channel>();
-  });
+  ChannelPool pool(
+      [](const std::string&) { return std::make_shared<brpc::Channel>(); });
 
   ASSERT_TRUE(pool.activate("127.0.0.1:8000", "incarnation-1"));
   const auto old_channel =
@@ -58,8 +85,7 @@ TEST(ChannelPoolTest, ReplacesIncarnationAndIgnoresStaleRemoval) {
   ASSERT_NE(old_channel, nullptr);
 
   ASSERT_TRUE(pool.activate("127.0.0.1:8000", "incarnation-2"));
-  EXPECT_EQ(pool.get_or_create("127.0.0.1:8000", "incarnation-1"),
-            nullptr);
+  EXPECT_EQ(pool.get_or_create("127.0.0.1:8000", "incarnation-1"), nullptr);
   EXPECT_FALSE(pool.remove("127.0.0.1:8000", "incarnation-1"));
   const auto new_channel =
       pool.get_or_create("127.0.0.1:8000", "incarnation-2");
@@ -82,9 +108,8 @@ TEST(ChannelPoolTest, DiscardsChannelCreatedForReplacedIncarnation) {
     if (create_count == 1) {
       old_factory_started = true;
       condition.notify_all();
-      condition.wait(lock, [&release_old_factory]() {
-        return release_old_factory;
-      });
+      condition.wait(lock,
+                     [&release_old_factory]() { return release_old_factory; });
     }
     return std::make_shared<brpc::Channel>();
   });
@@ -92,14 +117,12 @@ TEST(ChannelPoolTest, DiscardsChannelCreatedForReplacedIncarnation) {
 
   std::shared_ptr<brpc::Channel> stale_channel;
   std::thread creator([&]() {
-    stale_channel =
-        pool.get_or_create("127.0.0.1:8000", "incarnation-1");
+    stale_channel = pool.get_or_create("127.0.0.1:8000", "incarnation-1");
   });
   {
     std::unique_lock<std::mutex> lock(mutex);
-    condition.wait(lock, [&old_factory_started]() {
-      return old_factory_started;
-    });
+    condition.wait(lock,
+                   [&old_factory_started]() { return old_factory_started; });
   }
 
   ASSERT_TRUE(pool.activate("127.0.0.1:8000", "incarnation-2"));
@@ -112,8 +135,7 @@ TEST(ChannelPoolTest, DiscardsChannelCreatedForReplacedIncarnation) {
 
   EXPECT_EQ(stale_channel, nullptr);
   EXPECT_EQ(pool.channel_count(), 0);
-  EXPECT_NE(pool.get_or_create("127.0.0.1:8000", "incarnation-2"),
-            nullptr);
+  EXPECT_NE(pool.get_or_create("127.0.0.1:8000", "incarnation-2"), nullptr);
   EXPECT_EQ(create_count, 2);
 }
 

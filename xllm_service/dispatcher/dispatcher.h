@@ -34,6 +34,7 @@ struct DispatcherStats {
   bool closed = false;
   uint64_t inflight = 0;
   uint64_t transport_failure_total = 0;
+  uint64_t stale_routing_decision_total = 0;
   size_t channel_count = 0;
   size_t endpoint_count = 0;
 };
@@ -43,8 +44,9 @@ class DispatcherState;
 class Dispatcher final {
  public:
   using TransportObserver = std::function<void(const TransportResult&)>;
-  using ModelResultCallback = std::function<void(
-      const TransportResult&, const xllm::proto::ModelListResponse&)>;
+  using ModelResultCallback =
+      std::function<void(const TransportResult&,
+                         const xllm::proto::ModelListResponse&)>;
 
   Dispatcher(std::shared_ptr<ChannelPool> channel_pool,
              TransportObserver transport_observer);

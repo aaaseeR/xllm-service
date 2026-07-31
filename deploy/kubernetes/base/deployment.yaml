@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xllm-service
+spec:
+  replicas: 2
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: xllm-service
+      app.kubernetes.io/component: adapter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: xllm-service
+        app.kubernetes.io/component: adapter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8888"
+    spec:
+      # Keep this greater than --shutdown_grace_period_s (30s by default).
+      terminationGracePeriodSeconds: 45
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: xllm-service
+              app.kubernetes.io/component: adapter
+      containers:
+        - name: xllm-service
+          # The release image must expose xllm_master_serving on PATH.
+          image: xllm-service:REPLACE_WITH_RELEASE_TAG
+          imagePullPolicy: IfNotPresent
+          command: ["xllm_master_serving"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+          args:
+            - "--server_host=0.0.0.0"
+            - "--http_server_port=8888"
+            - "--rpc_server_port=8889"
+            - "--etcd_addr=$(XLLM_ETCD_ADDR)"
+            - "--etcd_namespace=$(XLLM_ETCD_NAMESPACE)"
+            - "--routing_mode=external"
+            - "--external_routing_topology=aggregated"
+            - "--external_backend_endpoint=$(POD_IP):$(XLLM_RUNTIME_PORT)"
+            - "--tokenizer_path=$(XLLM_TOKENIZER_PATH)"
+            - "--shutdown_grace_period_s=$(XLLM_SHUTDOWN_GRACE_PERIOD_S)"
+          env:
+            - name: XLLM_ETCD_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: xllm-service-runtime
+                  key: XLLM_ETCD_ADDR
+            - name: XLLM_ETCD_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: xllm-service-runtime
+                  key: XLLM_ETCD_NAMESPACE
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: XLLM_RUNTIME_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: xllm-service-runtime
+                  key: XLLM_RUNTIME_PORT
+            - name: XLLM_TOKENIZER_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: xllm-service-runtime
+                  key: XLLM_TOKENIZER_PATH
+            - name: XLLM_SHUTDOWN_GRACE_PERIOD_S
+              valueFrom:
+                configMapKeyRef:
+                  name: xllm-service-runtime
+                  key: XLLM_SHUTDOWN_GRACE_PERIOD_S
+          ports:
+            - name: http
+              containerPort: 8888
+              protocol: TCP
+            - name: rpc
+              containerPort: 8889
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 60

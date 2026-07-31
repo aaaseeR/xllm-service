@@ -43,12 +43,11 @@ const char* request_terminal_reason_name(RequestTerminalReason reason) {
   return "unknown";
 }
 
-RequestSession::RequestSession(
-    std::shared_ptr<Request> request,
-    OutputCallback output_callback,
-    DisconnectCheck disconnect_check,
-    GenerationObserver generation_observer,
-    TerminalObserver terminal_observer)
+RequestSession::RequestSession(std::shared_ptr<Request> request,
+                               OutputCallback output_callback,
+                               DisconnectCheck disconnect_check,
+                               GenerationObserver generation_observer,
+                               TerminalObserver terminal_observer)
     : request_(std::move(request)),
       output_callback_(std::move(output_callback)),
       disconnect_check_(std::move(disconnect_check)),
@@ -72,9 +71,8 @@ bool RequestSession::on_generation(llm::RequestOutput output) {
 
   const bool status_error =
       output.status.has_value() && !output.status.value().ok();
-  const bool runtime_cancelled =
-      status_error &&
-      output.status.value().code() == llm::StatusCode::CANCELLED;
+  const bool runtime_cancelled = status_error && output.status.value().code() ==
+                                                     llm::StatusCode::CANCELLED;
   const bool finished = output.finished;
 
   if (!status_error) {
@@ -107,26 +105,42 @@ bool RequestSession::on_generation(llm::RequestOutput output) {
   return true;
 }
 
-bool RequestSession::on_transport_failure(TransportFailureStage stage,
-                                          const std::string& message) {
+bool RequestSession::on_transport_failure(const TransportResult& result) {
   if (is_terminal()) {
     return false;
   }
 
+  const RequestSessionState current_state = state_.load();
+  const bool generation_started =
+      current_state == RequestSessionState::PREFILL_RUNNING ||
+      current_state == RequestSessionState::DECODE_RUNNING;
+  const bool after_first_token =
+      result.failure_stage == TransportFailureStage::AFTER_FIRST_TOKEN ||
+      generation_started;
+  request_->last_transport_result_code = result.code;
+  request_->last_transport_retryability =
+      !after_first_token && transport_result_is_retryable(result)
+          ? result.retryability
+          : TransportRetryability::NOT_RETRYABLE;
+
   llm::RequestOutput output;
   output.service_request_id = request_->service_request_id;
-  output.status = llm::Status(llm::StatusCode::UNAVAILABLE, message);
+  output.status = llm::Status(llm::StatusCode::UNAVAILABLE, result.message);
   deliver_output(std::move(output));
-  const bool generation_started =
-      state_.load() == RequestSessionState::PREFILL_RUNNING ||
-      state_.load() == RequestSessionState::DECODE_RUNNING;
-  const bool after_first_token =
-      stage == TransportFailureStage::AFTER_FIRST_TOKEN || generation_started;
   return finish(
       RequestSessionState::FAILED,
       after_first_token
           ? RequestTerminalReason::TRANSPORT_FAILURE_AFTER_FIRST_TOKEN
           : RequestTerminalReason::TRANSPORT_FAILURE_BEFORE_FIRST_TOKEN);
+}
+
+bool RequestSession::on_transport_failure(TransportFailureStage stage,
+                                          const std::string& message) {
+  TransportResult result;
+  result.code = TransportResultCode::RPC_FAILURE;
+  result.failure_stage = stage;
+  result.message = message;
+  return on_transport_failure(result);
 }
 
 bool RequestSession::on_instance_failure(const InstanceFailure& failure) {
@@ -136,8 +150,8 @@ bool RequestSession::on_instance_failure(const InstanceFailure& failure) {
 
   llm::RequestOutput output;
   output.service_request_id = request_->service_request_id;
-  output.status = llm::Status(llm::StatusCode::CANCELLED,
-                              "Instance is failed and deleted");
+  output.status =
+      llm::Status(llm::StatusCode::CANCELLED, "Instance is failed and deleted");
   deliver_output(std::move(output));
   return finish(RequestSessionState::CANCELLED,
                 RequestTerminalReason::INSTANCE_FAILURE);

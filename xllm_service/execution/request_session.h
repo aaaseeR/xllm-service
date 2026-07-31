@@ -59,10 +59,10 @@ struct InstanceFailure {
 class RequestSession final {
  public:
   using DisconnectCheck = std::function<bool()>;
-  using GenerationObserver = std::function<void(
-      const std::shared_ptr<Request>&, const llm::RequestOutput&)>;
-  using TerminalObserver = std::function<void(
-      const std::shared_ptr<Request>&, RequestTerminalReason)>;
+  using GenerationObserver = std::function<void(const std::shared_ptr<Request>&,
+                                                const llm::RequestOutput&)>;
+  using TerminalObserver = std::function<void(const std::shared_ptr<Request>&,
+                                              RequestTerminalReason)>;
 
   RequestSession(std::shared_ptr<Request> request,
                  OutputCallback output_callback,
@@ -76,6 +76,7 @@ class RequestSession final {
   // State-changing methods must be invoked by the same serial executor.
   bool on_dispatched();
   bool on_generation(llm::RequestOutput output);
+  bool on_transport_failure(const TransportResult& result);
   bool on_transport_failure(TransportFailureStage stage,
                             const std::string& message);
   bool on_instance_failure(const InstanceFailure& failure);

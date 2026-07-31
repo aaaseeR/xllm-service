@@ -29,6 +29,32 @@ limitations under the License.
 
 namespace xllm_service {
 
+enum class ChannelLookupStatus : uint8_t {
+  AVAILABLE = 0,
+  ENDPOINT_NOT_FOUND = 1,
+  INCARNATION_MISMATCH = 2,
+  CHANNEL_INITIALIZATION_FAILED = 3,
+  MEMBERSHIP_CHANGED = 4,
+};
+
+const char* channel_lookup_status_name(ChannelLookupStatus status);
+
+struct ChannelLookupResult {
+  ChannelLookupStatus status = ChannelLookupStatus::ENDPOINT_NOT_FOUND;
+  std::shared_ptr<brpc::Channel> channel;
+  std::string message;
+
+  bool available() const {
+    return status == ChannelLookupStatus::AVAILABLE && channel != nullptr;
+  }
+
+  bool stale() const {
+    return status == ChannelLookupStatus::ENDPOINT_NOT_FOUND ||
+           status == ChannelLookupStatus::INCARNATION_MISMATCH ||
+           status == ChannelLookupStatus::MEMBERSHIP_CHANGED;
+  }
+};
+
 class ChannelPool final {
  public:
   using ChannelFactory = std::function<std::shared_ptr<brpc::Channel>(
@@ -40,10 +66,11 @@ class ChannelPool final {
   ChannelPool(const ChannelPool&) = delete;
   ChannelPool& operator=(const ChannelPool&) = delete;
 
-  bool activate(const std::string& endpoint,
-                const std::string& incarnation_id);
-  bool remove(const std::string& endpoint,
-              const std::string& incarnation_id);
+  bool activate(const std::string& endpoint, const std::string& incarnation_id);
+  bool remove(const std::string& endpoint, const std::string& incarnation_id);
+  ChannelLookupResult get_or_create_with_status(
+      const std::string& endpoint,
+      const std::string& incarnation_id);
   std::shared_ptr<brpc::Channel> get_or_create(
       const std::string& endpoint,
       const std::string& incarnation_id);
