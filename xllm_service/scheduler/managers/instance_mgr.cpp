@@ -448,6 +448,26 @@ bool InstanceMgr::bind_request_instance_incarnations(
   return true;
 }
 
+bool InstanceMgr::validate_request_instance_incarnations(
+    const std::shared_ptr<Request>& request) const {
+  std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+  const auto matches_bound_incarnation =
+      [this](const std::string& instance_name,
+             const std::string& expected_incarnation_id) {
+        if (instance_name.empty()) {
+          return expected_incarnation_id.empty();
+        }
+        const auto it = instances_.find(instance_name);
+        return it != instances_.end() && is_instance_schedulable(it->second) &&
+               !expected_incarnation_id.empty() &&
+               it->second.incarnation_id == expected_incarnation_id;
+      };
+  return matches_bound_incarnation(request->routing.prefill_name,
+                                   request->prefill_incarnation_id) &&
+         matches_bound_incarnation(request->routing.decode_name,
+                                   request->decode_incarnation_id);
+}
+
 bool InstanceMgr::record_instance_heartbeat(const std::string& instance_name,
                                             const std::string& incarnation_id) {
   std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
@@ -1252,6 +1272,11 @@ void InstanceMgr::deregister_instance(
     if (it == instances_.end()) {
       return;
     }
+    // Close the dispatch gate before notifying Scheduler. The instance and
+    // channel remain available until active attempts have converged, but no
+    // request bound earlier may enter dispatch while deregistration is in
+    // progress.
+    it->second.runtime_state = InstanceRuntimeState::SUSPECT;
     remove_instance_from_index(name, it->second);
   }
 

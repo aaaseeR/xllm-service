@@ -99,8 +99,24 @@ class Scheduler final {
 
   Tokenizer* get_tls_tokenizer();
 
+  bool install_execution_hold_locked(const std::shared_ptr<Request>& request);
+  bool confirm_generation_commit(const std::shared_ptr<Request>& request);
+  bool resolve_terminal_execution_hold(const std::shared_ptr<Request>& request);
+  void cancel_or_detach_execution_hold_locked(
+      const std::shared_ptr<Request>& request);
+
  private:
   Options options_;
+
+  std::string service_incarnation_id_;
+
+  std::unique_ptr<provider::ExecutionHoldCleanupTable>
+      execution_hold_cleanup_table_;
+
+  // Serializes the transition between request-owned and detached holds with
+  // exact process-termination evidence. Lock order is this mutex, then
+  // request_mutex_, then InstanceMgr's internal cluster mutex.
+  std::mutex execution_hold_cleanup_mutex_;
 
   bool exited_ = false;
 

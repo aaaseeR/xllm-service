@@ -28,9 +28,10 @@ limitations under the License.
 | Provider | Mode | Model/Profile | 支持状态 | 限制与证据 |
 | --- | --- | --- | --- | --- |
 | xLLM Native | `REMOTE_PD` | Engine attempt/resource protocol CPU core | CPU_VERIFIED | 20 个状态机测试 + 2 个 fingerprint 测试；并发幂等准入、cancel fence、TTL、GenerationCommit、output gate、tombstone 和精确释放通过 |
-| xLLM Native | `REMOTE_PD` | P/D 生产控制路径 | PARTIAL | 已接真实 D KV allocator/scheduler、P dispatch/handoff、四个 V2 RPC 和 D 输出门禁；尚缺 Service hold、deadline、seq 重排和 CPU loopback 故障矩阵 |
+| xLLM Native | `REMOTE_PD` | P/D 生产控制路径 | PARTIAL | 已接真实 D KV allocator/scheduler、P dispatch/handoff、四个 V2 RPC、P/D 输出门禁和 Service hold；尚缺 deadline、seq 重排和 CPU loopback 故障矩阵 |
 | xLLM Native | `LOCAL_PREFILL_DECODE` / `PREFILL_ONLY` | 公共 attempt schema | PARTIAL | 状态和 reason 可表达；尚未接入对应 allocator/scheduler |
-| xLLM Service | Provider-neutral 全模式 | `ExecutionResourceHold` / cleanup capacity | CPU_VERIFIED | 19 个测试；dispatch 前 token、单 hold、候选收敛、旧 attempt/incarnation fencing 和 record/byte 上限通过 |
+| xLLM Service | Provider-neutral 全模式 | `ExecutionResourceHold` / cleanup capacity | CPU_VERIFIED | 22 个测试；dispatch 前 token、单 hold、候选收敛、旧 attempt/incarnation fencing 和 record/byte 上限通过 |
+| xLLM Service + xLLM Native | `REMOTE_PD` | 生产 dispatch/输出/取消/进程终止 hold | PARTIAL | Request 直接持有 hold；选定 D incarnation 在 RPC 前安装；P commit、D terminal、Cancel fence 和精确进程终止驱动收敛；暂缺后台重试 worker 和 loopback race 测试 |
 | vLLM-Ascend | `AGGREGATED` | 公共 hold schema | PARTIAL | cleanup core 可表达；Agent Submit/Query/Cancel 尚未实现 |
 
 这里的 `CPU_VERIFIED` 只描述可独立运行的协议核心，不表示对应生产 mode 已开放。
@@ -61,15 +62,26 @@ limitations under the License.
 - Service CPU 核心：`xllm_service/provider/execution_hold.*`。move-only cleanup
   reservation 在 dispatch 前按 record 和 bytes 双上限预留，同一 token 从
   RequestContext 转移到最小 cleanup record，收敛后自动释放。
+- Service 生产接线：每个推理 `Request` 直接拥有单一 hold；Scheduler 在选定并绑定
+  P/D incarnation 后、发出 Prefill RPC 前原子预留 cleanup capacity 并安装选定 D
+  holder。P 首个成功事件作为 `GENERATION_COMMITTED` 证明，D 成功终态作为 terminal
+  证明；失败、断连和发送失败同步向同一 attempt/incarnation 发 `CancelRequest`，只接受
+  key 完全匹配的终态 ACK，否则把最小 hold 连同原 token 转入 cleanup 表。Registry
+  精确报告 holder 进程终止时，同时收敛 active 与 detached hold；instance 注销先关闭
+  dispatch gate，Request 登记会重新验证绑定 incarnation，登记/移除/detach 与进程终止
+  proof 按固定锁序串行，避免 proof-before-adopt。异步 Prefill callback 持有
+  `shared_ptr<brpc::Channel>`，不会因 Registry channel 替换而悬空。
 - hold 安全规则：`likely_holder` 不缩小候选；只有明确 `PROVEN_PRECOMMIT` 或
   `GENERATION_COMMITTED` 证明可以写 confirmed holder 并收窄；所有安全候选必须
   分别取得 terminal/cancel-fence/self-fence/process-terminated/允许的硬时间证明。
   `QUERY_ABSENT` 永远不是证明，硬时间证明默认禁用。
-- 明确不支持范围：Service hold 尚未接入生产 `RequestContext`、Provider dispatch
-  和后台 cleanup worker；当前 5 分钟 reservation 上限、30 秒 transfer-start TTL
-  及容量为本地保守常量，尚未从 profile/deadline 推导；`BeginTransfer` 在 P 接受
-  admission 后触发，尚未绑定首个 DMA primitive；未实现 output event seq/reorder、
-  local/aggregated production path，也未提供 NPU、RDMA 或端到端故障注入结论。
+- 明确不支持范围：Service 尚无后台 cleanup retry/query worker；同步 Cancel 暂用实例
+  删除探测 timeout，cleanup capacity 只有 `Options` 保守默认值，尚无稳定 HTTP
+  `SERVICE_CLEANUP_CAPACITY_RETRYABLE` 映射和 profile/CLI 配置；当前 5 分钟 Engine
+  reservation 上限、30 秒 transfer-start TTL 尚未从 request deadline/profile 推导；
+  `BeginTransfer` 在 P 接受 admission 后触发，尚未绑定首个 DMA primitive；未实现
+  output event seq/reorder、local/aggregated production hold，也未提供 NPU、RDMA 或
+  端到端故障注入结论。
 
 ## 需求与测试追踪
 
@@ -83,28 +95,31 @@ limitations under the License.
 | G1 D 真实 reservation/释放所有权 | 真实生产 TU 严格编译；commit 前 release、commit 后 cancel、finish 不 cancel 单测 | 当前生产目标链接 Torch CPU；无 tensor 数值变化 | 待真实 KV/credit/slot | PASS（CPU 编译与状态机） |
 | G1 P RPC 歧义与首事件屏障 | Commit/Query/Cancel、响应数量异常和空 channel fail-closed 生产 TU 严格编译 | N/A | 待 brpc/RDMA 故障注入 | PASS（CPU 编译）；集成故障矩阵待补 |
 | G1 incarnation 绑定 | routing 字段号/roundtrip 协议测试；双仓外层 xLLM override build | N/A | 待进程重启竞态 | PASS |
-| F83 Service 单 hold | 32 线程并发安装只成功一次；resolved 后下一 attempt 可安装 | N/A | 待生产 RequestContext | PASS |
+| F83 Service 单 hold | 32 线程并发安装只成功一次；resolved 后下一 attempt 可安装；Request 直接持有不可复制 hold | N/A | 待真实请求 | PASS |
 | F83 cleanup 容量 | record/byte backpressure、64 线程精确耗尽、RAII 与跨表 token 拒绝 | N/A | N/A | PASS |
 | F83 收敛证明 | 全候选、confirmed 收窄、旧 attempt/incarnation、`QUERY_ABSENT`、hard-bound profile 门禁 | N/A | 待 Provider Query/Cancel | PASS |
+| F83 Service 生产绑定 | Scheduler/HTTP/Request 生产目标 build/link；dispatch 前安装、incarnation 二次验证、P commit、D terminal、Cancel ACK、断连 detach、精确进程终止串行收敛路径代码审查 | N/A，纯控制协议 | 待真实 P/D | PASS（CPU 编译与核心状态机）；loopback race 待补 |
 | 内存/未定义行为 | GCC 13 ASan+UBSan 定向运行 Engine 17 项与 Service hold 19 项 | N/A | N/A | PASS；Clang sanitizer runtime 未随 ARM64 镜像安装 |
-| 双仓回归 | xLLM 89/89；Service 155/155；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | 公共测试目标使用 Torch CPU 环境 | N/A | PASS |
+| 双仓回归 | xLLM 89/89；Service 158/158；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | 公共测试目标使用 Torch CPU 环境 | N/A | PASS |
 
 ## 完善情况
 
 - 已完成：additive wire、Engine attempt CPU 状态机、Native REMOTE_PD 的 D 硬准入/
   reservation、P handoff、V2 RPC handler、ACK 歧义 Query、两侧首事件门禁、
-  scheduler 所有权转移，Service incarnation 路由，以及 Service 单 hold/cleanup
-  capacity CPU 核心。
+  scheduler 所有权转移，Service incarnation 路由、单 hold/cleanup capacity CPU 核心，
+  以及 REMOTE_PD dispatch、输出、取消、断连和精确进程终止的生产 hold 接线。
 - 已知缺口/风险：lifecycle callback 仍在状态锁内执行，生产实现必须保持本地、
-  有界、不可重入；Service 尚未消费 hold，因而跨候选 outcome 不明时的单 hold
-  不变量还没有生产闭环；output event seq/reorder 未接线，P/D 已 commit 后的跨发送方
-  到达顺序仍属于 G2 欠账；cancel fence/tombstone TTL 还须由最大消息寿命证明。
+  有界、不可重入；Service 的 outcome-unknown hold 已进入 Native REMOTE_PD 主路径，
+  但同步 Cancel 失败后的 detached record 目前只能等待精确进程终止，没有周期性
+  Query/Cancel 重试；output event seq/reorder 未接线，P/D 已 commit 后的跨发送方到达
+  顺序仍属于 G2 欠账；cancel fence/tombstone TTL 还须由最大消息寿命证明。
 - 回滚与兼容：旧 `FirstGeneration` 和旧字段保留；新增字段/RPC 都是 additive。
   legacy 路径不会自动获得 V2 资源安全语义，开放开关前必须完成 capability 门禁。
 - 性能、容量和观测证据：CPU 测试证明内存逻辑有固定 record/byte/fence 上限；尚无
   真实 workload 的 allocator 锁持有时间、冲突率、cleanup burst 或 1 万次故障数据。
-- 达到 CPU_VERIFIED 仍需完成：Service RequestContext/dispatch/cleanup worker 接入；
+- 达到 CPU_VERIFIED 仍需完成：Service cleanup retry/query worker、稳定错误映射与
   reservation/deadline/profile 配置化；补齐 CPU fake-provider/loopback 端到端 race、
-  seq 重排、deadline 和 fault loop；确保所有 mode 共用一套权威资源账本。
+  seq 重排、deadline 和 fault loop；接入 local/aggregated hold，并确保所有开放 mode
+  共用一套权威资源账本。
 - 达到 VERIFIED 仍需完成：NPU KV/credit/slot 原子分配、P→D transfer、取消/超时/
   进程终止故障矩阵、1 万次故障门禁和容量/性能发布证据。

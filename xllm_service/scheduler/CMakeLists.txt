@@ -61,6 +61,7 @@ cc_library(
     :model_type
     :common
     :etcd_client
+    :execution_hold
     :loadbalance_policy
     :managers
     :request

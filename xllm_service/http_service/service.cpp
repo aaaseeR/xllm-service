@@ -202,8 +202,9 @@ void handle_first_send_request(brpc::Controller* cntl,
                                std::shared_ptr<T> call_data,
                                Scheduler* scheduler,
                                std::string service_request_id,
-                               bool stream) {
+                               std::shared_ptr<brpc::Channel> channel) {
   std::unique_ptr<brpc::Controller> cntl_guard(cntl);
+  UNUSED_PARAMETER(channel);
   if (cntl->Failed()) {
     LOG(ERROR) << "Fail to send stream generation, " << cntl->ErrorText();
     call_data->finish_with_error(cntl->ErrorText());
@@ -376,9 +377,16 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
   // async redistribute the request and wait the response
   // TODO: optimize the thread pool to async mode.
   auto& target_uri = request->routing.prefill_name;
-  brpc::Channel* channel_ptr = scheduler_->get_channel(target_uri).get();
+  std::shared_ptr<brpc::Channel> channel = scheduler_->get_channel(target_uri);
+  if (channel == nullptr) {
+    LOG(ERROR) << "Failed to get Prefill channel: " << target_uri;
+    call_data->finish_with_error("Prefill channel is unavailable.");
+    scheduler_->finish_request(request->correlation.request_uid(),
+                               /*error=*/true);
+    return;
+  }
   // use stub
-  xllm::proto::XllmAPIService_Stub stub(channel_ptr);
+  xllm::proto::XllmAPIService_Stub stub(channel.get());
   // xllm::proto::Status* resp_pb = new xllm::proto::Status();
   brpc::Controller* redirect_cntl = new brpc::Controller();
   google::protobuf::Closure* done =
@@ -387,7 +395,7 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
                         call_data,
                         scheduler_,
                         request->correlation.request_uid(),
-                        request->stream);
+                        channel);
 
   if constexpr (std::is_same_v<T, CompletionCallData>) {
     stub.Completions(redirect_cntl, &req_pb, nullptr, done);

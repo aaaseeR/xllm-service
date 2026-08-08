@@ -19,6 +19,7 @@ limitations under the License.
 #include <cctype>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -215,7 +216,10 @@ ExecutionHoldCleanupTable::ExecutionHoldCleanupTable(Config config) {
   if (config.record_capacity == 0 || config.byte_capacity == 0 ||
       config.max_cleanup_record_bytes == 0 ||
       config.max_cleanup_record_bytes > config.byte_capacity ||
-      config.max_potential_holders == 0 || config.max_identifier_bytes == 0) {
+      config.max_potential_holders == 0 ||
+      config.max_potential_holders >
+          static_cast<size_t>(std::numeric_limits<int>::max()) ||
+      config.max_identifier_bytes == 0) {
     throw std::invalid_argument("invalid execution hold cleanup capacity");
   }
   capacity_ = std::make_shared<Reservation::CapacityState>(std::move(config));
@@ -233,6 +237,34 @@ ExecutionHoldCleanupTable::try_reserve() {
   ++capacity_->reserved_records;
   capacity_->reserved_bytes += config.max_cleanup_record_bytes;
   return Reservation(capacity_);
+}
+
+ExecutionHoldStatus ExecutionHoldCleanupTable::install_request_hold(
+    RequestExecutionHold* request_hold,
+    xllm::proto::ExecutionHoldKind kind,
+    const ExecutionAttemptId& attempt,
+    const std::string& coordinator_incarnation_id,
+    const std::vector<ExecutionHolder>& potential_holders) {
+  if (request_hold == nullptr ||
+      potential_holders.size() > capacity_->config.max_potential_holders) {
+    return ExecutionHoldStatus::kInvalidArgument;
+  }
+  std::optional<Reservation> reservation = try_reserve();
+  if (!reservation.has_value()) {
+    return ExecutionHoldStatus::kCleanupCapacityRetryable;
+  }
+
+  ExecutionResourceHold hold;
+  hold.set_kind(kind);
+  *hold.mutable_attempt() = attempt;
+  hold.set_coordinator_incarnation_id(coordinator_incarnation_id);
+  hold.mutable_potential_holders()->Reserve(
+      static_cast<int>(potential_holders.size()));
+  for (const ExecutionHolder& holder : potential_holders) {
+    *hold.add_potential_holders() = holder;
+  }
+  hold.set_proof(xllm::proto::EXECUTION_HOLD_PROOF_OUTCOME_UNKNOWN);
+  return request_hold->install(std::move(*reservation), std::move(hold));
 }
 
 size_t ExecutionHoldCleanupTable::AttemptKeyHash::operator()(
@@ -309,6 +341,35 @@ ExecutionHoldStatus ExecutionHoldCleanupTable::apply_convergence_proof(
   it->second.hold.set_proof(xllm::proto::EXECUTION_HOLD_PROOF_TERMINAL);
   records_.erase(it);
   return ExecutionHoldStatus::kResolved;
+}
+
+size_t ExecutionHoldCleanupTable::mark_holder_process_terminated(
+    const ExecutionHolder& holder) {
+  const Config& config = capacity_->config;
+  if (!valid_identifier(holder.engine_uid(), config.max_identifier_bytes) ||
+      !valid_identifier(holder.incarnation_id(), config.max_identifier_bytes)) {
+    return 0;
+  }
+
+  size_t resolved = 0;
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto it = records_.begin(); it != records_.end();) {
+    const std::optional<size_t> holder_index =
+        find_holder(it->second.hold, holder);
+    if (!holder_index.has_value()) {
+      ++it;
+      continue;
+    }
+    it->second.converged_holders[*holder_index] = true;
+    if (!all_holders_converged(it->second.hold, it->second.converged_holders)) {
+      ++it;
+      continue;
+    }
+    it->second.hold.set_proof(xllm::proto::EXECUTION_HOLD_PROOF_TERMINAL);
+    it = records_.erase(it);
+    ++resolved;
+  }
+  return resolved;
 }
 
 bool ExecutionHoldCleanupTable::contains(
@@ -438,14 +499,16 @@ ExecutionHoldStatus RequestExecutionHold::apply_convergence_proof(
     const ExecutionAttemptId& attempt,
     const ExecutionHolder& holder,
     HolderConvergenceProof proof) {
-  if (!valid_attempt(attempt) ||
-      !valid_convergence_proof(
-          proof, reservation_.state_->config.allow_hard_time_bound_proof)) {
+  if (!valid_attempt(attempt)) {
     return ExecutionHoldStatus::kUnsafeProof;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!hold_.has_value()) {
+  if (!hold_.has_value() || !reservation_) {
     return ExecutionHoldStatus::kNoHold;
+  }
+  if (!valid_convergence_proof(
+          proof, reservation_.state_->config.allow_hard_time_bound_proof)) {
+    return ExecutionHoldStatus::kUnsafeProof;
   }
   if (!same_attempt(attempt, hold_->attempt())) {
     return ExecutionHoldStatus::kAttemptMismatch;

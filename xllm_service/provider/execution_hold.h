@@ -103,6 +103,15 @@ class ExecutionHoldCleanupTable final {
   // SERVICE_CLEANUP_CAPACITY_RETRYABLE.
   std::optional<Reservation> try_reserve();
 
+  // Atomically reserves cleanup capacity and installs the request's initial
+  // outcome-unknown hold. Callers must complete this before dispatch.
+  ExecutionHoldStatus install_request_hold(
+      RequestExecutionHold* request_hold,
+      xllm::proto::ExecutionHoldKind kind,
+      const xllm::proto::ExecutionAttemptId& attempt,
+      const std::string& coordinator_incarnation_id,
+      const std::vector<xllm::proto::ExecutionHolder>& potential_holders);
+
   // Detaches the request's minimal hold record. Prompt, output, parser, and
   // retry state cannot enter this API.
   ExecutionHoldStatus adopt(RequestExecutionHold* request_hold);
@@ -113,6 +122,11 @@ class ExecutionHoldCleanupTable final {
       const xllm::proto::ExecutionAttemptId& attempt,
       const xllm::proto::ExecutionHolder& holder,
       xllm::proto::HolderConvergenceProof proof);
+
+  // Applies exact process-lifetime evidence to all detached cleanup records.
+  // Returns the number of records that became fully resolved.
+  size_t mark_holder_process_terminated(
+      const xllm::proto::ExecutionHolder& holder);
 
   bool contains(const xllm::proto::ExecutionAttemptId& attempt) const;
   std::optional<xllm::proto::ExecutionResourceHold> query(

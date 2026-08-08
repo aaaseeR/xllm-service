@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -76,6 +77,18 @@ class Options {
   PROPERTY(uint32_t, xxh3_128bits_seed) = 1024;
 
   PROPERTY(std::string, service_name);
+
+  // V2 execution-hold cleanup capacity. One fixed-size token is reserved
+  // before dispatch and follows an unresolved hold beyond request lifetime.
+  PROPERTY(size_t, execution_hold_cleanup_record_capacity) = 65536;
+
+  PROPERTY(size_t, execution_hold_cleanup_byte_capacity) = 64 * 1024 * 1024;
+
+  PROPERTY(size_t, execution_hold_max_cleanup_record_bytes) = 1024;
+
+  PROPERTY(size_t, execution_hold_max_potential_holders) = 16;
+
+  PROPERTY(size_t, execution_hold_max_identifier_bytes) = 256;
 
   // tokenizer options
   PROPERTY(std::string, tokenizer_path);

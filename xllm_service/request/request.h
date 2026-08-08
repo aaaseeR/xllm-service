@@ -22,6 +22,7 @@ limitations under the License.
 #include "common/types.h"
 #include "common/xllm/output.h"
 #include "observability.pb.h"
+#include "provider/execution_hold.h"
 
 namespace xllm_service {
 
@@ -64,6 +65,11 @@ struct Request {
   Routing routing;
   std::string prefill_incarnation_id;
   std::string decode_incarnation_id;
+
+  // At most one outcome-unknown execution resource holder is permitted for
+  // the current attempt. Its cleanup-capacity token is reserved before the
+  // request is dispatched.
+  provider::RequestExecutionHold execution_hold;
 
   // prefill stage finished
   bool prefill_stage_finished = false;

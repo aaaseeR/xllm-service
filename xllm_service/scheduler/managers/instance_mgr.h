@@ -63,6 +63,8 @@ class InstanceMgr final {
 
   bool bind_request_instance_incarnations(
       const std::shared_ptr<Request>& request);
+  bool validate_request_instance_incarnations(
+      const std::shared_ptr<Request>& request) const;
   bool record_instance_heartbeat(const std::string& instance_name,
                                  const std::string& incarnation_id);
   void record_load_metrics_update(const std::string& instance_name,

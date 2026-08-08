@@ -149,6 +149,30 @@ TEST(ExecutionHoldTest, ConcurrentInstallAllowsExactlyOneDispatchGate) {
   EXPECT_EQ(table.stats().reserved_records, 1);
 }
 
+TEST(ExecutionHoldTest, CleanupCapacityIsReservedBeforeDispatchInstall) {
+  ExecutionHoldCleanupTable table(make_config(/*record_capacity=*/1));
+  RequestExecutionHold first;
+  RequestExecutionHold rejected;
+  const std::vector<ExecutionHolder> holders{make_holder("0")};
+
+  EXPECT_EQ(table.install_request_hold(
+                &first,
+                xllm::proto::EXECUTION_HOLD_KIND_REMOTE_D_RESERVATION,
+                make_attempt(),
+                "coordinator-1",
+                holders),
+            ExecutionHoldStatus::kOk);
+  EXPECT_EQ(table.stats().reserved_records, 1);
+  EXPECT_EQ(table.install_request_hold(
+                &rejected,
+                xllm::proto::EXECUTION_HOLD_KIND_REMOTE_D_RESERVATION,
+                make_attempt(1),
+                "coordinator-1",
+                holders),
+            ExecutionHoldStatus::kCleanupCapacityRetryable);
+  EXPECT_FALSE(rejected.has_hold());
+}
+
 TEST(ExecutionHoldTest, LikelyHolderNeverNarrowsSafeCandidates) {
   ExecutionHoldCleanupTable table(make_config());
   RequestExecutionHold request_hold;
@@ -265,6 +289,27 @@ TEST(ExecutionHoldTest, EveryPotentialHolderMustConverge) {
   EXPECT_EQ(table.stats().reserved_records, 0);
 }
 
+TEST(ExecutionHoldTest, ProofAfterResolutionReturnsNoHold) {
+  ExecutionHoldCleanupTable table(make_config());
+  RequestExecutionHold request_hold;
+  auto reservation = table.try_reserve();
+  ASSERT_TRUE(reservation.has_value());
+  ASSERT_EQ(request_hold.install(std::move(*reservation), make_hold(0, 1)),
+            ExecutionHoldStatus::kOk);
+  ASSERT_EQ(request_hold.apply_convergence_proof(
+                make_attempt(),
+                make_holder("0"),
+                xllm::proto::HOLDER_CONVERGENCE_PROOF_TERMINAL_OUTCOME),
+            ExecutionHoldStatus::kResolved);
+
+  EXPECT_EQ(request_hold.apply_convergence_proof(
+                make_attempt(),
+                make_holder("0"),
+                xllm::proto::HOLDER_CONVERGENCE_PROOF_TERMINAL_OUTCOME),
+            ExecutionHoldStatus::kNoHold);
+  EXPECT_EQ(table.stats().reserved_records, 0);
+}
+
 TEST(ExecutionHoldTest, ResolvedRequestCanInstallNextAttempt) {
   ExecutionHoldCleanupTable table(make_config());
   RequestExecutionHold request_hold;
@@ -334,6 +379,31 @@ TEST(ExecutionHoldTest, CleanupRejectsAbsentAndReleasesAfterAllProofs) {
   auto stats = table.stats();
   EXPECT_EQ(stats.cleanup_records, 0);
   EXPECT_EQ(stats.reserved_records, 0);
+}
+
+TEST(ExecutionHoldTest, ExactProcessTerminationResolvesDetachedRecords) {
+  ExecutionHoldCleanupTable table(make_config());
+  RequestExecutionHold first;
+  RequestExecutionHold second;
+  auto first_reservation = table.try_reserve();
+  auto second_reservation = table.try_reserve();
+  ASSERT_TRUE(first_reservation.has_value());
+  ASSERT_TRUE(second_reservation.has_value());
+  ASSERT_EQ(first.install(std::move(*first_reservation), make_hold(0, 1)),
+            ExecutionHoldStatus::kOk);
+  ExecutionResourceHold second_hold = make_hold(1, 1);
+  second_hold.mutable_potential_holders(0)->set_incarnation_id(
+      "replacement-incarnation");
+  ASSERT_EQ(
+      second.install(std::move(*second_reservation), std::move(second_hold)),
+      ExecutionHoldStatus::kOk);
+  ASSERT_EQ(table.adopt(&first), ExecutionHoldStatus::kOk);
+  ASSERT_EQ(table.adopt(&second), ExecutionHoldStatus::kOk);
+
+  EXPECT_EQ(table.mark_holder_process_terminated(make_holder("0")), 1);
+  EXPECT_FALSE(table.contains(make_attempt(0)));
+  EXPECT_TRUE(table.contains(make_attempt(1)));
+  EXPECT_EQ(table.stats().reserved_records, 1);
 }
 
 TEST(ExecutionHoldTest, ConfirmedHolderNarrowsCleanupFanout) {

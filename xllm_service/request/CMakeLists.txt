@@ -7,5 +7,6 @@ cc_library(
     request.h
   DEPS
     :common
+    :execution_hold
     proto_xllm
 )
