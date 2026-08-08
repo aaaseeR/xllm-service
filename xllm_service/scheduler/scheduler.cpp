@@ -98,7 +98,9 @@ Scheduler::Scheduler(const Options& options)
       service_incarnation_id_(llm::new_uuid_v7()),
       execution_hold_cleanup_table_(
           std::make_unique<provider::ExecutionHoldCleanupTable>(
-              execution_hold_config(options))) {
+              execution_hold_config(options))),
+      request_deadline_queue_(std::make_unique<RequestDeadlineQueue>(
+          options.request_deadline_capacity())) {
   if (options_.execution_hold_cleanup_retry_interval_ms() <= 0 ||
       options_.execution_hold_cleanup_retry_batch_size() == 0 ||
       options_.execution_hold_cleanup_rpc_timeout_ms() <= 0) {
@@ -110,6 +112,8 @@ Scheduler::Scheduler(const Options& options)
   }
   if (options_.request_watchdog_interval_ms() <= 0 ||
       options_.output_gap_timeout_ms() <= 0 ||
+      options_.request_deadline_capacity() == 0 ||
+      options_.request_watchdog_batch_size() == 0 ||
       options_.request_watchdog_interval_ms() >
           options_.output_gap_timeout_ms()) {
     LOG(FATAL) << "Invalid request watchdog configuration.";
@@ -226,6 +230,12 @@ Scheduler::~Scheduler() {
 }
 
 bool Scheduler::schedule(std::shared_ptr<Request> request) {
+  if (request->request_deadline_present &&
+      (!request->request_deadline.has_value() ||
+       request->request_deadline->expired())) {
+    LOG(ERROR) << "Request deadline is invalid or already expired.";
+    return false;
+  }
   // For vLLM backend clusters we forward the client's raw OpenAI JSON straight
   // through to vLLM, which applies its own chat template and tokenization. So
   // skip the local chat-template + tokenize steps entirely (leaving token_ids
@@ -669,15 +679,41 @@ void Scheduler::run_execution_hold_cleanup() {
 
 void Scheduler::run_request_watchdog() {
   std::unique_lock<std::mutex> wait_lock(execution_hold_cleanup_wait_mutex_);
+  bool deadline_backlog = false;
   while (!execution_hold_cleanup_stopped_) {
-    const bool stopped = execution_hold_cleanup_cv_.wait_for(
-        wait_lock,
-        std::chrono::milliseconds(options_.request_watchdog_interval_ms()),
-        [this] { return execution_hold_cleanup_stopped_; });
+    bool stopped = execution_hold_cleanup_stopped_;
+    if (!deadline_backlog) {
+      stopped = execution_hold_cleanup_cv_.wait_for(
+          wait_lock,
+          std::chrono::milliseconds(options_.request_watchdog_interval_ms()),
+          [this] { return execution_hold_cleanup_stopped_; });
+    }
     if (stopped) {
       break;
     }
     wait_lock.unlock();
+
+    const RequestDeadlineQueue::TimePoint now =
+        xllm::RequestDeadline::Clock::now();
+    const std::vector<std::shared_ptr<Request>> deadline_requests =
+        request_deadline_queue_->take_expired(
+            now, options_.request_watchdog_batch_size());
+    for (const std::shared_ptr<Request>& request : deadline_requests) {
+      std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
+      const std::string request_uid = request->correlation.request_uid();
+      {
+        std::lock_guard<std::mutex> request_guard(request_mutex_);
+        const auto it = requests_.find(request_uid);
+        if (it == requests_.end() || it->second != request) {
+          continue;
+        }
+      }
+      fail_output_dispatch_locked(
+          request,
+          llm::StatusCode::DEADLINE_EXCEEDED,
+          "Request exceeded the Service monotonic deadline");
+    }
+    deadline_backlog = request_deadline_queue_->has_expired(now);
 
     std::vector<std::shared_ptr<Request>> gap_requests;
     {
@@ -798,6 +834,16 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
       }
       return true;
     };
+    if (request->request_deadline.has_value() &&
+        request_deadline_queue_->insert(
+            request->correlation.request_uid(),
+            request,
+            request->request_deadline->time_point()) !=
+            RequestDeadlineQueueStatus::kOk) {
+      LOG(ERROR) << "Failed to index request deadline, request_uid="
+                 << request->correlation.request_uid();
+      return false;
+    }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
@@ -884,6 +930,16 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
       }
       return true;
     };
+    if (request->request_deadline.has_value() &&
+        request_deadline_queue_->insert(
+            request->correlation.request_uid(),
+            request,
+            request->request_deadline->time_point()) !=
+            RequestDeadlineQueueStatus::kOk) {
+      LOG(ERROR) << "Failed to index request deadline, request_uid="
+                 << request->correlation.request_uid();
+      return false;
+    }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
@@ -942,6 +998,16 @@ bool Scheduler::record_new_request(
       }
       return true;
     };
+    if (request->request_deadline.has_value() &&
+        request_deadline_queue_->insert(
+            request->correlation.request_uid(),
+            request,
+            request->request_deadline->time_point()) !=
+            RequestDeadlineQueueStatus::kOk) {
+      LOG(ERROR) << "Failed to index request deadline, request_uid="
+                 << request->correlation.request_uid();
+      return false;
+    }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
@@ -988,6 +1054,7 @@ void Scheduler::finish_request(const std::string& service_request_id,
     std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
     output_gap_watchlist_.erase(service_request_id);
   }
+  request_deadline_queue_->erase(service_request_id);
 
   {
     std::lock_guard<std::mutex> guard(thread_map_mutex_);

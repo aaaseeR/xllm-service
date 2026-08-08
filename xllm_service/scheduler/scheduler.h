@@ -29,6 +29,7 @@ limitations under the License.
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
 #include "request/request.h"
+#include "request/request_deadline_queue.h"
 #include "response_handler.h"
 #include "tokenizer/tokenizer.h"
 #include "tokenizer/tokenizer_args.h"
@@ -124,6 +125,7 @@ class Scheduler final {
 
   std::unique_ptr<provider::ExecutionHoldCleanupTable>
       execution_hold_cleanup_table_;
+  std::unique_ptr<RequestDeadlineQueue> request_deadline_queue_;
 
   // Serializes the transition between request-owned and detached holds with
   // exact process-termination evidence. Lock order is this mutex, then

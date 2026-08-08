@@ -104,6 +104,10 @@ class Options {
 
   PROPERTY(int32_t, output_gap_timeout_ms) = 1000;
 
+  PROPERTY(size_t, request_deadline_capacity) = 65536;
+
+  PROPERTY(size_t, request_watchdog_batch_size) = 1024;
+
   // tokenizer options
   PROPERTY(std::string, tokenizer_path);
 

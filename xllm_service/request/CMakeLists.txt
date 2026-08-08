@@ -13,6 +13,19 @@ cc_library(
 
 cc_library(
   NAME
+    request_deadline_queue
+  HDRS
+    request_deadline_queue.h
+  SRCS
+    request_deadline_queue.cpp
+  INCLUDES
+    ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm
+  DEPS
+    :common
+)
+
+cc_library(
+  NAME
     request
   HDRS
     request.h
@@ -21,4 +34,6 @@ cc_library(
     :execution_hold
     :output_event_sequencer
     proto_xllm
+  INCLUDES
+    ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm
 )

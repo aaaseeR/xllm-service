@@ -28,7 +28,7 @@ limitations under the License.
 | Provider | Mode | Model/Profile | 支持状态 | 限制与证据 |
 | --- | --- | --- | --- | --- |
 | xLLM Native | `REMOTE_PD` | Engine attempt/resource protocol CPU core | CPU_VERIFIED | 20 个状态机测试 + 2 个 fingerprint 测试；并发幂等准入、cancel fence、TTL、GenerationCommit、output gate、tombstone 和精确释放通过 |
-| xLLM Native | `REMOTE_PD` | P/D 生产控制路径 | PARTIAL | 已接真实 D KV allocator/scheduler、P dispatch/handoff、四个 V2 RPC、P/D 输出门禁、Service hold 和 seq 重排；尚缺整请求 deadline、seq=0 Query 恢复和 CPU loopback 故障矩阵 |
+| xLLM Native | `REMOTE_PD` | P/D 生产控制路径 | PARTIAL | 已接真实 D KV allocator/scheduler、P dispatch/handoff、四个 V2 RPC、P/D 输出门禁、Service hold、seq 重排和显式请求 deadline；尚缺统一默认 deadline、seq=0 Query 恢复和 CPU loopback 故障矩阵 |
 | xLLM Native | `LOCAL_PREFILL_DECODE` / `PREFILL_ONLY` | 公共 attempt schema | PARTIAL | 状态和 reason 可表达；尚未接入对应 allocator/scheduler |
 | xLLM Service | Provider-neutral 全模式 | `ExecutionResourceHold` / cleanup capacity | CPU_VERIFIED | 24 个测试；dispatch 前 token、单 hold、候选收敛、旧 attempt/incarnation fencing、record/byte 上限和有界公平重试批次通过 |
 | xLLM Service + xLLM Native | `REMOTE_PD` | 生产 dispatch/输出/取消/进程终止 hold | PARTIAL | Request 直接持有 hold；选定 D incarnation 在 RPC 前安装；P commit、D terminal、Cancel fence、后台 Query/Cancel 重试和精确进程终止驱动收敛；暂缺 loopback race 测试与稳定错误映射 |
@@ -59,6 +59,10 @@ limitations under the License.
   丢失时 Query 同一 incarnation，只有已 committed/running/done 才开放首事件。
   P 和 D 两端均在 `GenerationCommit` 前阻断输出，D 的并发 output callback 会等待
   commit 原子转换完成。Service 已把 Registry 选中的 P/D incarnation 写入请求 wire。
+- deadline 与 reservation：Service、P、D 只跨 wire 传播每跳重新计算的 remaining
+  duration，不传播绝对时钟；D 在 allocator 前拒绝到期请求，并把 reservation TTL
+  截断到本地剩余 deadline。P 在 dispatch、D admission 后和 GenerationCommit 前
+  复查，Engine 的连续/统一/fixed/zero/OOC 调度边界会停止到期请求并释放 KV。
 - Service CPU 核心：`xllm_service/provider/execution_hold.*`。move-only cleanup
   reservation 在 dispatch 前按 record 和 bytes 双上限预留，同一 token 从
   RequestContext 转移到最小 cleanup record，收敛后自动释放。
@@ -80,14 +84,15 @@ limitations under the License.
   `GENERATION_COMMITTED` 证明可以写 confirmed holder 并收窄；所有安全候选必须
   分别取得 terminal/cancel-fence/self-fence/process-terminated/允许的硬时间证明。
   `QUERY_ABSENT` 永远不是证明，硬时间证明默认禁用。
-- 明确不支持范围：Service cleanup capacity 与后台重试参数目前只有 `Options` 保守
+- 明确不支持范围：Service cleanup capacity、deadline capacity 与后台重试参数目前只有 `Options` 保守
   默认值，尚无 profile/CLI 配置、worker RPC/失败 metrics 和稳定 HTTP
   `SERVICE_CLEANUP_CAPACITY_RETRYABLE` 映射；当前 5 分钟 Engine
-  reservation 上限、30 秒 transfer-start TTL 尚未从 request deadline/profile 推导；
+  reservation 上限已在显式 request deadline 存在时截断，但 30 秒 transfer-start TTL
+  尚未从 deadline/profile 推导；未携带字段的请求仍没有统一业务时限；
   `BeginTransfer` 在 P 接受 admission 后触发，尚未绑定首个 DMA primitive；未实现
-  整请求 deadline、local/aggregated production hold，也未提供 NPU、RDMA 或端到端
-  故障注入结论。REMOTE_PD output seq/reorder 和 gap watchdog 已进入 G2 生产路径，
-  详细边界见 `OUTPUT_DEADLINE_STATUS.md`。
+  local/aggregated production hold 和 deadline，也未提供 NPU、RDMA 或端到端故障注入
+  结论。REMOTE_PD output seq/reorder、gap watchdog 和显式 request deadline 已进入
+  G2 生产路径，详细边界见 `OUTPUT_DEADLINE_STATUS.md`。
 
 ## 需求与测试追踪
 
@@ -107,7 +112,8 @@ limitations under the License.
 | F83 后台 cleanup | bounded round-robin batch、公平轮转、已收敛 holder/record 移除；Scheduler Query→Cancel 精确终态路径生产编译 | N/A，纯控制协议 | 待真实 P/D 故障注入 | PASS（CPU 核心与生产编译）；loopback race 待补 |
 | F83 Service 生产绑定 | Scheduler/HTTP/Request 生产目标 build/link；dispatch 前安装、incarnation 二次验证、P commit、D terminal、Cancel ACK、断连 detach、精确进程终止串行收敛路径代码审查 | N/A，纯控制协议 | 待真实 P/D | PASS（CPU 编译与核心状态机）；loopback race 待补 |
 | 内存/未定义行为 | GCC 13 ASan+UBSan 定向运行 Engine 17 项与 Service hold 19 项 | N/A | N/A | PASS；Clang sanitizer runtime 未随 ARM64 镜像安装 |
-| 双仓回归 | xLLM 90/90；Service 173/173；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | 公共测试目标使用 Torch CPU 环境 | N/A | PASS |
+| deadline 约束 reservation/调度 | optional wire、fake monotonic、Service 有界并发索引；D admission/reservation cap、P 三个边界和六类 Engine 调度路径生产 TU 以 `-Werror` 编译 | 公共测试目标使用 Torch CPU；无 tensor 数值变化 | 待真实 KV/transfer | PASS（CPU 核心与生产编译）；loopback 待补 |
+| 双仓回归 | xLLM 94/94；Service 179/179；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | 公共测试目标使用 Torch CPU 环境 | N/A | PASS |
 
 ## 完善情况
 
@@ -119,16 +125,16 @@ limitations under the License.
 - 已知缺口/风险：lifecycle callback 仍在状态锁内执行，生产实现必须保持本地、
   有界、不可重入；Service 的 outcome-unknown hold 已进入 Native REMOTE_PD 主路径，
   后台 worker 已能周期性 Query/Cancel，但尚无 fake-brpc loopback race 与 RPC 结果
-  metrics；output event seq/reorder 与 gap watchdog 已接线，但 seq=0 Query 恢复、整请求
-  deadline 和 fake-brpc 竞态仍属于 G2 欠账；cancel fence/tombstone TTL 还须由最大
-  消息寿命证明。
+  metrics；output event seq/reorder、gap watchdog 和显式 Native request deadline 已
+  接线，但 seq=0 Query 恢复、默认 deadline 和 fake-brpc 竞态仍属于 G2 欠账；cancel
+  fence/tombstone TTL 还须由最大消息寿命证明。
 - 回滚与兼容：旧 `FirstGeneration` 和旧字段保留；新增字段/RPC 都是 additive。
   legacy 路径不会自动获得 V2 资源安全语义，开放开关前必须完成 capability 门禁。
 - 性能、容量和观测证据：CPU 测试证明内存逻辑有固定 record/byte/fence 上限；尚无
   真实 workload 的 allocator 锁持有时间、冲突率、cleanup burst 或 1 万次故障数据。
 - 达到 CPU_VERIFIED 仍需完成：Service 稳定错误映射、cleanup worker metrics 与
-  reservation/deadline/profile 配置化；补齐 CPU fake-provider/loopback 端到端 race、
-  seq 重排、deadline 和 fault loop；接入 local/aggregated hold，并确保所有开放 mode
-  共用一套权威资源账本。
+  reservation/deadline/profile 配置化和 Gateway 默认 deadline；补齐 CPU
+  fake-provider/loopback 端到端 race、seq 重排、deadline 和 fault loop；接入
+  local/aggregated hold，并确保所有开放 mode 共用一套权威资源账本。
 - 达到 VERIFIED 仍需完成：NPU KV/credit/slot 原子分配、P→D transfer、取消/超时/
   进程终止故障矩阵、1 万次故障门禁和容量/性能发布证据。

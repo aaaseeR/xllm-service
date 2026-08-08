@@ -19,11 +19,13 @@ limitations under the License.
 
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "chat_template/jinja_chat_template.h"
 #include "common/call_data.h"
 #include "common/types.h"
 #include "common/xllm/output.h"
+#include "core/framework/request/request_deadline.h"
 #include "observability.pb.h"
 #include "provider/execution_hold.h"
 #include "request/output_event_sequencer.h"
@@ -38,6 +40,11 @@ struct Request {
   // V2 observation identity. request_uid is also the execution key carried by
   // the legacy service_request_id wire field; no second execution ID exists.
   xllm::proto::RequestCorrelation correlation;
+
+  // The business duration is converted once at Service ingress. Every
+  // downstream hop receives only the locally recomputed remaining duration.
+  bool request_deadline_present = false;
+  std::optional<xllm::RequestDeadline> request_deadline;
 
   // whether to stream the response
   bool stream = false;

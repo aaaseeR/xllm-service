@@ -24,6 +24,7 @@ limitations under the License.
 #include <json2pb/json_to_pb.h>
 #include <json2pb/pb_to_json.h>
 
+#include <cstdint>
 #include <functional>
 #include <initializer_list>
 #include <nlohmann/json.hpp>
@@ -70,9 +71,18 @@ observability::RequestCorrelationInput correlation_input(
 }
 
 template <typename T>
-void set_request_correlation(T* request_pb, const Request& request) {
+bool set_request_execution_context(T* request_pb, const Request& request) {
   request_pb->set_service_request_id(request.correlation.request_uid());
   *request_pb->mutable_correlation() = request.correlation;
+  if (!request.request_deadline.has_value()) {
+    return true;
+  }
+  const uint64_t remaining_ms = request.request_deadline->remaining_ms();
+  if (remaining_ms == 0) {
+    return false;
+  }
+  request_pb->set_remaining_deadline_ms(remaining_ms);
+  return true;
 }
 
 std::string proto_json(const google::protobuf::Message& message) {
@@ -418,6 +428,11 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
   request->model = req_pb->model();
   request->correlation =
       observability::make_request_correlation(correlation_input(controller));
+  request->request_deadline_present = req_pb->has_remaining_deadline_ms();
+  if (request->request_deadline_present) {
+    request->request_deadline = xllm::RequestDeadline::from_remaining_ms(
+        req_pb->remaining_deadline_ms());
+  }
 
   if (req_pb->has_stream()) {
     request->stream = req_pb->stream();
@@ -583,7 +598,10 @@ void XllmHttpServiceImpl::Completions(
   }
 
   // update request protobuf
-  set_request_correlation(req_pb, *service_request);
+  if (!set_request_execution_context(req_pb, *service_request)) {
+    cntl->SetFailed("Request deadline expired before dispatch.");
+    return;
+  }
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
@@ -713,7 +731,10 @@ void XllmHttpServiceImpl::ChatCompletions(
   }
 
   // update request protobuf
-  set_request_correlation(req_pb, *service_request);
+  if (!set_request_execution_context(req_pb, *service_request)) {
+    cntl->SetFailed("Request deadline expired before dispatch.");
+    return;
+  }
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
@@ -795,7 +816,10 @@ void XllmHttpServiceImpl::AnthropicMessages(
     return;
   }
 
-  set_request_correlation(req_pb, *service_request);
+  if (!set_request_execution_context(req_pb, *service_request)) {
+    cntl->SetFailed("Request deadline expired before dispatch.");
+    return;
+  }
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
