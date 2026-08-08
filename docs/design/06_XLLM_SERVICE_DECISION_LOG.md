@@ -244,3 +244,11 @@ mode 一样要求 attempt、cancel fence、本地 deadline、self-fencing 和 dr
 与 Descriptor 完全相等；模型 revision、请求 capability 和 API feature 也必须是
 Descriptor 的子集。任一证据缺失或不相等都 fail closed。这样 Service 能机械证明
 调度计数和 Provider 实际输入遵循同一渲染契约，而不是只记录一个不可校验字段。
+
+## D58：`attempt_seq=0` 是合法首个 attempt，wire 必须保留 presence
+
+`attempt_seq` 继续按 02 §3.1 从 0 单调递增。所有承载它的 proto3 消息使用
+`optional uint64`：未出现表示协议字段缺失，出现且值为 0 表示合法首个 attempt。
+校验器检查 presence 而不是 `value != 0`，避免把首个执行误判为非法，也避免把
+旧发送方缺字段静默解释成首个 attempt。后续事件、资源键和输出 fencing 统一遵循
+同一语义。

@@ -489,7 +489,7 @@ ContractResult validate_canonical_request(
     return version;
   }
   if (request.global_request_id().empty() || request.trace_id().empty() ||
-      request.request_uid().empty() || request.attempt_seq() == 0 ||
+      request.request_uid().empty() || !request.has_attempt_seq() ||
       request.model_revision().empty() ||
       request.canonical_payload_schema().empty() ||
       request.canonical_payload().empty()) {
@@ -674,7 +674,7 @@ ContractResult validate_execution_plan(const ProviderDescriptor& descriptor,
   if (!version.ok()) {
     return version;
   }
-  if (plan.request_uid().empty() || plan.attempt_seq() == 0 ||
+  if (plan.request_uid().empty() || !plan.has_attempt_seq() ||
       plan.compatibility_proof().empty() || plan.provider_payload().empty()) {
     return missing("execution plan identity, proof, or payload");
   }

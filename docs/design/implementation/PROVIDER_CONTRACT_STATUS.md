@@ -20,7 +20,7 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：CPU_VERIFIED
 - 关联设计/Requirement ID：G-2、G-1、F66、F72、F73、F80-F82、D50、D52、D56
-- 最近验证基线：xLLM `e8376068`、xllm-service 本状态文档所在提交
+- 最近验证基线：xLLM `cd91965c`、xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-08
 
 ## 支持范围
@@ -68,7 +68,8 @@ xLLM CPU 公共路径为 56/56。
 
 - 已完成：contract v1 单一 proto；稳定错误码；完整 V2 mode/capability Resolver；
   Provider/open-mode 门禁；Descriptor、Canonical/Encoded Request、EngineState、
-  ExecutionPlan 校验；线程安全、只增不删的 Adapter registry；CPU conformance。
+  ExecutionPlan 校验；`attempt_seq=0` 与缺失字段可区分；线程安全、只增不删的
+  Adapter registry；CPU conformance。
 - 已知缺口/风险：G-2 的生产 Adapter 和 `SelectPlans` 接入仍属于后续 Provider
   Pool 批次；G3 的 `(provider_id, profile_digest, incarnation_id)` Engine Registry
   尚未实现；当前只证明公共契约逻辑，不证明硬件 Runtime 行为。

@@ -156,7 +156,7 @@ xllm::proto::CanonicalRequest make_request() {
   request.set_global_request_id("global-1");
   request.set_trace_id("trace-1");
   request.set_request_uid("request-1");
-  request.set_attempt_seq(1);
+  request.set_attempt_seq(0);
   request.set_api_kind(xllm::proto::API_KIND_CHAT_COMPLETIONS);
   request.set_model_revision("model-r1");
   request.set_strict(true);
@@ -186,7 +186,7 @@ ExecutionPlan make_plan(const ProviderDescriptor& descriptor) {
   ExecutionPlan plan;
   plan.set_contract_version(kProviderContractVersion);
   plan.set_request_uid("request-1");
-  plan.set_attempt_seq(1);
+  plan.set_attempt_seq(0);
   plan.set_provider_id(descriptor.identity().provider_id());
   plan.set_mode(spec.mode());
   plan.set_transfer_mode(spec.transfer_mode());
@@ -420,6 +420,11 @@ TEST(ProviderContractTest, CanonicalAndEncodedRequestsValidate) {
   EXPECT_EQ(validate_canonical_request(request).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_UNKNOWN_ENUM_VALUE);
 
+  request = make_request();
+  request.clear_attempt_seq();
+  EXPECT_EQ(validate_canonical_request(request).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD);
+
   auto encoded = make_encoded_request(descriptor);
   encoded.set_prompt_tokens_upper_bound(3);
   EXPECT_EQ(
@@ -508,6 +513,11 @@ TEST(ProviderContractTest, ExecutionPlanRejectsWrongRoleAndCapability) {
   plan.mutable_required_capabilities()->RemoveLast();
   EXPECT_EQ(validate_execution_plan(descriptor, plan).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_CAPABILITY);
+
+  plan = make_plan(descriptor);
+  plan.clear_attempt_seq();
+  EXPECT_EQ(validate_execution_plan(descriptor, plan).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD);
 }
 
 TEST(ProviderContractTest, ExecutionPlanRejectsOverflowingDeadlineBudget) {
