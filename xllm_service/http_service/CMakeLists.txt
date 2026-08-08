@@ -83,6 +83,7 @@ cc_library(
     :anthropic_adapter
     :chat_json_parser
     :common
+    :request_identity
     :request
     :scheduler
     absl::random_random

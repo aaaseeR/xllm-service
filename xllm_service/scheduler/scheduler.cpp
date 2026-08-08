@@ -334,10 +334,10 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
                                    std::shared_ptr<Request> request) {
   {
     std::lock_guard<std::mutex> guard(request_mutex_);
-    if (requests_.find(request->service_request_id) != requests_.end()) {
+    if (requests_.find(request->correlation.request_uid()) != requests_.end()) {
       LOG(ERROR) << "The request ID already exists. Requests with the same ID "
                     "are not allowed. "
-                 << request->service_request_id;
+                 << request->correlation.request_uid();
       return false;
     }
 
@@ -373,7 +373,6 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
          reasoning_parser = std::move(reasoning_parser_pref),
          force_reasoning,
          stream_state = std::move(stream_state),
-         service_request_id = request->service_request_id,
          created_time = absl::ToUnixSeconds(request->latest_generate_time)](
             const llm::RequestOutput& req_output) mutable -> bool {
       if (req_output.status.has_value()) {
@@ -403,14 +402,14 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
       }
       return true;
     };
-    requests_.emplace(request->service_request_id, request);
+    requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
 
   {
     // allocate thread for the request
     std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_[request->service_request_id] =
+    remote_requests_output_thread_map_[request->correlation.request_uid()] =
         next_thread_idx;
     next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
@@ -422,10 +421,10 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
                                    std::shared_ptr<Request> request) {
   {
     std::lock_guard<std::mutex> guard(request_mutex_);
-    if (requests_.find(request->service_request_id) != requests_.end()) {
+    if (requests_.find(request->correlation.request_uid()) != requests_.end()) {
       LOG(ERROR) << "The request ID already exists. Requests with the same ID "
                     "are not allowed. "
-                 << request->service_request_id;
+                 << request->correlation.request_uid();
       return false;
     }
 
@@ -485,13 +484,13 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
       }
       return true;
     };
-    requests_.emplace(request->service_request_id, request);
+    requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
 
   {
     std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_[request->service_request_id] =
+    remote_requests_output_thread_map_[request->correlation.request_uid()] =
         next_thread_idx;
     next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
@@ -504,10 +503,10 @@ bool Scheduler::record_new_request(
     std::shared_ptr<Request> request) {
   {
     std::lock_guard<std::mutex> guard(request_mutex_);
-    if (requests_.find(request->service_request_id) != requests_.end()) {
+    if (requests_.find(request->correlation.request_uid()) != requests_.end()) {
       LOG(ERROR) << "The request ID already exists. Requests with the same ID "
                     "are not allowed. "
-                 << request->service_request_id;
+                 << request->correlation.request_uid();
       return false;
     }
 
@@ -520,7 +519,6 @@ bool Scheduler::record_new_request(
          model = request->model,
          stream = request->stream,
          include_usage = request->include_usage,
-         service_request_id = request->service_request_id,
          created_time = absl::ToUnixSeconds(request->latest_generate_time)](
             const llm::RequestOutput& req_output) mutable -> bool {
       if (req_output.status.has_value()) {
@@ -540,14 +538,14 @@ bool Scheduler::record_new_request(
       }
       return true;
     };
-    requests_.emplace(request->service_request_id, request);
+    requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
 
   {
     // allocate thread for the request
     std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_[request->service_request_id] =
+    remote_requests_output_thread_map_[request->correlation.request_uid()] =
         next_thread_idx;
     next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
@@ -599,7 +597,7 @@ void Scheduler::clear_requests_on_failed_instance(
          it->second->routing.decode_name == instance_name &&
          it->second->decode_incarnation_id == incarnation_id);
     if (clear_prefill || clear_decode) {
-      auto service_request_id = it->second->service_request_id;
+      auto service_request_id = it->second->correlation.request_uid();
       llm::RequestOutput req_output;
       req_output.status = llm::Status(llm::StatusCode::CANCELLED,
                                       "Instance is failed and deleted");

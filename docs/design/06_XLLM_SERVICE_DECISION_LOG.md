@@ -263,3 +263,21 @@ Descriptor 的子集。任一证据缺失或不相等都 fail closed。这样 Se
 门禁时，相关数据禁止训练 M1/M2。Admission RAII guard 对每次本地调用只生成一个终态
 尝试，未显式结束时生成 `FAILED/MISSING_TERMINAL`；终态本身若因 ring 压力丢弃，仍由
 上述丢弃计数显式暴露，不能阻塞或回滚请求执行。
+
+## D60：请求关联使用单一不可变对象，旧 ID 只作兼容镜像
+
+Service 在生成类 HTTP 请求入口构造一次 `RequestCorrelation`：有效的上游
+`global_request_id/trace_id` 原样保留并标记来源，缺失或非法值由 Service 补齐；
+W3C `traceparent` 只在结构、version、trace-id、parent-id 全部有效时提供 trace ID。
+`request_uid` 始终由 Service 生成或由测试注入器提供经过校验的 UUIDv7，
+`attempt_seq` 显式携带合法首值 0。长度、字符集、UUID version/variant 和来源 enum
+均在边界 fail closed。
+
+该对象从 Service 请求上下文复制到 Completion/Chat wire、xLLM `RequestParams`、
+P 运行时 Request 和 P→D `DisaggRequest`，进入运行时后只提供 const 访问。
+现有 `service_request_id/service_req_id` 不再生成第二个 ID，只作为
+`correlation.request_uid` 的兼容镜像；xLLM API 与 D 接收边界在 correlation 出现时
+强制二者相等。旧直连客户端未携带 correlation 时仍走显式 legacy 路径，P 不向 D
+制造“存在但为空”的 correlation。vLLM 聚合路径通过 HTTP header 透传同一对象。
+模型枚举等非生成控制请求不创建空身份。观测 ID 仍不参与资源正确性，执行键仍按
+D37 使用 `request_uid + attempt_seq + incarnation_id`。

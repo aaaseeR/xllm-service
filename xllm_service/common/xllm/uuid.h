@@ -17,6 +17,10 @@ limitations under the License.
 #pragma once
 #include <absl/random/random.h>
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string>
 
 namespace xllm_service {
@@ -34,6 +38,41 @@ class ShortUUID {
       "abcdefghijkmnopqrstuvwxyz";
   absl::BitGen gen_;
 };
+
+inline constexpr uint64_t kMaxUuidV7UnixTimestampMs = (uint64_t{1} << 48) - 1;
+
+// Encodes RFC 9562 UUIDv7 bytes from a 48-bit Unix millisecond timestamp and
+// deterministic entropy. The low 4 bits of entropy[0] plus entropy[1] supply
+// rand_a; the low 6 bits of entropy[2] plus entropy[3..9] supply rand_b.
+std::optional<std::string> uuid_v7_from_parts(
+    uint64_t unix_timestamp_ms,
+    const std::array<uint8_t, 10>& entropy);
+
+inline bool is_uuid_v7(const std::string& value) {
+  if (value.size() != 36 || value[8] != '-' || value[13] != '-' ||
+      value[18] != '-' || value[23] != '-' || value[14] != '7') {
+    return false;
+  }
+  const char variant = value[19];
+  if (variant != '8' && variant != '9' && variant != 'a' && variant != 'A' &&
+      variant != 'b' && variant != 'B') {
+    return false;
+  }
+  for (size_t index = 0; index < value.size(); ++index) {
+    if (index == 8 || index == 13 || index == 18 || index == 23) {
+      continue;
+    }
+    const char character = value[index];
+    if (!((character >= '0' && character <= '9') ||
+          (character >= 'a' && character <= 'f') ||
+          (character >= 'A' && character <= 'F'))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string new_uuid_v7();
 
 }  // namespace llm
 }  // namespace xllm_service

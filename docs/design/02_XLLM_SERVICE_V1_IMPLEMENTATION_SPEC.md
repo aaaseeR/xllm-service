@@ -713,6 +713,8 @@ V1 的 Gateway、Service、P、D 使用同一 `global_request_id + request_uid +
 
 结构化事件的唯一 wire 真相是 xLLM `xllm/proto/observability.proto`。`attempt_seq` 和 `event_seq` 必须保留 proto presence，值 0 分别表示首个 attempt 和首个事件，字段缺失才表示协议不完整。Service 侧 producer 只允许写入预分配的固定容量 ring；写锁竞争时立即返回并累计 `dropped_contention`，ring 满时累计 `dropped_capacity`，不得等待 exporter、扩张无界队列或反压执行路径。所有身份字段和 measurement boundary 在进入 ring 前执行长度上限校验。
 
+生成类请求使用同一份不可变 `RequestCorrelation` 贯穿 Service→P→D；Completion/Chat 和 P→D wire 都携带完整对象。现有 `service_request_id/service_req_id` 只作 `request_uid` 兼容镜像，二者不相等时接收端稳定拒绝，禁止同时维护两个执行 ID。Service 生成的 `request_uid` 必须是 UUIDv7；直连 legacy 请求未携带 correlation 时可以保持兼容，但 P 不得向 D 发送“存在但为空”的对象。有效上游观测 ID 原样透传并记录来源，缺失/非法值由 Service 补齐；vLLM 聚合路径用 HTTP header 透传同一身份。
+
 报表按 `pool/model_revision/runtime_profile/workload_class/prompt_bin/output_bin/max_tokens/finish_reason` 分组。原始 Prompt、输出和 token 序列默认不记录。计时公式、关联覆盖率或事件缺失率未通过第 12 节门禁的数据，不得训练 M1/M2。
 
 ## 9. 容错矩阵

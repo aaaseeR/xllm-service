@@ -41,3 +41,17 @@ target_link_libraries(anthropic_tracer_test
                       PRIVATE brpc-static leveldb::leveldb ZLIB::ZLIB
                               protobuf::libprotobuf OpenSSL::SSL
                               OpenSSL::Crypto)
+
+cc_test(
+  NAME
+    uuid_test
+  SRCS
+    uuid_test.cpp
+  DEPS
+    :common
+    GTest::gtest_main
+)
+target_link_libraries(uuid_test
+                      PRIVATE brpc-static leveldb::leveldb ZLIB::ZLIB
+                              protobuf::libprotobuf OpenSSL::SSL
+                              OpenSSL::Crypto)

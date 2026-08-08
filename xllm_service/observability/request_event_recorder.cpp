@@ -23,6 +23,8 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "common/xllm/uuid.h"
+
 namespace xllm_service::observability {
 namespace {
 
@@ -31,6 +33,13 @@ constexpr size_t kMaxMeasurementBoundaryLength = 64;
 
 bool valid_identity(const std::string& value) {
   return !value.empty() && value.size() <= kMaxIdentityLength;
+}
+
+bool valid_correlation_id(const std::string& value) {
+  return valid_identity(value) &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return character >= 0x21 && character <= 0x7e;
+         });
 }
 
 bool is_failure_result(xllm::proto::EventResult result) {
@@ -119,10 +128,19 @@ bool valid_runtime_profile(const xllm::proto::RuntimeProfileIdentity& profile) {
 bool valid_event(const xllm::proto::RequestEvent& event) {
   if (event.schema_version() != kRequestEventSchemaVersion ||
       !event.has_correlation() ||
-      !valid_identity(event.correlation().global_request_id()) ||
-      !valid_identity(event.correlation().trace_id()) ||
-      !valid_identity(event.correlation().request_uid()) ||
-      !event.correlation().has_attempt_seq() || !event.has_event_seq() ||
+      !valid_correlation_id(event.correlation().global_request_id()) ||
+      !valid_correlation_id(event.correlation().trace_id()) ||
+      !llm::is_uuid_v7(event.correlation().request_uid()) ||
+      !event.correlation().has_attempt_seq() ||
+      !xllm::proto::CorrelationIdSource_IsValid(
+          event.correlation().global_request_id_source()) ||
+      event.correlation().global_request_id_source() ==
+          xllm::proto::CORRELATION_ID_SOURCE_UNSPECIFIED ||
+      !xllm::proto::CorrelationIdSource_IsValid(
+          event.correlation().trace_id_source()) ||
+      event.correlation().trace_id_source() ==
+          xllm::proto::CORRELATION_ID_SOURCE_UNSPECIFIED ||
+      !event.has_event_seq() ||
       !xllm::proto::RequestEventType_IsValid(event.event_type()) ||
       event.event_type() == xllm::proto::REQUEST_EVENT_TYPE_UNSPECIFIED ||
       !xllm::proto::EventOwnerRole_IsValid(event.owner_role()) ||

@@ -48,8 +48,13 @@ xllm::proto::RequestEvent make_event() {
   event.set_schema_version(kRequestEventSchemaVersion);
   event.mutable_correlation()->set_global_request_id("global-1");
   event.mutable_correlation()->set_trace_id("trace-1");
-  event.mutable_correlation()->set_request_uid("request-1");
+  event.mutable_correlation()->set_request_uid(
+      "01234567-89ab-7cde-bf01-23456789abcd");
   event.mutable_correlation()->set_attempt_seq(0);
+  event.mutable_correlation()->set_global_request_id_source(
+      xllm::proto::CORRELATION_ID_SOURCE_UPSTREAM);
+  event.mutable_correlation()->set_trace_id_source(
+      xllm::proto::CORRELATION_ID_SOURCE_UPSTREAM);
   event.set_event_seq(0);
   event.set_event_type(xllm::proto::REQUEST_EVENT_TYPE_INGRESS);
   event.set_owner_role(xllm::proto::EVENT_OWNER_ROLE_SERVICE);
@@ -133,6 +138,10 @@ TEST(RequestEventRecorderTest, RejectsMissingCorrelationAndInvalidMetric) {
   EXPECT_EQ(recorder.record(event), RecordStatus::kInvalid);
 
   event = make_event();
+  event.mutable_correlation()->set_trace_id("invalid trace id");
+  EXPECT_EQ(recorder.record(event), RecordStatus::kInvalid);
+
+  event = make_event();
   event.set_event_type(xllm::proto::REQUEST_EVENT_TYPE_METRIC_SAMPLE);
   metric = event.mutable_metric();
   metric->set_kind(xllm::proto::REQUEST_METRIC_KIND_SERVER_TPOT);
@@ -141,7 +150,7 @@ TEST(RequestEventRecorderTest, RejectsMissingCorrelationAndInvalidMetric) {
   metric->set_duration_ns(0);
   metric->set_measurement_boundary("service_response_write");
   EXPECT_EQ(recorder.record(event), RecordStatus::kInvalid);
-  EXPECT_EQ(recorder.stats().invalid_events, 4u);
+  EXPECT_EQ(recorder.stats().invalid_events, 5u);
 }
 
 TEST(RequestEventRecorderTest, ConcurrentProducersRemainBounded) {

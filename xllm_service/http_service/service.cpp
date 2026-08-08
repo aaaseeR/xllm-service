@@ -25,6 +25,7 @@ limitations under the License.
 #include <json2pb/pb_to_json.h>
 
 #include <functional>
+#include <initializer_list>
 #include <nlohmann/json.hpp>
 
 #include "chat.pb.h"
@@ -33,10 +34,10 @@ limitations under the License.
 #include "common/closure_guard.h"
 #include "common/utils.h"
 #include "common/xllm/status.h"
-#include "common/xllm/uuid.h"
 #include "completion.pb.h"
 #include "http_service/anthropic_adapter.h"
 #include "http_service/chat_json_parser.h"
+#include "observability/request_identity.h"
 #include "scheduler/scheduler.h"
 #include "xllm_rpc_service.pb.h"
 #include "xllm_service.pb.h"
@@ -44,14 +45,34 @@ limitations under the License.
 namespace xllm_service {
 
 namespace {
-thread_local llm::ShortUUID short_uuid;
-std::string generate_service_request_id(const std::string& method) {
-  std::stringstream ss;
-  ss << method << "-";
-  ss << std::this_thread::get_id();
-  ss << "-";
-  ss << short_uuid.random();
-  return ss.str();
+
+std::string first_header_value(
+    const brpc::Controller* controller,
+    std::initializer_list<const char*> header_names) {
+  for (const char* header_name : header_names) {
+    if (const std::string* value =
+            controller->http_request().GetHeader(header_name)) {
+      return *value;
+    }
+  }
+  return {};
+}
+
+observability::RequestCorrelationInput correlation_input(
+    const brpc::Controller* controller) {
+  observability::RequestCorrelationInput input;
+  input.global_request_id = first_header_value(
+      controller,
+      {"x-global-request-id", "x-request-id", "x-ms-client-request-id"});
+  input.trace_id = first_header_value(controller, {"x-trace-id", "trace-id"});
+  input.traceparent = first_header_value(controller, {"traceparent"});
+  return input;
+}
+
+template <typename T>
+void set_request_correlation(T* request_pb, const Request& request) {
+  request_pb->set_service_request_id(request.correlation.request_uid());
+  *request_pb->mutable_correlation() = request.correlation;
 }
 
 std::string proto_json(const google::protobuf::Message& message) {
@@ -72,7 +93,7 @@ AnthropicTracer make_anthropic_tracer(const std::shared_ptr<Request>& request) {
   std::string service_request_id;
   if (request) {
     sink = request->trace_callback;
-    service_request_id = request->service_request_id;
+    service_request_id = request->correlation.request_uid();
   }
   return AnthropicTracer(
       std::move(sink), /*request_id=*/"", service_request_id);
@@ -263,7 +284,8 @@ void handle_vllm(std::shared_ptr<T> call_data,
                  const std::string& path,
                  bool is_post,
                  const std::string& body,
-                 bool stream) {
+                 bool stream,
+                 const xllm::proto::RequestCorrelation& correlation = {}) {
   auto channel = scheduler->get_channel(target_name);
   if (channel == nullptr) {
     LOG(ERROR) << "No channel for vLLM instance: " << target_name;
@@ -275,6 +297,18 @@ void handle_vllm(std::shared_ptr<T> call_data,
   redirect_cntl->http_request().uri() = "http://" + target_name + path;
   redirect_cntl->http_request().set_method(is_post ? brpc::HTTP_METHOD_POST
                                                    : brpc::HTTP_METHOD_GET);
+  if (!correlation.request_uid().empty()) {
+    redirect_cntl->http_request().SetHeader("X-Global-Request-ID",
+                                            correlation.global_request_id());
+    redirect_cntl->http_request().SetHeader("X-Request-ID",
+                                            correlation.global_request_id());
+    redirect_cntl->http_request().SetHeader("X-Trace-ID",
+                                            correlation.trace_id());
+    redirect_cntl->http_request().SetHeader("X-Request-UID",
+                                            correlation.request_uid());
+    redirect_cntl->http_request().SetHeader(
+        "X-Attempt-Seq", std::to_string(correlation.attempt_seq()));
+  }
   if (is_post) {
     redirect_cntl->http_request().SetHeader("Content-Type", "application/json");
     redirect_cntl->request_attachment().append(body);
@@ -334,7 +368,7 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
   bool success = scheduler_->record_new_request(call_data, request);
   if (!success) {
     LOG(ERROR) << "rpc service add new request error: "
-               << request->service_request_id;
+               << request->correlation.request_uid();
     call_data->finish_with_error("Internal runtime error.");
     return;
   }
@@ -352,7 +386,7 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
                         redirect_cntl,
                         call_data,
                         scheduler_,
-                        request->service_request_id,
+                        request->correlation.request_uid(),
                         request->stream);
 
   if constexpr (std::is_same_v<T, CompletionCallData>) {
@@ -371,13 +405,11 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
 template <typename T>
 std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
     T* req_pb,
-    const std::string& method) {
+    brpc::Controller* controller) {
   auto request = std::make_shared<Request>();
   request->model = req_pb->model();
-
-  // TODO: add `created_time` fileds etc.
-  // create xllm_service request_id: service_request_id
-  request->service_request_id = generate_service_request_id(method);
+  request->correlation =
+      observability::make_request_correlation(correlation_input(controller));
 
   if (req_pb->has_stream()) {
     request->stream = req_pb->stream();
@@ -389,7 +421,7 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
 
   if (options_.enable_request_trace()) {
     request->trace_callback =
-        [this, service_request_id = request->service_request_id](
+        [this, service_request_id = request->correlation.request_uid()](
             const std::string& message) {
           request_tracer_->log(service_request_id, message);
         };
@@ -510,7 +542,7 @@ void XllmHttpServiceImpl::Completions(
     return;
   }
 
-  auto service_request = generate_request(req_pb, "/v1/completions");
+  auto service_request = generate_request(req_pb, cntl);
 
   if (!req_pb->prompt().empty()) {
     service_request->prompt = req_pb->prompt();
@@ -537,12 +569,13 @@ void XllmHttpServiceImpl::Completions(
                 "/v1/completions",
                 /*is_post=*/true,
                 attachment,
-                service_request->stream);
+                service_request->stream,
+                service_request->correlation);
     return;
   }
 
   // update request protobuf
-  req_pb->set_service_request_id(service_request->service_request_id);
+  set_request_correlation(req_pb, *service_request);
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
@@ -603,7 +636,7 @@ void XllmHttpServiceImpl::ChatCompletions(
     return;
   }
 
-  auto service_request = generate_request(req_pb, "/v1/chat/completions");
+  auto service_request = generate_request(req_pb, cntl);
 
   if (req_pb->messages_size() > 0) {
     service_request->messages.reserve(req_pb->messages_size());
@@ -662,12 +695,13 @@ void XllmHttpServiceImpl::ChatCompletions(
                 "/v1/chat/completions",
                 /*is_post=*/true,
                 attachment,
-                service_request->stream);
+                service_request->stream,
+                service_request->correlation);
     return;
   }
 
   // update request protobuf
-  req_pb->set_service_request_id(service_request->service_request_id);
+  set_request_correlation(req_pb, *service_request);
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
@@ -728,7 +762,7 @@ void XllmHttpServiceImpl::AnthropicMessages(
   }
   req_pb->set_request_id(new_anthropic_id());
 
-  auto service_request = generate_request(req_pb, "/v1/messages");
+  auto service_request = generate_request(req_pb, cntl);
   auto tracer = make_anthropic_tracer(service_request);
   tracer.trace("raw_http_request", attachment);
   tracer.trace("anthropic_request_pb", proto_json(*anthropic_req_pb));
@@ -745,7 +779,7 @@ void XllmHttpServiceImpl::AnthropicMessages(
     return;
   }
 
-  req_pb->set_service_request_id(service_request->service_request_id);
+  set_request_correlation(req_pb, *service_request);
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());

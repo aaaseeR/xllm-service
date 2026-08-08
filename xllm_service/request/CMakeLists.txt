@@ -7,4 +7,5 @@ cc_library(
     request.h
   DEPS
     :common
+    proto_xllm
 )
