@@ -82,6 +82,14 @@ RequestOutputConversionResult request_output_from_disagg_generation(
   request_output.finished_on_prefill_instance =
       generation.finished_on_prefill_instance();
   request_output.finished = generation.finished();
+  if (generation.has_output_event_seq()) {
+    request_output.output_event_seq = generation.output_event_seq();
+  }
+  if (generation.has_attempt_seq()) {
+    request_output.attempt_seq = generation.attempt_seq();
+  }
+  request_output.sender_engine_uid = generation.sender_engine_uid();
+  request_output.sender_incarnation_id = generation.sender_incarnation_id();
   request_output.outputs.reserve(generation.outputs_size());
   for (const proto::SequenceOutput& output : generation.outputs()) {
     llm::SequenceOutput sequence_output;

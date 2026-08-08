@@ -96,6 +96,14 @@ class Options {
 
   PROPERTY(int32_t, execution_hold_cleanup_rpc_timeout_ms) = 100;
 
+  PROPERTY(size_t, output_reorder_max_events) = 64;
+
+  PROPERTY(size_t, output_reorder_max_bytes) = 4 * 1024 * 1024;
+
+  PROPERTY(int32_t, request_watchdog_interval_ms) = 100;
+
+  PROPERTY(int32_t, output_gap_timeout_ms) = 1000;
+
   // tokenizer options
   PROPERTY(std::string, tokenizer_path);
 

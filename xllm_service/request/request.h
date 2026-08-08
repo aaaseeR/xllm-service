@@ -17,12 +17,16 @@ limitations under the License.
 
 #include <absl/time/time.h>
 
+#include <memory>
+#include <mutex>
+
 #include "chat_template/jinja_chat_template.h"
 #include "common/call_data.h"
 #include "common/types.h"
 #include "common/xllm/output.h"
 #include "observability.pb.h"
 #include "provider/execution_hold.h"
+#include "request/output_event_sequencer.h"
 
 namespace xllm_service {
 
@@ -70,6 +74,12 @@ struct Request {
   // the current attempt. Its cleanup-capacity token is reserved before the
   // request is dispatched.
   provider::RequestExecutionHold execution_hold;
+
+  // Serializes cross-sender sequencing with affinity-thread dispatch. Native
+  // REMOTE_PD installs the bounded sequencer before the first RPC is sent.
+  std::mutex output_dispatch_mutex;
+  std::unique_ptr<OutputEventSequencer> output_event_sequencer;
+  bool output_dispatch_closed = false;
 
   // prefill stage finished
   bool prefill_stage_finished = false;

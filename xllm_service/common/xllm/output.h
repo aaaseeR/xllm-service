@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -114,6 +115,14 @@ struct RequestOutput {
 
   // whether the prefill stage is finished on prefill_instance.
   bool finished_on_prefill_instance = false;
+
+  // Cross-sender ordering source for service-routed output. It is absent on
+  // legacy paths.
+  std::optional<uint64_t> output_event_seq;
+
+  std::optional<uint64_t> attempt_seq;
+  std::string sender_engine_uid;
+  std::string sender_incarnation_id;
 };
 
 inline std::optional<std::string> to_string(FinishReason reason) {

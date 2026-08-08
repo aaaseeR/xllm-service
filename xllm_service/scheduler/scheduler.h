@@ -107,11 +107,15 @@ class Scheduler final {
   bool resolve_terminal_execution_hold(const std::shared_ptr<Request>& request);
   void cancel_or_detach_execution_hold_locked(
       const std::shared_ptr<Request>& request);
+  void fail_output_dispatch_locked(const std::shared_ptr<Request>& request,
+                                   llm::StatusCode status_code,
+                                   std::string message);
   bool call_attempt_control(const xllm::proto::ExecutionResourceHold& hold,
                             const xllm::proto::ExecutionHolder& holder,
                             bool query,
                             int32_t timeout_ms);
   void run_execution_hold_cleanup();
+  void run_request_watchdog();
 
  private:
   Options options_;
@@ -130,6 +134,10 @@ class Scheduler final {
   std::condition_variable execution_hold_cleanup_cv_;
   bool execution_hold_cleanup_stopped_ = false;
   std::unique_ptr<std::thread> execution_hold_cleanup_thread_;
+  std::unique_ptr<std::thread> request_watchdog_thread_;
+
+  std::mutex output_gap_watch_mutex_;
+  std::unordered_map<std::string, std::weak_ptr<Request>> output_gap_watchlist_;
 
   bool exited_ = false;
 

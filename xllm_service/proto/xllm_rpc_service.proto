@@ -151,6 +151,12 @@ message DisaggStreamGeneration {
   OutputUsage usage = 5;
   bool finished = 6;
   bool finished_on_prefill_instance = 7;
+  // Cross-sender ordering source for V2 service routing. REMOTE_PD prefill
+  // emits 0 and decode emits monotonically from 1.
+  optional uint64 output_event_seq = 8;
+  optional uint64 attempt_seq = 9;
+  string sender_engine_uid = 10;
+  string sender_incarnation_id = 11;
 }
 
 message DisaggStreamGenerations {

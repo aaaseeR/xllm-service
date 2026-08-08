@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <brpc/controller.h>
 
+#include <algorithm>
 #include <chrono>
 
 #include "chat_template/deepseek_v4_cpp_chat_template.h"
@@ -102,6 +103,16 @@ Scheduler::Scheduler(const Options& options)
       options_.execution_hold_cleanup_retry_batch_size() == 0 ||
       options_.execution_hold_cleanup_rpc_timeout_ms() <= 0) {
     LOG(FATAL) << "Invalid execution hold cleanup retry configuration.";
+  }
+  if (options_.output_reorder_max_events() == 0 ||
+      options_.output_reorder_max_bytes() == 0) {
+    LOG(FATAL) << "Invalid output reorder capacity configuration.";
+  }
+  if (options_.request_watchdog_interval_ms() <= 0 ||
+      options_.output_gap_timeout_ms() <= 0 ||
+      options_.request_watchdog_interval_ms() >
+          options_.output_gap_timeout_ms()) {
+    LOG(FATAL) << "Invalid request watchdog configuration.";
   }
   // vLLM-backend clusters forward the raw client JSON to vLLM, which does its
   // own tokenization / chat templating. Skip building the local tokenizer and
@@ -193,6 +204,8 @@ Scheduler::Scheduler(const Options& options)
 
   execution_hold_cleanup_thread_ = std::make_unique<std::thread>(
       &Scheduler::run_execution_hold_cleanup, this);
+  request_watchdog_thread_ =
+      std::make_unique<std::thread>(&Scheduler::run_request_watchdog, this);
 }
 
 Scheduler::~Scheduler() {
@@ -204,6 +217,10 @@ Scheduler::~Scheduler() {
   if (execution_hold_cleanup_thread_ != nullptr &&
       execution_hold_cleanup_thread_->joinable()) {
     execution_hold_cleanup_thread_->join();
+  }
+  if (request_watchdog_thread_ != nullptr &&
+      request_watchdog_thread_->joinable()) {
+    request_watchdog_thread_->join();
   }
   etcd_client_->stop_watch();
 }
@@ -435,6 +452,11 @@ bool Scheduler::install_execution_hold_locked(
           service_incarnation_id_,
           {holder});
   if (status == provider::ExecutionHoldStatus::kOk) {
+    request->output_event_sequencer =
+        std::make_unique<OutputEventSequencer>(OutputEventSequencer::Config{
+            .max_buffered_events = options_.output_reorder_max_events(),
+            .max_buffered_bytes = options_.output_reorder_max_bytes(),
+            .max_sequence_gap = options_.output_reorder_max_events()});
     return true;
   }
   LOG(ERROR) << "Failed to install execution hold before dispatch, request_uid="
@@ -480,6 +502,56 @@ bool Scheduler::resolve_terminal_execution_hold(
              << request->correlation.request_uid()
              << ", status=" << static_cast<int>(status);
   return false;
+}
+
+void Scheduler::fail_output_dispatch_locked(
+    const std::shared_ptr<Request>& request,
+    llm::StatusCode status_code,
+    std::string message) {
+  if (request->output_dispatch_closed) {
+    return;
+  }
+  request->output_dispatch_closed = true;
+  const std::string request_uid = request->correlation.request_uid();
+  if (request->output_event_sequencer != nullptr) {
+    request->output_event_sequencer->close();
+  }
+  {
+    std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+    output_gap_watchlist_.erase(request_uid);
+  }
+
+  size_t output_thread_index = 0;
+  bool output_thread_found = false;
+  {
+    std::lock_guard<std::mutex> thread_guard(thread_map_mutex_);
+    const auto it = remote_requests_output_thread_map_.find(request_uid);
+    if (it != remote_requests_output_thread_map_.end()) {
+      output_thread_index = it->second;
+      output_thread_found = true;
+    }
+  }
+
+  OutputCallback callback = request->output_callback;
+  auto fail = [this,
+               request,
+               request_uid,
+               callback = std::move(callback),
+               status_code,
+               message = std::move(message)]() mutable {
+    if (!request->call_data->is_disconnected()) {
+      llm::RequestOutput error_output;
+      error_output.service_request_id = request_uid;
+      error_output.status = llm::Status(status_code, std::move(message));
+      callback(std::move(error_output));
+    }
+    finish_request(request_uid, true);
+  };
+  if (output_thread_found) {
+    output_threadpools_[output_thread_index].schedule(std::move(fail));
+  } else {
+    fail();
+  }
 }
 
 void Scheduler::cancel_or_detach_execution_hold_locked(
@@ -589,6 +661,61 @@ void Scheduler::run_execution_hold_cleanup() {
               hold.attempt(), holder, proof);
         }
       }
+    }
+
+    wait_lock.lock();
+  }
+}
+
+void Scheduler::run_request_watchdog() {
+  std::unique_lock<std::mutex> wait_lock(execution_hold_cleanup_wait_mutex_);
+  while (!execution_hold_cleanup_stopped_) {
+    const bool stopped = execution_hold_cleanup_cv_.wait_for(
+        wait_lock,
+        std::chrono::milliseconds(options_.request_watchdog_interval_ms()),
+        [this] { return execution_hold_cleanup_stopped_; });
+    if (stopped) {
+      break;
+    }
+    wait_lock.unlock();
+
+    std::vector<std::shared_ptr<Request>> gap_requests;
+    {
+      std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+      gap_requests.reserve(output_gap_watchlist_.size());
+      for (auto it = output_gap_watchlist_.begin();
+           it != output_gap_watchlist_.end();) {
+        std::shared_ptr<Request> request = it->second.lock();
+        if (request == nullptr) {
+          it = output_gap_watchlist_.erase(it);
+          continue;
+        }
+        gap_requests.emplace_back(std::move(request));
+        ++it;
+      }
+    }
+
+    for (const std::shared_ptr<Request>& request : gap_requests) {
+      std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
+      if (request->output_event_sequencer == nullptr ||
+          !request->output_event_sequencer->gap_expired(
+              OutputEventSequencer::Clock::now(),
+              std::chrono::milliseconds(options_.output_gap_timeout_ms()))) {
+        continue;
+      }
+
+      const std::string request_uid = request->correlation.request_uid();
+      {
+        std::lock_guard<std::mutex> request_guard(request_mutex_);
+        const auto it = requests_.find(request_uid);
+        if (it == requests_.end() || it->second != request) {
+          continue;
+        }
+      }
+      fail_output_dispatch_locked(
+          request,
+          llm::StatusCode::DEADLINE_EXCEEDED,
+          "Output sequence gap exceeded the local timeout");
     }
 
     wait_lock.lock();
@@ -858,6 +985,11 @@ void Scheduler::finish_request(const std::string& service_request_id,
   }
 
   {
+    std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+    output_gap_watchlist_.erase(service_request_id);
+  }
+
+  {
     std::lock_guard<std::mutex> guard(thread_map_mutex_);
     remote_requests_output_thread_map_.erase(service_request_id);
   }
@@ -910,30 +1042,17 @@ void Scheduler::clear_requests_on_failed_instance(
   }
 
   for (const std::shared_ptr<Request>& request : cleared_requests) {
-    llm::RequestOutput req_output;
-    req_output.status = llm::Status(llm::StatusCode::CANCELLED,
-                                    "Instance is failed and deleted");
-    request->output_callback(req_output);
+    std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
+    fail_output_dispatch_locked(
+        request, llm::StatusCode::CANCELLED, "Instance is failed and deleted");
     LOG(INFO) << "Clear request on failed instance: " << instance_name
               << ", incarnation_id: " << incarnation_id
               << ", service_request_id: " << request->correlation.request_uid();
   }
-
-  if (!cleared_requests.empty()) {
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    for (const std::shared_ptr<Request>& request : cleared_requests) {
-      remote_requests_output_thread_map_.erase(
-          request->correlation.request_uid());
-    }
-  }
 }
 
 bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
-  bool finished_on_prefill_instance =
-      request_output.finished_on_prefill_instance;
   const std::string& service_request_id = request_output.service_request_id;
-  bool status_error =
-      request_output.status.has_value() && !request_output.status.value().ok();
 
   OutputCallback cb;
   std::shared_ptr<Request> request;
@@ -959,26 +1078,88 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
     }
   }
 
+  std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
   if (client_disconnected) {
+    request->output_dispatch_closed = true;
+    if (request->output_event_sequencer != nullptr) {
+      request->output_event_sequencer->close();
+    }
     finish_request(service_request_id, /*error=*/true);
     return false;
   }
 
-  if (!status_error && finished_on_prefill_instance &&
-      !confirm_generation_commit(request)) {
-    finish_request(service_request_id, true);
-    return false;
-  }
-  if (!status_error && !finished_on_prefill_instance &&
-      request_output.finished && !resolve_terminal_execution_hold(request)) {
-    finish_request(service_request_id, true);
-    return false;
+  OutputEventSequenceResult sequence_result;
+  if (request->output_event_sequencer != nullptr) {
+    RemotePdOutputBinding binding;
+    if (request->correlation.has_attempt_seq()) {
+      binding.attempt_seq = request->correlation.attempt_seq();
+    }
+    binding.prefill_engine_uid = request->routing.prefill_name;
+    binding.prefill_incarnation_id = request->prefill_incarnation_id;
+    binding.decode_engine_uid = request->routing.decode_name;
+    binding.decode_incarnation_id = request->decode_incarnation_id;
+    if (!matches_remote_pd_output_identity(request_output, binding)) {
+      LOG(ERROR) << "Reject stale or mismatched V2 output, request_uid="
+                 << service_request_id;
+      fail_output_dispatch_locked(request,
+                                  llm::StatusCode::INVALID_ARGUMENT,
+                                  "Stale or mismatched V2 output identity");
+      return false;
+    }
+    sequence_result = request->output_event_sequencer->push(
+        request_output, /*require_sequence=*/true);
+  } else {
+    sequence_result.ready_outputs.emplace_back(request_output);
   }
 
-  if (!status_error) {
-    // no error, update instance request metrics
-    update_request_metrics(request, finished_on_prefill_instance);
-    update_token_latency_metrics(request, finished_on_prefill_instance);
+  if (sequence_result.status == OutputEventSequenceStatus::kBuffered ||
+      sequence_result.status == OutputEventSequenceStatus::kDuplicate) {
+    if (sequence_result.status == OutputEventSequenceStatus::kBuffered) {
+      std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+      output_gap_watchlist_.insert_or_assign(service_request_id, request);
+    }
+    return true;
+  }
+  if (sequence_result.status == OutputEventSequenceStatus::kClosed) {
+    return false;
+  }
+  if (sequence_result.status != OutputEventSequenceStatus::kReady) {
+    LOG(ERROR) << "Reject invalid V2 output sequence, request_uid="
+               << service_request_id
+               << ", status=" << static_cast<int>(sequence_result.status);
+    fail_output_dispatch_locked(request,
+                                llm::StatusCode::INVALID_ARGUMENT,
+                                "Invalid V2 output sequence");
+    return false;
+  }
+  if (request->output_event_sequencer != nullptr &&
+      request->output_event_sequencer->buffered_events() == 0) {
+    std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+    output_gap_watchlist_.erase(service_request_id);
+  }
+
+  for (const llm::RequestOutput& ready_output : sequence_result.ready_outputs) {
+    const bool status_error =
+        ready_output.status.has_value() && !ready_output.status->ok();
+    const bool finished_on_prefill_instance =
+        ready_output.finished_on_prefill_instance;
+    if (!status_error && finished_on_prefill_instance &&
+        !confirm_generation_commit(request)) {
+      fail_output_dispatch_locked(
+          request, llm::StatusCode::UNKNOWN, "Invalid generation commit proof");
+      return false;
+    }
+    if (!status_error && !finished_on_prefill_instance &&
+        ready_output.finished && !resolve_terminal_execution_hold(request)) {
+      fail_output_dispatch_locked(request,
+                                  llm::StatusCode::UNKNOWN,
+                                  "Invalid terminal execution proof");
+      return false;
+    }
+    if (!status_error) {
+      update_request_metrics(request, finished_on_prefill_instance);
+      update_token_latency_metrics(request, finished_on_prefill_instance);
+    }
   }
 
   size_t req_thread_idx = -1;
@@ -995,23 +1176,42 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
     LOG(ERROR) << "Can not found the thread for the received request output, "
                   "request id is: "
                << service_request_id;
-    finish_request(service_request_id, true);
+    fail_output_dispatch_locked(
+        request, llm::StatusCode::UNKNOWN, "Output affinity thread is missing");
     return false;
+  }
+
+  const bool terminal_output =
+      std::any_of(sequence_result.ready_outputs.begin(),
+                  sequence_result.ready_outputs.end(),
+                  [](const llm::RequestOutput& output) {
+                    return output.finished ||
+                           (output.status.has_value() && !output.status->ok());
+                  });
+  if (terminal_output) {
+    request->output_dispatch_closed = true;
+    if (request->output_event_sequencer != nullptr) {
+      request->output_event_sequencer->close();
+    }
   }
 
   output_threadpools_[req_thread_idx].schedule(
       [this,
        service_request_id,
        cb,
-       status_error,
-       request_output = std::move(request_output)]() mutable {
-        if (!cb(request_output) || status_error) {
-          finish_request(service_request_id, true);
-          return;
-        }
-        if (request_output.finished) {
-          finish_request(service_request_id);
-          return;
+       ready_outputs = std::move(sequence_result.ready_outputs)]() mutable {
+        for (llm::RequestOutput& ready_output : ready_outputs) {
+          const bool status_error =
+              ready_output.status.has_value() && !ready_output.status->ok();
+          const bool finished = ready_output.finished;
+          if (!cb(std::move(ready_output)) || status_error) {
+            finish_request(service_request_id, true);
+            return;
+          }
+          if (finished) {
+            finish_request(service_request_id);
+            return;
+          }
         }
       });
 

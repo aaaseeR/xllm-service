@@ -61,6 +61,36 @@ TEST(DisaggGenerationAdapterTest, CachedTokensRemainWireCompatibleAtFieldFour) {
   EXPECT_EQ(receiver_usage.num_cached_tokens(), 6);
 }
 
+TEST(DisaggGenerationAdapterTest, OutputSequenceRemainsWireCompatible) {
+  const google::protobuf::FieldDescriptor* sender_field =
+      xllm::proto::DisaggStreamGeneration::descriptor()->FindFieldByName(
+          "output_event_seq");
+  const google::protobuf::FieldDescriptor* receiver_field =
+      proto::DisaggStreamGeneration::descriptor()->FindFieldByName(
+          "output_event_seq");
+
+  ASSERT_NE(sender_field, nullptr);
+  ASSERT_NE(receiver_field, nullptr);
+  EXPECT_EQ(sender_field->number(), 8);
+  EXPECT_EQ(receiver_field->number(), 8);
+  EXPECT_EQ(sender_field->type(), receiver_field->type());
+
+  xllm::proto::DisaggStreamGeneration sender;
+  EXPECT_FALSE(sender.has_output_event_seq());
+  sender.set_output_event_seq(9);
+  sender.set_attempt_seq(3);
+  sender.set_sender_engine_uid("decode-1");
+  sender.set_sender_incarnation_id("decode-incarnation-1");
+  proto::DisaggStreamGeneration receiver;
+  ASSERT_TRUE(receiver.ParseFromString(sender.SerializeAsString()));
+  EXPECT_TRUE(receiver.has_output_event_seq());
+  EXPECT_EQ(receiver.output_event_seq(), 9);
+  EXPECT_TRUE(receiver.has_attempt_seq());
+  EXPECT_EQ(receiver.attempt_seq(), 3);
+  EXPECT_EQ(receiver.sender_engine_uid(), "decode-1");
+  EXPECT_EQ(receiver.sender_incarnation_id(), "decode-incarnation-1");
+}
+
 TEST(DisaggGenerationAdapterTest, RejectsNegativeTokenCounts) {
   const proto::DisaggStreamGeneration generation =
       make_generation(/*num_prompt_tokens=*/-1,
@@ -122,6 +152,10 @@ TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   generation.mutable_gen_status()->set_status_msg("complete");
   generation.set_finished(true);
   generation.set_finished_on_prefill_instance(true);
+  generation.set_output_event_seq(7);
+  generation.set_attempt_seq(3);
+  generation.set_sender_engine_uid("prefill-1");
+  generation.set_sender_incarnation_id("prefill-incarnation-1");
 
   proto::SequenceOutput* sequence = generation.add_outputs();
   sequence->set_index(3);
@@ -153,6 +187,12 @@ TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   EXPECT_EQ(output.status->message(), "complete");
   EXPECT_TRUE(output.finished);
   EXPECT_TRUE(output.finished_on_prefill_instance);
+  ASSERT_TRUE(output.output_event_seq.has_value());
+  EXPECT_EQ(*output.output_event_seq, 7);
+  ASSERT_TRUE(output.attempt_seq.has_value());
+  EXPECT_EQ(*output.attempt_seq, 3);
+  EXPECT_EQ(output.sender_engine_uid, "prefill-1");
+  EXPECT_EQ(output.sender_incarnation_id, "prefill-incarnation-1");
   ASSERT_TRUE(output.usage.has_value());
   EXPECT_EQ(output.usage->num_prompt_tokens, 8u);
   EXPECT_EQ(output.usage->num_generated_tokens, 2u);
