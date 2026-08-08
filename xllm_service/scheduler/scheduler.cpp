@@ -101,6 +101,10 @@ Scheduler::Scheduler(const Options& options)
               execution_hold_config(options))),
       request_deadline_queue_(std::make_unique<RequestDeadlineQueue>(
           options.request_deadline_capacity())) {
+  const std::optional<xllm::FirstEventRetryPolicy> first_event_retry_policy =
+      xllm::FirstEventRetryPolicy::from_durations_ms(
+          static_cast<uint64_t>(options_.p_first_event_retry_ub_ms()),
+          static_cast<uint64_t>(options_.first_event_dispatch_margin_ms()));
   if (options_.execution_hold_cleanup_retry_interval_ms() <= 0 ||
       options_.execution_hold_cleanup_retry_batch_size() == 0 ||
       options_.execution_hold_cleanup_rpc_timeout_ms() <= 0) {
@@ -112,6 +116,9 @@ Scheduler::Scheduler(const Options& options)
   }
   if (options_.request_watchdog_interval_ms() <= 0 ||
       options_.output_gap_timeout_ms() <= 0 ||
+      !first_event_retry_policy.has_value() ||
+      !first_event_retry_policy->fits_within_gap_timeout_ms(
+          static_cast<uint64_t>(options_.output_gap_timeout_ms())) ||
       options_.request_deadline_capacity() == 0 ||
       options_.request_watchdog_batch_size() == 0 ||
       options_.request_watchdog_interval_ms() >

@@ -25,6 +25,7 @@ limitations under the License.
 #include "common/call_data.h"
 #include "common/types.h"
 #include "common/xllm/output.h"
+#include "core/framework/request/first_event_retry_policy.h"
 #include "core/framework/request/request_deadline.h"
 #include "observability.pb.h"
 #include "provider/execution_hold.h"
@@ -45,6 +46,10 @@ struct Request {
   // downstream hop receives only the locally recomputed remaining duration.
   bool request_deadline_present = false;
   std::optional<xllm::RequestDeadline> request_deadline;
+
+  // Service owns this timer relationship and forwards it as durations. P
+  // starts its local retry clock only when GenerationCommit begins.
+  std::optional<xllm::FirstEventRetryPolicy> first_event_retry_policy;
 
   // whether to stream the response
   bool stream = false;

@@ -104,6 +104,10 @@ class Options {
 
   PROPERTY(int32_t, output_gap_timeout_ms) = 1000;
 
+  PROPERTY(int32_t, p_first_event_retry_ub_ms) = 700;
+
+  PROPERTY(int32_t, first_event_dispatch_margin_ms) = 200;
+
   PROPERTY(size_t, request_deadline_capacity) = 65536;
 
   PROPERTY(size_t, request_watchdog_batch_size) = 1024;

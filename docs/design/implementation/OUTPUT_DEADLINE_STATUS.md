@@ -63,6 +63,14 @@ limitations under the License.
   `requests_`。默认每 100 ms 检查一次，以本地 monotonic time 判定 1000 ms gap；
   超时后向仍连接客户端投递明确终态，关闭 sequencer，通过现有 hold 路径向绑定 holder
   Cancel，并从 request、watchlist 和输出线程映射清理。停机共享条件变量并 join。
+- 首事件 timer 关系：Service 以同一个权威策略对象生成 P retry budget 和 dispatch
+  margin，默认分别为 700 ms 和 200 ms，并在启动时强制
+  `retry_budget + dispatch_margin <= output_gap_timeout`。两个 duration 通过 additive
+  optional 字段下发，P 在 `GenerationCommit` 开始时创建本地 monotonic deadline；
+  Commit 与歧义后的 Query 共享 700 ms 总预算；失败时先把 P 侧 seq=0 terminal output
+  放入同一 per-request FIFO，再执行受 200 ms margin 和整请求剩余 deadline 双重截断
+  的 best-effort Cancel。缺失或不完整策略对 V2 attempt fail closed，Service 不再等待
+  另一套无关 timer；端到端投递时延仍需 fake-brpc loopback 验证。
 - 请求 deadline wire：Chat/Completion 分别以 additive optional 字段 48/44 携带
   `remaining_deadline_ms`。绝对时钟值不跨进程；Service、P 和 D 每次接收都用
   `steady_clock` 建立新的本地 deadline，每次发送都重新计算剩余毫秒。缺字段保持 legacy
@@ -79,20 +87,21 @@ limitations under the License.
   剩余业务时限。cancel/deadline 共用 first-writer-wins 原子终止原因，后到 deadline
   不会覆盖先发生的 cancel；最终输出携带对应稳定状态。
 - 配置：`output_reorder_max_events=64`、`output_reorder_max_bytes=4 MiB`、
-  `request_watchdog_interval_ms=100`、`output_gap_timeout_ms=1000`；构造时拒绝零容量、
-  非正 timer、deadline 零容量/零批次和 scan interval 大于 gap timeout。
+  `request_watchdog_interval_ms=100`、`output_gap_timeout_ms=1000`、
+  `p_first_event_retry_ub_ms=700`、`first_event_dispatch_margin_ms=200`；构造时拒绝
+  零容量、非正 timer、deadline 零容量/零批次、scan interval 大于 gap timeout，或
+  retry budget 与 margin 之和超过 gap timeout。
 - 明确不支持范围：当前只有请求显式携带 `remaining_deadline_ms` 才安装 deadline，
   Gateway、租户策略和 profile 尚未提供统一默认值；vLLM raw relay 和其余 V2 mode 尚未
-  接入；未强制 `p_first_event_retry_ub + margin <= gap timeout`；gap 到期尚未先 Query D
-  保存的 FirstGeneration 来恢复 seq=0；未知/已终止输出只有既有 per-item `false`，
-  尚无稳定 reason/metrics；配置尚未接 profile/CLI；无 fake-brpc、sanitizer 全链、
-  NPU、RDMA 或真实流式故障矩阵结论。
+  接入；gap 到期尚未先 Query D 保存的 FirstGeneration 来恢复 seq=0；未知/已终止
+  输出只有既有 per-item `false`，尚无稳定 reason/metrics；配置尚未接 profile/CLI；
+  无 fake-brpc、sanitizer 全链、NPU、RDMA 或真实流式故障矩阵结论。
 
 ## 需求与测试追踪
 
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
-| G2 wire 与角色序号 | xLLM `RequestEventProtocolTest` 13 项中的 wire/presence/字段号/角色 counter；Service adapter 跨 proto 解析与完整转换 | 公共 xLLM 目标使用 Torch CPU 环境；本逻辑不执行 tensor | 待真实 P/D | PASS |
+| G2 wire 与角色序号 | xLLM `RequestEventProtocolTest` 14 项中的 wire/presence/字段号/角色 counter；Service adapter 跨 proto 解析与完整转换 | 公共 xLLM 目标使用 Torch CPU 环境；本逻辑不执行 tensor | 待真实 P/D | PASS |
 | G2 attempt/incarnation fencing | `RemotePdIdentityFencesAttemptAndIncarnation`、`ErrorCanComeFromEitherBoundSender` | N/A，纯控制协议 | 待进程重启迟到输出 | PASS |
 | G2 连续交付与幂等 | reorder、已交付/已缓存 duplicate、terminal fence/overtake 共 4 项 | N/A | 待双发送方流式输出 | PASS |
 | G2 容量与输入边界 | event count、decoded byte、sequence distance、missing、sentinel 共 4 项 | N/A | N/A | PASS |
@@ -100,9 +109,10 @@ limitations under the License.
 | G2 稳定性 | 12 个 sequencer 测试重复 100 轮，共 1200 次 | N/A | N/A | PASS |
 | G2 request deadline wire/时钟/终止竞态 | optional presence、固定字段号、wire roundtrip、fake monotonic 到期/零值/溢出、cancel/deadline 顺序和 16 线程终止竞争；定向 4 项重复 100 轮共 400 次 | 公共 xLLM 目标使用 Torch CPU 环境；本逻辑不执行 tensor | 待跨机时钟偏差/暂停故障 | PASS（CPU 核心） |
 | G2 Service deadline 索引 | 顺序到期、7 条小批次、容量/重复/零配置/弱引用/主动删除/超大 batch 截断；8 线程并发写入 256 条无丢失；6 项重复 100 轮共 600 次 | N/A，纯控制路径 | N/A | PASS |
+| G2 P retry timer 关系 | fake monotonic policy、零值/溢出、等号边界和超界；Service 默认值/负值/错误序关系 fail-closed；xLLM 1 项重复 100 轮、Service 2 项重复 100 轮共 200 次；P Commit/Query/Cancel 生产对象以 C++20 `-Werror` 编译 | N/A，纯控制/RPC timeout | 待真实 RPC timeout 与迟到 ACK | PASS（CPU 核心）；loopback 待补 |
 | G2 Engine stop/资源边界 | Request parse/output、Service/P/D hop、D admission/reservation cap、六类调度路径共 10 个受影响生产 TU 以 Clang C++20 `-Werror` 编译 | 生产目标链接 Torch CPU；本批无 tensor 数值变化 | 待真实 KV/执行中 cancel | PASS（CPU 编译）；loopback 待补 |
-| 双仓回归 | xLLM 94/94；Service 179/179；Service 三个生产二进制 build/link verify | Torch CPU 依赖可加载；本批无 tensor 数值变化 | N/A | PASS |
-| G2 seq=0 Query 恢复与 P retry timer 关系 | 未实现 | N/A | 未实现 | OPEN |
+| 双仓回归 | xLLM 95/95；Service 181/181；Service 三个生产二进制 build/link verify | Torch CPU 依赖可加载；本批无 tensor 数值变化 | N/A | PASS |
+| G2 seq=0 Query 恢复 | 未实现 | N/A | 未实现 | OPEN |
 
 ## 完善情况
 
@@ -110,7 +120,8 @@ limitations under the License.
   attempt/incarnation fencing、有界重排、重复/terminal 防护、弱引用 gap watchdog、
   affinity 有序失败、客户端断连抑制、execution hold Cancel/detach 收敛，以及显式 Native
   request deadline 的 Service/P/D duration 传播、有界 watchdog、Engine 本地停止和
-  D reservation cap 接线。
+  D reservation cap 接线；P retry budget、dispatch margin 与 Service gap timeout 的
+  不等式已由共享策略和生产启动校验强制执行。
 - 已知缺口/风险：当前 gap 超时是安全的明确失败，不是设计要求的优先 Query 恢复；
   未携带显式 deadline 的请求仍可能无限等待；deadline 的生产并发路径主要由纯核心
   测试和严格编译覆盖，仍需 fake provider loopback 验证 callback、instance failure、
@@ -122,7 +133,7 @@ limitations under the License.
   活跃 gap 或到期 deadline；deadline 索引有 65,536 record 和 1,024/轮双上限；尚无
   1 万并发请求的扫描开销、buffer/deadline 水位、gap reason 和迟到事件指标。
 - 达到 CPU_VERIFIED 仍需完成：fake-brpc 双发送方/断连/实例失效竞态，seq=0 Query
-  恢复，P retry timer 不等式，Gateway/profile 默认 deadline，vLLM/其余 mode 接入，
-  稳定 per-item reason/metrics 及配置化。
+  恢复，Gateway/profile 默认 deadline，vLLM/其余 mode 接入，稳定 per-item
+  reason/metrics 及配置化。
 - 达到 VERIFIED 仍需完成：NPU P→D 流式乱序、Cancel 丢失、Engine 重启/incarnation
   变化、deadline 资源释放和 1 万次故障门禁。

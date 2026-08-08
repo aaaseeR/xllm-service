@@ -74,14 +74,20 @@ template <typename T>
 bool set_request_execution_context(T* request_pb, const Request& request) {
   request_pb->set_service_request_id(request.correlation.request_uid());
   *request_pb->mutable_correlation() = request.correlation;
-  if (!request.request_deadline.has_value()) {
-    return true;
+  if (request.request_deadline.has_value()) {
+    const uint64_t remaining_ms = request.request_deadline->remaining_ms();
+    if (remaining_ms == 0) {
+      return false;
+    }
+    request_pb->set_remaining_deadline_ms(remaining_ms);
   }
-  const uint64_t remaining_ms = request.request_deadline->remaining_ms();
-  if (remaining_ms == 0) {
+  if (!request.first_event_retry_policy.has_value()) {
     return false;
   }
-  request_pb->set_remaining_deadline_ms(remaining_ms);
+  request_pb->set_first_event_retry_budget_ms(
+      request.first_event_retry_policy->retry_budget_ms());
+  request_pb->set_first_event_dispatch_margin_ms(
+      request.first_event_retry_policy->dispatch_margin_ms());
   return true;
 }
 
@@ -428,6 +434,10 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
   request->model = req_pb->model();
   request->correlation =
       observability::make_request_correlation(correlation_input(controller));
+  request->first_event_retry_policy =
+      xllm::FirstEventRetryPolicy::from_durations_ms(
+          static_cast<uint64_t>(options_.p_first_event_retry_ub_ms()),
+          static_cast<uint64_t>(options_.first_event_dispatch_margin_ms()));
   request->request_deadline_present = req_pb->has_remaining_deadline_ms();
   if (request->request_deadline_present) {
     request->request_deadline = xllm::RequestDeadline::from_remaining_ms(
@@ -599,7 +609,7 @@ void XllmHttpServiceImpl::Completions(
 
   // update request protobuf
   if (!set_request_execution_context(req_pb, *service_request)) {
-    cntl->SetFailed("Request deadline expired before dispatch.");
+    cntl->SetFailed("Invalid or expired request context before dispatch.");
     return;
   }
   req_pb->set_source_xservice_addr(options_.service_name());
@@ -732,7 +742,7 @@ void XllmHttpServiceImpl::ChatCompletions(
 
   // update request protobuf
   if (!set_request_execution_context(req_pb, *service_request)) {
-    cntl->SetFailed("Request deadline expired before dispatch.");
+    cntl->SetFailed("Invalid or expired request context before dispatch.");
     return;
   }
   req_pb->set_source_xservice_addr(options_.service_name());
@@ -817,7 +827,7 @@ void XllmHttpServiceImpl::AnthropicMessages(
   }
 
   if (!set_request_execution_context(req_pb, *service_request)) {
-    cntl->SetFailed("Request deadline expired before dispatch.");
+    cntl->SetFailed("Invalid or expired request context before dispatch.");
     return;
   }
   req_pb->set_source_xservice_addr(options_.service_name());

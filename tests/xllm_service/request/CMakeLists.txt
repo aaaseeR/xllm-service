@@ -24,3 +24,15 @@ cc_test(
     GTest::gtest_main
     brpc-static
 )
+
+cc_test(
+  NAME
+    request_timing_policy_test
+  SRCS
+    request_timing_policy_test.cpp
+  INCLUDES
+    ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm
+  DEPS
+    :common
+    GTest::gtest_main
+)
