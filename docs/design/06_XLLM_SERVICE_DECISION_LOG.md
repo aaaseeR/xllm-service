@@ -223,3 +223,24 @@ Compatibility Resolver 固定检查 `required_capabilities(mode) ⊆ published_c
 ## D55：V2 实现采用 xLLM 风格和 CPU-first 完成度门禁
 
 `xllm` 与 `xllm-service` 统一遵循 xLLM 项目级 custom code style 和 `.clang-format`，不维护第二套风格。除硬件专属 kernel、CANN/驱动和设备 DMA 外，全部可移植逻辑必须由 CPU 与 Torch CPU 测试覆盖；每个需求、状态迁移和支持矩阵项都要映射到可复现测试。每项功能随代码维护开发状态文档，准确列出支持范围、缺口、CPU/NPU 状态和验证证据。结构上禁止复制状态机、协议、资源账本和新旧双路径；未满足代码、测试、文档任一门禁的功能不得标记完成。完整规则见 00。
+
+## D56：公共 Resolver 覆盖完整 V2 mode，而不是只覆盖基础远程路径
+
+`required_capabilities(mode, transfer_mode)` 同时覆盖 `AGGREGATED`、
+`REMOTE_PD`、`LOCAL_PREFILL_DECODE` 和 `PREFILL_ONLY`。本地 D 与 P-only
+分别使用 `D_ONLY`、`P_ONLY` selection order；两者都在提交时绑定且不伪造
+远程 reservation。`LOCAL_PREFILL_DECODE` 必须发布 mixed accounting 和
+structured admission，`PREFILL_ONLY` 必须发布独立能力；二者与其他 STRICT
+mode 一样要求 attempt、cancel fence、本地 deadline、self-fencing 和 drain。
+未知 mode/transfer/capability 或未分类组合稳定 fail closed，能力规则只允许在
+公共 Resolver 维护，禁止 Adapter 私有放宽。该决策补全 D50/D52 在原 V2-B0
+范围内只列聚合和远程 P/D 的矩阵，不改变 D29/D32/D33 的资源与提交不变量。
+
+## D57：STRICT 编码使用独立的组合 renderer digest
+
+`ProviderDescriptor.model.renderer_digest` 是 tokenizer revision、template 与
+影响渲染结果的配置共同形成的稳定摘要，不能用 `chat_template_digest` 或产品名
+代替。`RequestCodec` 返回的 `EncodedRequest.renderer_digest` 必须在 STRICT 请求下
+与 Descriptor 完全相等；模型 revision、请求 capability 和 API feature 也必须是
+Descriptor 的子集。任一证据缺失或不相等都 fail closed。这样 Service 能机械证明
+调度计数和 Provider 实际输入遵循同一渲染契约，而不是只记录一个不可校验字段。

@@ -104,7 +104,7 @@ ProviderDescriptor = {
   },
   model: {
     model_revision, tokenizer_revision,
-    chat_template_digest, quantization
+    chat_template_digest, renderer_digest, quantization
   },
   topology: {soc, device_count, tp, dp, pp, ep, cp},
   kv: {
@@ -136,6 +136,9 @@ ProviderDescriptor = {
 AGGREGATED
 REMOTE_PD_PULL
 REMOTE_PD_LAYERWISE_PUSH
+LOCAL_PREFILL_DECODE
+MIXED_PREFILL_DECODE_ACCOUNTING
+PREFILL_ONLY
 NATIVE_RESERVATION
 ATTEMPT_QUERY
 CANCEL_FENCE
@@ -164,7 +167,7 @@ Service 保存一份 `CanonicalRequest`，包含原始 API 语义、模型、完
 - vLLM-Ascend：生成 OpenAI HTTP 请求并代理 SSE；
 - 返回用于调度的 exact 或 bounded token 数，以及可验证的 renderer digest。
 
-STRICT 请求只有在 Service 侧计数所用 tokenizer/template 与 Provider Descriptor 一致时才能进入该 Provider。Provider 特有且无法等价转换的参数必须固定路由，不能在 Provider 间静默降级。
+STRICT 请求只有在 Service 侧计数所用 tokenizer/template 与 Provider Descriptor 一致，且 `EncodedRequest.renderer_digest == ProviderDescriptor.model.renderer_digest` 时才能进入该 Provider。`renderer_digest` 覆盖完整 tokenizer + template 渲染契约，不能只复用 template digest。Provider 特有且无法等价转换的参数必须固定路由，不能在 Provider 间静默降级。
 
 ### 4.2 ExecutionPlan
 
@@ -190,6 +193,8 @@ ExecutionPlan = {
 | Provider | mode / transfer | `selection_order` | `binding_stage` | 首 token 提交屏障 | V2 首发 |
 | --- | --- | --- | --- | --- | --- |
 | xLLM Native | `REMOTE_PD / LAYERWISE_PUSH` | `P_FIRST`：P + 有序 D 候选 | `BEFORE_PREFILL` | P 获得 D `FirstGeneration` ACK | 开放 |
+| xLLM Native | `LOCAL_PREFILL_DECODE / NONE` | `D_ONLY`：有序本地 D 候选 | `AT_SUBMIT` | D 原子授予完整 mixed 资源并安装幂等 submission | allowlist 开放 |
+| xLLM Native | `PREFILL_ONLY / NONE` | `P_ONLY`：一个 P | `AT_SUBMIT` | P 原子准入已确认无后续 D 的完整执行 | 开放 |
 | vLLM-Ascend | `AGGREGATED / NONE` | `SINGLE`：一个 Agent/Engine | `AT_SUBMIT` | Agent 原子接受完整请求并安装唯一 attempt | 门禁后开放 |
 | vLLM-Ascend | `REMOTE_PD / LAYERWISE_PUSH` | `D_FIRST`：先 D，P 由 metaserver 选择 | `BEFORE_PREFILL` | D 完成 KV 预分配并接管 Decode | 关闭 |
 
@@ -197,15 +202,19 @@ ExecutionPlan = {
 
 ### 4.3 Mode 与能力矩阵
 
-STRICT Resolver 固定执行 `required_capabilities(mode) ⊆ published_capabilities`。未知 mode、未知 capability、矩阵未分类或要求项缺失都 fail closed。
+STRICT Resolver 固定执行
+`required_capabilities(mode, transfer_mode) ⊆ published_capabilities`。未知
+mode、未知 transfer、未知 capability、矩阵未分类或要求项缺失都 fail closed。
 
 | mode | 必需 capability | 可选 capability | 不适用 | 结果不明时的执行资源持有 |
 | --- | --- | --- | --- | --- |
 | `AGGREGATED` | `AGGREGATED`、`ATTEMPT_QUERY`、`CANCEL_FENCE`、`ENGINE_LOCAL_DEADLINE`、`SELF_FENCING`、`DRAIN` | `STRUCTURED_ADMISSION`、`PER_DP_STATE`、`DEEP_HEALTH`、`PREFIX_EVENTS`、`EXTERNAL_KV_STORE`、`KV_OFFLOAD` | `NATIVE_RESERVATION` | 整个 aggregated execution attempt |
 | `REMOTE_PD / LAYERWISE_PUSH` | `REMOTE_PD_LAYERWISE_PUSH`、`NATIVE_RESERVATION`、`ATTEMPT_QUERY`、`CANCEL_FENCE`、`ENGINE_LOCAL_DEADLINE`、`SELF_FENCING`、`DRAIN` | 同上 | `AGGREGATED` | remote D reservation |
 | `REMOTE_PD / PULL` | `REMOTE_PD_PULL`、`NATIVE_RESERVATION`、`ATTEMPT_QUERY`、`CANCEL_FENCE`、`ENGINE_LOCAL_DEADLINE`、`SELF_FENCING`、`DRAIN` | 同上 | `AGGREGATED` | remote D reservation |
+| `LOCAL_PREFILL_DECODE / NONE` | `LOCAL_PREFILL_DECODE`、`MIXED_PREFILL_DECODE_ACCOUNTING`、`STRUCTURED_ADMISSION`、`ATTEMPT_QUERY`、`CANCEL_FENCE`、`ENGINE_LOCAL_DEADLINE`、`SELF_FENCING`、`DRAIN` | `PER_DP_STATE`、`DEEP_HEALTH`、`PREFIX_EVENTS`、`EXTERNAL_KV_STORE`、`KV_OFFLOAD` | `NATIVE_RESERVATION`、任意远程 transfer capability | local Decode submission |
+| `PREFILL_ONLY / NONE` | `PREFILL_ONLY`、`STRUCTURED_ADMISSION`、`ATTEMPT_QUERY`、`CANCEL_FENCE`、`ENGINE_LOCAL_DEADLINE`、`SELF_FENCING`、`DRAIN` | `PER_DP_STATE`、`DEEP_HEALTH`、`PREFIX_EVENTS` | `NATIVE_RESERVATION`、任意远程 transfer capability | 无 Decode/聚合 execution hold；P submission 仍幂等 |
 
-可选观测能力缺失时，对应字段为 `UNKNOWN` 并退出相关硬预测，不能按 0 参与评分。`DEEP_HEALTH` 是否为某个硬件/上线 profile 的额外发布前置，由该 profile 的 release policy 明确；vLLM-Ascend 当前上游接口不能发布该能力，见 §7.2。xLLM Native 的 `LOCAL_PREFILL_DECODE/PREFILL_ONLY` 属于 09 定义的 V2 首发模式；开放前必须以同样规则补全矩阵，这是 V2 交付前置，不能在 Adapter 内写散落特例。
+可选观测能力缺失时，对应字段为 `UNKNOWN` 并退出相关硬预测，不能按 0 参与评分。`DEEP_HEALTH` 是否为某个硬件/上线 profile 的额外发布前置，由该 profile 的 release policy 明确；vLLM-Ascend 当前上游接口不能发布该能力，见 §7.2。`D_ONLY/P_ONLY` 只表达候选角色和顺序，不改变 Engine 注册角色；本地 D 与 P-only 仍按 09 使用同一 allocator、attempt、取消和 deadline 体系。Mode 与 capability 的对应关系只能维护在本表和公共 Resolver，不能在 Adapter 内写散落特例。
 
 ## 5. 状态、指标与容量语义
 

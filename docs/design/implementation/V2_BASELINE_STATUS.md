@@ -20,15 +20,15 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：CPU_VERIFIED
 - 关联设计/Requirement ID：开发规范 §3、§4.3、§7；V2-B0 G-1 测试底座
-- 最近验证基线：xLLM `08d6de0c`、xllm-service `service_dev`
+- 最近验证基线：xLLM `e8376068`、xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-08
 
 ## 支持范围
 
 | Provider | Mode | Model/Profile | 支持状态 | 限制与证据 |
 | --- | --- | --- | --- | --- |
-| xLLM Native | CPU 公共路径 | 协议、流式语义、JSON 解析 | CPU_VERIFIED | 52/52 tests passed |
-| xLLM Service + xLLM Native | 模板与 Service 公共路径 | 当前外层 xLLM `08d6de0c` | CPU_VERIFIED | 96/96 tests passed |
+| xLLM Native | CPU 公共路径 | 协议、Provider Contract wire、流式语义、JSON 解析 | CPU_VERIFIED | 56/56 tests passed |
+| xLLM Service + xLLM Native | 模板、Provider Contract 与 Service 公共路径 | 当前外层 xLLM `e8376068` | CPU_VERIFIED | 113/113 tests passed |
 | vLLM-Ascend | Python sidecar 公共逻辑 | 无设备路径 | PARTIAL | Provider Agent 尚未进入 B1-B6 实现 |
 
 ## 实现
@@ -45,9 +45,9 @@ limitations under the License.
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
 | DEV-STYLE | `git diff --check`；xLLM clang-format 规则人工核对 | N/A | N/A | PASS |
-| DEV-CPU-XLLM | `xllm-dev xllm-test <xllm> native Debug` | 当前目标链接 Torch CPU；本批次无新增 tensor 逻辑 | N/A | PASS，52/52 |
-| DEV-CPU-SERVICE | `XLLM_SOURCE_DIR=<xllm> xllm-dev service-test <xllm-service> native Debug` | 本批次无新增 tensor 逻辑 | N/A | PASS，96/96 |
-| DEV-CROSS-REPO | xllm-service 对 xLLM `08d6de0c` override 构建与测试 | N/A | N/A | PASS |
+| DEV-CPU-XLLM | `xllm-dev xllm-test <xllm> native Debug` | 当前目标链接 Torch CPU；新增契约不含 tensor 逻辑 | N/A | PASS，56/56 |
+| DEV-CPU-SERVICE | `XLLM_SOURCE_DIR=<xllm> xllm-dev service-test <xllm-service> native Debug` | 新增契约不含 tensor 逻辑 | N/A | PASS，113/113 |
+| DEV-CROSS-REPO | xllm-service 对 xLLM `e8376068` override 构建与测试 | N/A | N/A | PASS |
 
 ## 完善情况
 
@@ -56,7 +56,7 @@ limitations under the License.
   显式使用 `tojson`，避免把 Jinja 对象展示格式误当作 JSON wire 契约。
 - 已知缺口/风险：xLLM CPU 沙箱只覆盖当前公共测试目标；随着 V2 Engine
   状态机、allocator 和 tensor 元数据逻辑进入开发，必须扩展目标而不能沿用
-  52 项数量作为完整 V2 证明。
+  56 项数量作为完整 V2 证明。
 - 回滚与兼容：本批次只修改测试和开发文档，不改变生产请求语义。
 - 性能、容量和观测证据：本批次不建立生产性能基线；由 V2-B2/G0 交付。
 - 达到 VERIFIED 仍需完成：按 B1-B10 完成全部 V2 功能和 NPU 专项门禁。
