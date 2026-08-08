@@ -583,6 +583,10 @@ void XllmHttpServiceImpl::Completions(
       service_request->routing.prefill_name);
   req_pb->mutable_routing()->set_decode_name(
       service_request->routing.decode_name);
+  req_pb->mutable_routing()->set_prefill_incarnation_id(
+      service_request->prefill_incarnation_id);
+  req_pb->mutable_routing()->set_decode_incarnation_id(
+      service_request->decode_incarnation_id);
 
   auto call_data = std::make_shared<CompletionCallData>(
       cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
@@ -709,6 +713,10 @@ void XllmHttpServiceImpl::ChatCompletions(
       service_request->routing.prefill_name);
   req_pb->mutable_routing()->set_decode_name(
       service_request->routing.decode_name);
+  req_pb->mutable_routing()->set_prefill_incarnation_id(
+      service_request->prefill_incarnation_id);
+  req_pb->mutable_routing()->set_decode_incarnation_id(
+      service_request->decode_incarnation_id);
 
   auto call_data = std::make_shared<ChatCallData>(
       cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
@@ -787,6 +795,10 @@ void XllmHttpServiceImpl::AnthropicMessages(
       service_request->routing.prefill_name);
   req_pb->mutable_routing()->set_decode_name(
       service_request->routing.decode_name);
+  req_pb->mutable_routing()->set_prefill_incarnation_id(
+      service_request->prefill_incarnation_id);
+  req_pb->mutable_routing()->set_decode_incarnation_id(
+      service_request->decode_incarnation_id);
 
   auto call_data =
       std::make_shared<AnthropicCallData>(cntl,
