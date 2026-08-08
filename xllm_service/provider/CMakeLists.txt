@@ -18,6 +18,7 @@ cc_library(
     provider_adapter.h
     provider_registry.h
   SRCS
+    provider_adapter.cpp
     provider_registry.cpp
   DEPS
     :provider_contract

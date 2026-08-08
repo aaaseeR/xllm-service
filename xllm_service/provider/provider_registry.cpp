@@ -36,6 +36,15 @@ ContractResult ProviderAdapterRegistry::register_adapter(
   }
 
   const auto& descriptor = adapter->describe();
+  const bool native_dispatch =
+      adapter->dispatch_kind() == ProviderDispatchKind::XLLM_NATIVE_RPC;
+  const bool native_descriptor = descriptor.identity().provider_id() ==
+                                 xllm::proto::PROVIDER_ID_XLLM_NATIVE;
+  if (native_dispatch != native_descriptor) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+        "provider descriptor does not match Adapter dispatch kind");
+  }
   Key key{static_cast<int>(descriptor.identity().provider_id()),
           descriptor.profile_digest()};
   std::unique_lock lock(mutex_);

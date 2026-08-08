@@ -37,6 +37,12 @@ limitations under the License.
 
 - 代码入口与核心接口：`xllm_service/provider/provider_contract.*`、
   `provider_adapter.h`、`provider_registry.*`。
+- 已实现可注册的 `XllmNativeAdapter` 与 `VllmAscendAdapter`。Native Adapter
+  通过显式 renderer 接口取得原生 payload、精确 token 数和实际 renderer
+  digest；vLLM-Ascend Adapter 只接受 `openai.http.json.v1`，保留原始 JSON
+  payload，并在 Provider 未返回计数前如实发布 `TOKEN_COUNT_QUALITY_UNKNOWN`。
+  Registry 在写入前同时校验 Descriptor 和 Adapter dispatch kind，阻断
+  Provider 身份与数据面协议错配。
 - 状态、资源和错误码权威位置：wire 类型和稳定
   `ProviderContractError` 只定义在 xLLM `xllm/proto/provider.proto`；Service
   不复制 enum。Mode/capability 对应关系只定义在公共 Resolver。
@@ -45,9 +51,9 @@ limitations under the License.
   template 渲染契约，STRICT 编码结果必须与 Descriptor 相等。
 - Adapter registry 按 `(provider_id, profile_digest)` 保存不可变 Adapter；这是
   Provider/profile 级 Adapter 注册表，不替代 G3 的 Engine incarnation Registry。
-- 明确不支持范围：本批次没有接入生产 Scheduler，没有实现
-  `XllmNativeAdapter`/`VllmAscendAdapter` 的 Submit、Stream、Cancel、Reserve 和
-  State Stream，也不声称任何真实 NPU Provider 已通过 conformance。
+- 明确不支持范围：本批次尚未把 Adapter 接入生产 Scheduler，也没有实现
+  Submit、Stream、Cancel、Reserve 和 State Stream；不声称任何真实 NPU
+  Provider 已通过 conformance。
 
 ## 需求与测试追踪
 
@@ -60,16 +66,18 @@ limitations under the License.
 | STRICT renderer | canonical/encoded/model/capability/renderer 一致性正负测试 | N/A | 待真实 tokenizer/runtime | PASS |
 | EngineState schema | UNKNOWN 与 0、per-DP、ratio、histogram 负向测试 | N/A | 待 State Stream | PASS |
 | Adapter registry | ownership、lookup、重复 key 与非法 Descriptor | N/A | N/A | PASS |
+| 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
 
-Service 的 `ProviderContractTest` 保持 17 项；当前全量 service CPU 回归为
-155/155，xLLM CPU 公共路径为 84/84。
+Service 的 `ProviderContractTest` 当前为 22 项；当前全量 service CPU 回归为
+210/210，xLLM CPU 公共路径基线为 96/96。
 
 ## 完善情况
 
 - 已完成：contract v1 单一 proto；稳定错误码；完整 V2 mode/capability Resolver；
   Provider/open-mode 门禁；Descriptor、Canonical/Encoded Request、EngineState、
   ExecutionPlan 校验；`attempt_seq=0` 与缺失字段可区分；线程安全、只增不删的
-  Adapter registry；CPU conformance。
+  Adapter registry；两个首发 Provider 的 RequestCodec 与 dispatch identity；CPU
+  conformance。
 - 已知缺口/风险：G-2 的生产 Adapter 和 `SelectPlans` 接入仍属于后续 Provider
   Pool 批次；G3 的 `(provider_id, profile_digest, incarnation_id)` Engine Registry
   尚未实现；当前只证明公共契约逻辑，不证明硬件 Runtime 行为。

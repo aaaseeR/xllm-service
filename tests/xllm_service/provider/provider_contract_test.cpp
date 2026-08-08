@@ -285,10 +285,32 @@ class TestAdapter final : public ProviderAdapter {
 
   const ProviderDescriptor& describe() const override { return descriptor_; }
   const RequestCodec& request_codec() const override { return codec_; }
+  ProviderDispatchKind dispatch_kind() const override {
+    return ProviderDispatchKind::XLLM_NATIVE_RPC;
+  }
 
  private:
   ProviderDescriptor descriptor_;
   TestCodec codec_;
+};
+
+class TestNativeRenderer final : public XllmNativeRequestRenderer {
+ public:
+  ContractResult render(const xllm::proto::CanonicalRequest& request,
+                        std::string* provider_payload,
+                        uint64_t* prompt_tokens,
+                        std::string* renderer_digest) const override {
+    if (provider_payload == nullptr || prompt_tokens == nullptr ||
+        renderer_digest == nullptr) {
+      return ContractResult::failure(
+          xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED,
+          "test renderer output is null");
+    }
+    *provider_payload = "native:" + request.canonical_payload();
+    *prompt_tokens = 4;
+    *renderer_digest = "renderer-sha256";
+    return ContractResult::success();
+  }
 };
 
 TEST(ProviderContractTest, ResolvesEveryCompleteV2CapabilityRow) {
@@ -599,6 +621,84 @@ TEST(ProviderContractTest, RegistrySupportsConcurrentRegistrationAndLookup) {
                             "profile-" + std::to_string(i)),
               nullptr);
   }
+}
+
+TEST(ProviderContractTest, XllmNativeAdapterUsesExactRenderedRequest) {
+  ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[0]);
+  XllmNativeAdapter adapter(descriptor, std::make_unique<TestNativeRenderer>());
+  xllm::proto::EncodedRequest encoded;
+  ContractResult result =
+      adapter.request_codec().encode(make_request(), &encoded);
+  ASSERT_TRUE(result.ok()) << result.message();
+  EXPECT_EQ(adapter.dispatch_kind(), ProviderDispatchKind::XLLM_NATIVE_RPC);
+  EXPECT_EQ(encoded.provider_id(), xllm::proto::PROVIDER_ID_XLLM_NATIVE);
+  EXPECT_EQ(encoded.token_count_quality(),
+            xllm::proto::TOKEN_COUNT_QUALITY_EXACT);
+  EXPECT_EQ(encoded.prompt_tokens(), 4u);
+  EXPECT_EQ(encoded.prompt_tokens_upper_bound(), 4u);
+  EXPECT_EQ(encoded.provider_payload(), "native:{}");
+}
+
+TEST(ProviderContractTest, XllmNativeAdapterFailsClosedWithoutRenderer) {
+  XllmNativeAdapter adapter(make_descriptor(kOpenModeCases[0]), nullptr);
+  xllm::proto::EncodedRequest encoded;
+  EXPECT_EQ(adapter.request_codec().encode(make_request(), &encoded).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED);
+}
+
+TEST(ProviderContractTest, VllmAscendAdapterPreservesCanonicalPayload) {
+  ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[3]);
+  VllmAscendAdapter adapter(descriptor);
+  xllm::proto::CanonicalRequest request = make_request();
+  request.set_canonical_payload_schema(kOpenAiHttpJsonSchema);
+  request.set_canonical_payload("{\"stream\":true}");
+  xllm::proto::EncodedRequest encoded;
+  ContractResult result = adapter.request_codec().encode(request, &encoded);
+  ASSERT_TRUE(result.ok()) << result.message();
+  EXPECT_EQ(adapter.dispatch_kind(), ProviderDispatchKind::OPENAI_HTTP);
+  EXPECT_EQ(encoded.provider_id(), xllm::proto::PROVIDER_ID_VLLM_ASCEND);
+  EXPECT_EQ(encoded.token_count_quality(),
+            xllm::proto::TOKEN_COUNT_QUALITY_UNKNOWN);
+  EXPECT_EQ(encoded.prompt_tokens(), 0u);
+  EXPECT_EQ(encoded.prompt_tokens_upper_bound(), 0u);
+  EXPECT_EQ(encoded.provider_payload(), request.canonical_payload());
+}
+
+TEST(ProviderContractTest, VllmAscendAdapterRejectsAmbiguousPayloadSchema) {
+  VllmAscendAdapter adapter(make_descriptor(kOpenModeCases[3]));
+  xllm::proto::EncodedRequest encoded;
+  EXPECT_EQ(adapter.request_codec().encode(make_request(), &encoded).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED);
+}
+
+TEST(ProviderContractTest, ProductionAdaptersRejectWrongProviderDescriptor) {
+  ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[3]);
+  XllmNativeAdapter native_adapter(descriptor,
+                                   std::make_unique<TestNativeRenderer>());
+  xllm::proto::EncodedRequest encoded;
+  EXPECT_EQ(
+      native_adapter.request_codec().encode(make_request(), &encoded).error(),
+      xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  descriptor = make_descriptor(kOpenModeCases[0]);
+  VllmAscendAdapter vllm_adapter(descriptor);
+  xllm::proto::CanonicalRequest vllm_request = make_request();
+  vllm_request.set_canonical_payload_schema(kOpenAiHttpJsonSchema);
+  EXPECT_EQ(vllm_adapter.request_codec().encode(vllm_request, &encoded).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  ProviderAdapterRegistry registry;
+  EXPECT_EQ(registry
+                .register_adapter(std::make_unique<XllmNativeAdapter>(
+                    make_descriptor(kOpenModeCases[3]),
+                    std::make_unique<TestNativeRenderer>()))
+                .error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+  EXPECT_EQ(registry
+                .register_adapter(std::make_unique<VllmAscendAdapter>(
+                    make_descriptor(kOpenModeCases[0])))
+                .error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
 }
 
 }  // namespace
