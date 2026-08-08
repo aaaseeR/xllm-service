@@ -25,7 +25,8 @@ SloAwarePolicy::SloAwarePolicy(const Options& options,
 
 bool SloAwarePolicy::select_instances_pair(std::shared_ptr<Request> request) {
   if (request->token_ids.empty()) {
-    return instance_mgr_->get_next_instance_pair(&request->routing);
+    return instance_mgr_->get_next_instance_pair(&request->routing,
+                                                 request->provider_id);
   }
 
   // select instances pair based on slo

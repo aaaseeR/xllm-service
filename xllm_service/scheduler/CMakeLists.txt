@@ -61,6 +61,7 @@ cc_library(
     :deepseek_v4_cpp_chat_template
     :first_event_recovery_client
     :model_type
+    :provider_registry
     :common
     :etcd_client
     :execution_hold

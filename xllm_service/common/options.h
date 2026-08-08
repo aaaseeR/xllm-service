@@ -137,9 +137,6 @@ class Options {
 
   PROPERTY(std::string, reasoning_parser);
 
-  // backend options (vLLM/xLLM dual-backend support)
-  PROPERTY(std::string, default_backend_type) = "xllm";
-
   PROPERTY(int32_t, vllm_http_timeout_ms) = 60000;
 
   PROPERTY(std::string, internal_api_token);

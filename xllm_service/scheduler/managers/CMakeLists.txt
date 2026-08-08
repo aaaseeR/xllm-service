@@ -15,6 +15,7 @@ cc_library(
     :common
     :etcd_client
     :provider_contract
+    :provider_route_selector
     :request
     absl::random_random
     absl::strings

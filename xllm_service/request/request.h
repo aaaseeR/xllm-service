@@ -81,6 +81,7 @@ struct Request {
   std::vector<int32_t> token_ids;
 
   // instance routing
+  xllm::proto::ProviderId provider_id = xllm::proto::PROVIDER_ID_UNSPECIFIED;
   Routing routing;
   std::string prefill_incarnation_id;
   std::string decode_incarnation_id;

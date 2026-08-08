@@ -701,5 +701,17 @@ TEST(ProviderContractTest, ProductionAdaptersRejectWrongProviderDescriptor) {
             xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
 }
 
+TEST(ProviderContractTest, DispatchKindResolvesOnlyKnownProviders) {
+  EXPECT_EQ(
+      resolve_provider_dispatch_kind(xllm::proto::PROVIDER_ID_XLLM_NATIVE),
+      ProviderDispatchKind::XLLM_NATIVE_RPC);
+  EXPECT_EQ(
+      resolve_provider_dispatch_kind(xllm::proto::PROVIDER_ID_VLLM_ASCEND),
+      ProviderDispatchKind::OPENAI_HTTP);
+  EXPECT_FALSE(
+      resolve_provider_dispatch_kind(xllm::proto::PROVIDER_ID_UNSPECIFIED)
+          .has_value());
+}
+
 }  // namespace
 }  // namespace xllm_service::provider

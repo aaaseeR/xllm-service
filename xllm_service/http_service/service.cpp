@@ -566,8 +566,7 @@ void XllmHttpServiceImpl::get_serving_models(
   }
 
   // vLLM backend: relay GET /v1/models straight through.
-  if (scheduler_->get_instance_info(service_request->routing.prefill_name)
-          .provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
+  if (service_request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     handle_vllm(call_data,
                 scheduler_,
                 service_request->routing.prefill_name,
@@ -638,8 +637,7 @@ void XllmHttpServiceImpl::Completions(
   }
 
   // vLLM backend: relay the raw client JSON over HTTP, skip xllm-only fields.
-  if (scheduler_->get_instance_info(service_request->routing.prefill_name)
-          .provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
+  if (service_request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     auto call_data = std::make_shared<CompletionCallData>(
         cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
     handle_vllm(call_data,
@@ -705,7 +703,7 @@ void XllmHttpServiceImpl::ChatCompletions(
   std::string attachment;
   cntl->request_attachment().copy_to(&attachment, content_len, 0);
 
-  auto chat_json = normalize_chat_json(std::move(attachment));
+  auto chat_json = normalize_chat_json(attachment);
   if (!chat_json.ok) {
     cntl->SetFailed(chat_json.error);
     LOG(ERROR) << "normalize chat json failed: " << chat_json.error;
@@ -771,8 +769,7 @@ void XllmHttpServiceImpl::ChatCompletions(
   }
 
   // vLLM backend: relay the raw client JSON over HTTP, skip xllm-only fields.
-  if (scheduler_->get_instance_info(service_request->routing.prefill_name)
-          .provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
+  if (service_request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     auto call_data = std::make_shared<ChatCallData>(
         cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
     handle_vllm(call_data,

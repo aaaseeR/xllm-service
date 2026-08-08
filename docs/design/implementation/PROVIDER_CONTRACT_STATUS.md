@@ -20,8 +20,8 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：CPU_VERIFIED
 - 关联设计/Requirement ID：G-2、G-1、F66、F72、F73、F80-F82、D50、D52、D56
-- 最近验证基线：xLLM `cd91965c`、xllm-service 本状态文档所在提交
-- 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-08
+- 最近验证基线：xLLM `0d9a3f29`、xllm-service 本状态文档所在提交
+- 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
 
@@ -56,7 +56,13 @@ limitations under the License.
   交叉校验，并在实例进入生产索引前运行公共 Descriptor validator；旧
   `backend_type` 只在 JSON 兼容入口映射一次，未知值或双身份冲突 fail closed。
   当前 vLLM sidecar 明确发布 contract version 0，继续属于 BEST_EFFORT 兼容桥。
-- 明确不支持范围：本批次尚未把 Adapter 接入生产 Scheduler，也没有实现
+- Scheduler 已按每个请求从可执行 Provider route 中选择 Adapter dispatch kind，
+  不再读取进程级 `default_backend_type` 决定 tokenization 或数据面；该 CLI flag
+  仅为旧部署参数兼容保留且不参与运行时决策。Round-robin、CAR、SLO 指标入口、
+  静态 peer 列表和 Engine Link/Unlink 均按 Provider 隔离。Native `P+D` 与 vLLM
+  `AGGREGATED` route shape 由同一个纯 CPU selector 决定，禁止跨 Provider 拼接。
+- 明确不支持范围：本批次尚未让生产 Scheduler 只消费
+  `CanonicalRequest/ExecutionPlan`，也没有实现
   Submit、Stream、Cancel、Reserve 和 State Stream；不声称任何真实 NPU
   Provider 已通过 conformance。
 
@@ -72,9 +78,10 @@ limitations under the License.
 | EngineState schema | UNKNOWN 与 0、per-DP、ratio、histogram 负向测试 | N/A | 待 State Stream | PASS |
 | Adapter registry | ownership、lookup、重复 key 与非法 Descriptor | N/A | N/A | PASS |
 | 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
+| Provider route 隔离 | Native P/D、vLLM SINGLE、跨 Provider、无完整 plan、suspect、未知 Provider、RR cursor 正负测试 | N/A，无 tensor 逻辑 | 待真实混合池 | PASS，8/8 |
 
-Service 的 `ProviderContractTest` 当前为 22 项，`InstanceMetaInfoTest` 为 13 项；
-当前全量 service CPU 回归为 214/214，vLLM sidecar CPU 回归为 29/29（其中
+Service 的 `ProviderContractTest` 当前为 23 项，`InstanceMetaInfoTest` 为 13 项；
+当前全量 service CPU 回归为 223/223，vLLM sidecar CPU 回归为 29/29（其中
 metadata 11/11），xLLM CPU 公共路径基线为 96/96。
 
 ## 完善情况
@@ -83,10 +90,14 @@ metadata 11/11），xLLM CPU 公共路径基线为 96/96。
   Provider/open-mode 门禁；Descriptor、Canonical/Encoded Request、EngineState、
   ExecutionPlan 校验；`attempt_seq=0` 与缺失字段可区分；线程安全、只增不删的
   Adapter registry；两个首发 Provider 的 RequestCodec 与 dispatch identity；CPU
-  conformance。
-- 已知缺口/风险：G-2 的生产 Adapter 和 `SelectPlans` 接入仍属于后续 Provider
-  Pool 批次；G3 的 `(provider_id, profile_digest, incarnation_id)` Engine Registry
-  尚未实现；当前只证明公共契约逻辑，不证明硬件 Runtime 行为。
+  conformance；生产 Scheduler 的 per-request Provider dispatch 与跨 Provider route
+  隔离。
+- 已知缺口/风险：当前生产 route 只完成 Provider 级隔离；严格 P/D profile 不能
+  直接要求 `profile_digest` 相等，仍需按 model、KV layout、Connector/version、
+  transfer mode 与 topology transform 建立显式兼容矩阵。CanonicalRequest、
+  ExecutionPlan 与 Adapter codec 的端到端接入仍属于后续 B1 批次；G3 的
+  `(provider_id, profile_digest, incarnation_id)` Engine Registry 尚未实现；当前
+  不证明硬件 Runtime 行为。
 - 回滚与兼容：协议为全新 additive schema；旧二进制不会读取这些消息。V2
   调用方必须对 `contract_version != 1`、未知 enum 与缺能力稳定 fail closed。
 - 性能、容量和观测证据：纯 CPU 校验路径，无生产吞吐结论；State Stream 与

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -103,6 +104,18 @@ class VllmAscendRequestCodec final : public RequestCodec {
 };
 
 }  // namespace
+
+std::optional<ProviderDispatchKind> resolve_provider_dispatch_kind(
+    xllm::proto::ProviderId provider_id) {
+  switch (provider_id) {
+    case xllm::proto::PROVIDER_ID_XLLM_NATIVE:
+      return ProviderDispatchKind::XLLM_NATIVE_RPC;
+    case xllm::proto::PROVIDER_ID_VLLM_ASCEND:
+      return ProviderDispatchKind::OPENAI_HTTP;
+    default:
+      return std::nullopt;
+  }
+}
 
 XllmNativeAdapter::XllmNativeAdapter(
     xllm::proto::ProviderDescriptor descriptor,

@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "provider.pb.h"
@@ -32,6 +33,9 @@ enum class ProviderDispatchKind : int8_t {
   XLLM_NATIVE_RPC = 0,
   OPENAI_HTTP = 1,
 };
+
+std::optional<ProviderDispatchKind> resolve_provider_dispatch_kind(
+    xllm::proto::ProviderId provider_id);
 
 class RequestCodec {
  public:

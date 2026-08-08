@@ -22,3 +22,14 @@ cc_test(
     GTest::gtest_main
     proto_xllm
 )
+
+cc_test(
+  NAME
+    provider_route_selector_test
+  SRCS
+    provider_route_selector_test.cpp
+  DEPS
+    :provider_route_selector
+    GTest::gtest_main
+    proto_xllm
+)

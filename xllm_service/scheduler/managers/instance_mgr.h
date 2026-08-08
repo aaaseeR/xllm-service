@@ -49,7 +49,10 @@ class InstanceMgr final {
 
   InstanceMetaInfo get_instance_info(const std::string& instance_name);
 
-  bool get_next_instance_pair(Routing* routing);
+  bool get_next_provider(xllm::proto::ProviderId* provider_id);
+
+  bool get_next_instance_pair(Routing* routing,
+                              xllm::proto::ProviderId provider_id);
 
   std::vector<std::string> get_static_decode_list(
       const std::string& instance_name);
@@ -57,7 +60,8 @@ class InstanceMgr final {
   std::vector<std::string> get_static_prefill_list(
       const std::string& instance_name);
 
-  void get_load_metrics(LoadBalanceInfos* infos);
+  void get_load_metrics(LoadBalanceInfos* infos,
+                        xllm::proto::ProviderId provider_id);
 
   std::shared_ptr<brpc::Channel> get_channel(const std::string& instance_name);
 
@@ -93,10 +97,6 @@ class InstanceMgr final {
 
  private:
   DISALLOW_COPY_AND_ASSIGN(InstanceMgr);
-
-  // Caller must hold cluster_mutex_.
-  bool can_route_prefill_without_decode_locked(
-      const std::string& prefill_name) const;
 
   void init();
 
@@ -184,6 +184,7 @@ class InstanceMgr final {
   std::vector<std::string> decode_index_;
   uint64_t next_prefill_index_ = 0;
   uint64_t next_decode_index_ = 0;
+  uint64_t next_provider_index_ = 0;
   std::unordered_map<std::string, std::shared_ptr<brpc::Channel>>
       cached_channels_;
 

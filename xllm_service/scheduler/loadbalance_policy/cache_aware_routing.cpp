@@ -29,7 +29,7 @@ bool CacheAwareRouting::select_instances_pair(
     DLOG(INFO) << lb_infos.debug_string();
   }
 
-  instance_mgr_->get_load_metrics(&lb_infos);
+  instance_mgr_->get_load_metrics(&lb_infos, request->provider_id);
   DLOG(INFO) << lb_infos.debug_string();
 
   if (lb_infos.prefill_load_metrics.size() == 0) {

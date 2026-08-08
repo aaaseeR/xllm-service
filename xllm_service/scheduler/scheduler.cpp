@@ -35,6 +35,7 @@ limitations under the License.
 #include "loadbalance_policy/cache_aware_routing.h"
 #include "loadbalance_policy/round_robin.h"
 #include "loadbalance_policy/slo_aware_policy.h"
+#include "provider/provider_adapter.h"
 #include "rpc_service/first_event_recovery_client.h"
 #include "scheduler/xllm_chat_parse_bridge.h"
 #include "tokenizer/tokenizer_factory.h"
@@ -175,10 +176,9 @@ Scheduler::Scheduler(const Options& options)
        options_.min_first_output_retry_remaining_ms() == 0)) {
     LOG(FATAL) << "Invalid first-output retry budget configuration.";
   }
-  // vLLM-backend clusters forward the raw client JSON to vLLM, which does its
-  // own tokenization / chat templating. Skip building the local tokenizer and
-  // chat template so the master does not require a tokenizer.model / template.
-  if (options_.default_backend_type() != "vllm") {
+  // Provider selection happens per request. A Service without native model
+  // assets can still relay HTTP providers; native requests fail closed below.
+  if (!options_.tokenizer_path().empty()) {
     tokenizer_ = TokenizerFactory::create_tokenizer(options_.tokenizer_path(),
                                                     &tokenizer_args_);
 
@@ -294,14 +294,21 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
     LOG(ERROR) << "Request deadline is invalid or already expired.";
     return false;
   }
-  // For vLLM backend clusters we forward the client's raw OpenAI JSON straight
-  // through to vLLM, which applies its own chat template and tokenization. So
-  // skip the local chat-template + tokenize steps entirely (leaving token_ids
-  // empty) and only run instance selection. See default_backend_type option.
-  const bool is_vllm = (options_.default_backend_type() == "vllm");
+  if (!instance_mgr_->get_next_provider(&request->provider_id)) {
+    return false;
+  }
+  const std::optional<provider::ProviderDispatchKind> dispatch_kind =
+      provider::resolve_provider_dispatch_kind(request->provider_id);
+  if (!dispatch_kind.has_value()) {
+    LOG(ERROR) << "Selected provider has no dispatch adapter: "
+               << static_cast<int32_t>(request->provider_id);
+    return false;
+  }
+  const bool is_native =
+      *dispatch_kind == provider::ProviderDispatchKind::XLLM_NATIVE_RPC;
 
   // apply chat template
-  if (!is_vllm && request->messages.size() > 0) {
+  if (is_native && !request->messages.empty()) {
     if (chat_template_ == nullptr) {
       LOG(ERROR) << "Chat template has not configured.";
       return false;
@@ -320,9 +327,9 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   }
 
   // encode prompt
-  if (!is_vllm && request->prompt.size() != 0) {
-    if (chat_template_ == nullptr) {
-      LOG(ERROR) << "Chat template has not configured.";
+  if (is_native && !request->prompt.empty()) {
+    if (chat_template_ == nullptr || tokenizer_ == nullptr) {
+      LOG(ERROR) << "Native provider tokenizer assets are not configured.";
       return false;
     }
     if (!get_tls_tokenizer()->encode(
@@ -334,7 +341,7 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
     }
   }
 
-  auto ret = lb_policy_->select_instances_pair(request);
+  const bool ret = lb_policy_->select_instances_pair(request);
   if (!ret) {
     return false;
   }
@@ -347,7 +354,7 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   DLOG(INFO) << request->routing.debug_string();
 
   // update request metrics
-  if (!is_vllm && request->prompt.size() != 0) {
+  if (is_native && !request->prompt.empty()) {
     instance_mgr_->update_request_metrics(request, RequestAction::SCHEDULE);
   }
 
@@ -503,9 +510,7 @@ bool Scheduler::install_execution_hold_locked(
   if (request->routing.decode_name.empty()) {
     return true;
   }
-  const InstanceMetaInfo prefill_info =
-      instance_mgr_->get_instance_info(request->routing.prefill_name);
-  if (prefill_info.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
+  if (request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     // vLLM AGGREGATED holds require the Provider Agent submit identity and are
     // installed by that path when it is opened.
     return true;
@@ -637,9 +642,7 @@ bool Scheduler::select_retry_instances(
       !instance_mgr_->bind_request_instance_incarnations(request)) {
     return false;
   }
-  const InstanceMetaInfo prefill_info =
-      instance_mgr_->get_instance_info(request->routing.prefill_name);
-  if (prefill_info.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND ||
+  if (request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND ||
       request->routing.decode_name.empty()) {
     LOG(ERROR) << "First-output retry selected an incompatible execution "
                   "mode, routing="

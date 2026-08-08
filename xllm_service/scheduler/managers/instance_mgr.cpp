@@ -38,6 +38,7 @@ limitations under the License.
 #include "common/xllm/status.h"
 #include "disagg_pd.pb.h"
 #include "provider/provider_contract.h"
+#include "provider/provider_route_selector.h"
 #include "scheduler/scheduler.h"
 
 namespace {
@@ -66,30 +67,6 @@ bool is_instance_schedulable(const xllm_service::InstanceMetaInfo& info) {
   return info.runtime_state != InstanceRuntimeState::SUSPECT;
 }
 
-bool select_next_schedulable_instance(
-    const std::unordered_map<std::string, xllm_service::InstanceMetaInfo>&
-        instances,
-    const std::vector<std::string>& index,
-    uint64_t* next_index,
-    std::string* instance_name) {
-  if (index.empty()) {
-    return false;
-  }
-
-  const uint64_t start_index = *next_index % index.size();
-  for (uint64_t offset = 0; offset < index.size(); ++offset) {
-    const uint64_t index_pos = (start_index + offset) % index.size();
-    auto it = instances.find(index[index_pos]);
-    if (it == instances.end() || !is_instance_schedulable(it->second)) {
-      continue;
-    }
-    *instance_name = index[index_pos];
-    *next_index = index_pos + 1;
-    return true;
-  }
-  return false;
-}
-
 size_t count_schedulable_instances(
     const std::unordered_map<std::string, xllm_service::InstanceMetaInfo>&
         instances,
@@ -113,6 +90,56 @@ InstanceType get_cleanup_type(const xllm_service::InstanceMetaInfo& info) {
     return info.current_type;
   }
   return info.type;
+}
+
+xllm::proto::EngineRole get_engine_role(
+    const xllm_service::InstanceMetaInfo& info) {
+  switch (info.type) {
+    case InstanceType::DEFAULT:
+      return xllm::proto::ENGINE_ROLE_AGGREGATED;
+    case InstanceType::PREFILL:
+      return xllm::proto::ENGINE_ROLE_PREFILL;
+    case InstanceType::DECODE:
+      return xllm::proto::ENGINE_ROLE_DECODE;
+    case InstanceType::MIX:
+      return info.current_type == InstanceType::PREFILL
+                 ? xllm::proto::ENGINE_ROLE_PREFILL
+                 : xllm::proto::ENGINE_ROLE_DECODE;
+    default:
+      return xllm::proto::ENGINE_ROLE_UNSPECIFIED;
+  }
+}
+
+std::vector<xllm_service::provider::ProviderRouteCandidate>
+make_route_candidates(
+    const std::unordered_map<std::string, xllm_service::InstanceMetaInfo>&
+        instances,
+    const std::vector<std::string>& index) {
+  std::vector<xllm_service::provider::ProviderRouteCandidate> candidates;
+  candidates.reserve(index.size());
+  for (const std::string& engine_uid : index) {
+    xllm_service::provider::ProviderRouteCandidate candidate;
+    candidate.engine_uid = engine_uid;
+    const auto instance_it = instances.find(engine_uid);
+    if (instance_it != instances.end()) {
+      candidate.provider_id = instance_it->second.provider_id;
+      candidate.role = get_engine_role(instance_it->second);
+      candidate.schedulable = is_instance_schedulable(instance_it->second);
+    }
+    candidates.emplace_back(std::move(candidate));
+  }
+  return candidates;
+}
+
+xllm_service::provider::ProviderRouteCandidate make_route_candidate(
+    const std::string& engine_uid,
+    const xllm_service::InstanceMetaInfo& info) {
+  return xllm_service::provider::ProviderRouteCandidate{
+      .engine_uid = engine_uid,
+      .provider_id = info.provider_id,
+      .role = get_engine_role(info),
+      .schedulable = is_instance_schedulable(info),
+  };
 }
 }  // namespace
 
@@ -201,56 +228,60 @@ InstanceMetaInfo InstanceMgr::get_instance_info(
   return instances_[instance_name];
 }
 
-bool InstanceMgr::can_route_prefill_without_decode_locked(
-    const std::string& prefill_name) const {
-  auto selected_it = instances_.find(prefill_name);
-  if (selected_it == instances_.end() ||
-      selected_it->second.type != InstanceType::DEFAULT) {
-    LOG(ERROR) << "No decode instance and selected prefill is not default, "
-               << "instance: " << prefill_name;
+bool InstanceMgr::get_next_provider(xllm::proto::ProviderId* provider_id) {
+  std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
+  if (provider_id == nullptr) {
     return false;
   }
+
+  const std::vector<provider::ProviderRouteCandidate> prefill_candidates =
+      make_route_candidates(instances_, prefill_index_);
+  const std::vector<provider::ProviderRouteCandidate> decode_candidates =
+      make_route_candidates(instances_, decode_index_);
+  provider::ProviderRouteSelection selection;
+  if (!provider::ProviderRouteSelector::select(
+          prefill_candidates,
+          decode_candidates,
+          xllm::proto::PROVIDER_ID_UNSPECIFIED,
+          next_provider_index_,
+          next_decode_index_,
+          &selection)) {
+    LOG(ERROR) << "No provider has a schedulable execution route.";
+    return false;
+  }
+  *provider_id = selection.provider_id;
+  next_provider_index_ = selection.next_prefill_index;
   return true;
 }
 
-bool InstanceMgr::get_next_instance_pair(Routing* routing) {
+bool InstanceMgr::get_next_instance_pair(Routing* routing,
+                                         xllm::proto::ProviderId provider_id) {
   std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
-  if (prefill_index_.empty()) {
-    LOG(ERROR) << "No prefill or default instance found!";
+  if (routing == nullptr ||
+      provider_id == xllm::proto::PROVIDER_ID_UNSPECIFIED) {
     return false;
   }
 
-  routing->decode_name.clear();
-  if (suspect_instances_.empty()) {
-    // Fast path for the common case: no suspect instances, keep plain RR.
-    next_prefill_index_ = next_prefill_index_ % prefill_index_.size();
-    routing->prefill_name = prefill_index_[next_prefill_index_];
-    next_prefill_index_++;
-
-    if (decode_index_.empty()) {
-      return can_route_prefill_without_decode_locked(routing->prefill_name);
-    }
-
-    next_decode_index_ = next_decode_index_ % decode_index_.size();
-    routing->decode_name = decode_index_[next_decode_index_];
-    next_decode_index_++;
-    return true;
-  }
-
-  if (!select_next_schedulable_instance(instances_,
-                                        prefill_index_,
-                                        &next_prefill_index_,
-                                        &routing->prefill_name)) {
-    LOG(ERROR) << "No schedulable prefill or default instance found!";
+  const std::vector<provider::ProviderRouteCandidate> prefill_candidates =
+      make_route_candidates(instances_, prefill_index_);
+  const std::vector<provider::ProviderRouteCandidate> decode_candidates =
+      make_route_candidates(instances_, decode_index_);
+  provider::ProviderRouteSelection selection;
+  if (!provider::ProviderRouteSelector::select(prefill_candidates,
+                                               decode_candidates,
+                                               provider_id,
+                                               next_prefill_index_,
+                                               next_decode_index_,
+                                               &selection)) {
+    LOG(ERROR) << "No schedulable route for provider_id="
+               << static_cast<int32_t>(provider_id);
     return false;
   }
 
-  if (decode_index_.empty()) {
-    return can_route_prefill_without_decode_locked(routing->prefill_name);
-  }
-
-  select_next_schedulable_instance(
-      instances_, decode_index_, &next_decode_index_, &routing->decode_name);
+  routing->prefill_name = selection.prefill_engine_uid;
+  routing->decode_name = selection.decode_engine_uid;
+  next_prefill_index_ = selection.next_prefill_index;
+  next_decode_index_ = selection.next_decode_index;
   return true;
 }
 
@@ -259,8 +290,13 @@ std::vector<std::string> InstanceMgr::get_static_decode_list(
     const std::string& instance_name) {
   std::vector<std::string> decode_list;
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
-  for (auto& inst : instances_) {
-    if (inst.second.type == InstanceType::DECODE &&
+  const auto source_it = instances_.find(instance_name);
+  if (source_it == instances_.end()) {
+    return decode_list;
+  }
+  for (const auto& inst : instances_) {
+    if (get_engine_role(inst.second) == xllm::proto::ENGINE_ROLE_DECODE &&
+        inst.second.provider_id == source_it->second.provider_id &&
         is_instance_schedulable(inst.second)) {
       decode_list.emplace_back(inst.second.name);
     }
@@ -274,9 +310,13 @@ std::vector<std::string> InstanceMgr::get_static_prefill_list(
     const std::string& instance_name) {
   std::vector<std::string> prefill_list;
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
-  for (auto& inst : instances_) {
-    if ((inst.second.type == InstanceType::PREFILL ||
-         inst.second.type == InstanceType::DEFAULT) &&
+  const auto source_it = instances_.find(instance_name);
+  if (source_it == instances_.end()) {
+    return prefill_list;
+  }
+  for (const auto& inst : instances_) {
+    if (get_engine_role(inst.second) == xllm::proto::ENGINE_ROLE_PREFILL &&
+        inst.second.provider_id == source_it->second.provider_id &&
         is_instance_schedulable(inst.second)) {
       prefill_list.emplace_back(inst.second.name);
     }
@@ -285,7 +325,8 @@ std::vector<std::string> InstanceMgr::get_static_prefill_list(
   return prefill_list;
 }
 
-void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos) {
+void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos,
+                                   xllm::proto::ProviderId provider_id) {
   std::shared_lock<std::shared_mutex> inst_lock(cluster_mutex_);
   std::shared_lock<std::shared_mutex> metric_lock(metrics_mutex_);
 
@@ -296,6 +337,7 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos) {
     }
     auto instance_it = instances_.find(name);
     if (instance_it == instances_.end() ||
+        instance_it->second.provider_id != provider_id ||
         !is_instance_schedulable(instance_it->second)) {
       continue;
     }
@@ -323,6 +365,7 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos) {
     for (const auto& metric : load_metrics_) {
       auto instance_it = instances_.find(metric.first);
       if (instance_it == instances_.end() ||
+          instance_it->second.provider_id != provider_id ||
           !is_instance_schedulable(instance_it->second)) {
         continue;
       }
@@ -410,9 +453,19 @@ bool InstanceMgr::bind_request_instance_incarnations(
     const std::shared_ptr<Request>& request) {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
 
+  if (request->provider_id == xllm::proto::PROVIDER_ID_UNSPECIFIED) {
+    LOG(ERROR) << "Request provider is not selected before route binding.";
+    return false;
+  }
+
   // Bind the selected routing to a concrete incarnation before dispatch.
   request->prefill_incarnation_id.clear();
   request->decode_incarnation_id.clear();
+
+  if (request->routing.prefill_name.empty()) {
+    LOG(ERROR) << "Selected route has no prefill or aggregated engine.";
+    return false;
+  }
 
   if (!request->routing.prefill_name.empty()) {
     auto prefill_it = instances_.find(request->routing.prefill_name);
@@ -425,6 +478,11 @@ bool InstanceMgr::bind_request_instance_incarnations(
       LOG(ERROR) << "Prefill instance is not schedulable when binding request: "
                  << request->routing.prefill_name << ", state: "
                  << runtime_state_name(prefill_it->second.runtime_state);
+      return false;
+    }
+    if (prefill_it->second.provider_id != request->provider_id) {
+      LOG(ERROR) << "Prefill provider changed before route binding: "
+                 << request->routing.prefill_name;
       return false;
     }
     request->prefill_incarnation_id = prefill_it->second.incarnation_id;
@@ -443,7 +501,38 @@ bool InstanceMgr::bind_request_instance_incarnations(
                  << runtime_state_name(decode_it->second.runtime_state);
       return false;
     }
+    if (decode_it->second.provider_id != request->provider_id) {
+      LOG(ERROR) << "Decode provider does not match selected request provider: "
+                 << request->routing.decode_name;
+      return false;
+    }
     request->decode_incarnation_id = decode_it->second.incarnation_id;
+  }
+
+  const auto selected_prefill_it =
+      instances_.find(request->routing.prefill_name);
+  std::vector<provider::ProviderRouteCandidate> selected_prefill = {
+      make_route_candidate(selected_prefill_it->first,
+                           selected_prefill_it->second)};
+  std::vector<provider::ProviderRouteCandidate> selected_decode;
+  if (!request->routing.decode_name.empty()) {
+    const auto selected_decode_it =
+        instances_.find(request->routing.decode_name);
+    selected_decode.emplace_back(make_route_candidate(
+        selected_decode_it->first, selected_decode_it->second));
+  }
+  provider::ProviderRouteSelection validated_selection;
+  if (!provider::ProviderRouteSelector::select(selected_prefill,
+                                               selected_decode,
+                                               request->provider_id,
+                                               0,
+                                               0,
+                                               &validated_selection) ||
+      validated_selection.prefill_engine_uid != request->routing.prefill_name ||
+      validated_selection.decode_engine_uid != request->routing.decode_name) {
+    LOG(ERROR) << "Load balancer produced an invalid Provider route shape: "
+               << request->routing.debug_string();
+    return false;
   }
 
   return true;
@@ -945,11 +1034,12 @@ bool InstanceMgr::select_instance_pair_on_slo(
   int64_t total_prefill_time = 0;
   size_t schedulable_prefill_count = 0;
   for (const auto& prefill_instance : prefill_index_) {
-    if (has_unschedulable_instances) {
-      auto it = instances_.find(prefill_instance);
-      if (it == instances_.end() || !is_instance_schedulable(it->second)) {
-        continue;
-      }
+    const auto instance_it = instances_.find(prefill_instance);
+    if (instance_it == instances_.end() ||
+        instance_it->second.provider_id != request->provider_id ||
+        (has_unschedulable_instances &&
+         !is_instance_schedulable(instance_it->second))) {
+      continue;
     }
 
     int64_t prefill_time =
@@ -973,11 +1063,12 @@ bool InstanceMgr::select_instance_pair_on_slo(
   std::string target_decode_instance;
   size_t schedulable_decode_count = 0;
   for (const auto& decode_instance : decode_index_) {
-    if (has_unschedulable_instances) {
-      auto it = instances_.find(decode_instance);
-      if (it == instances_.end() || !is_instance_schedulable(it->second)) {
-        continue;
-      }
+    const auto instance_it = instances_.find(decode_instance);
+    if (instance_it == instances_.end() ||
+        instance_it->second.provider_id != request->provider_id ||
+        (has_unschedulable_instances &&
+         !is_instance_schedulable(instance_it->second))) {
+      continue;
     }
 
     int64_t token_num = request_metrics_[decode_instance].decode_token_num;
@@ -1186,12 +1277,36 @@ bool InstanceMgr::register_instance(const std::string& name,
   info.latest_timestamp = current_time_ms();
   info.name = name;
 
+  if (info.type == InstanceType::MIX) {
+    std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+    const bool has_provider_decode =
+        std::any_of(decode_index_.begin(),
+                    decode_index_.end(),
+                    [this, &info](const std::string& decode_name) {
+                      const auto decode_it = instances_.find(decode_name);
+                      return decode_it != instances_.end() &&
+                             decode_it->second.provider_id == info.provider_id;
+                    });
+    info.current_type =
+        has_provider_decode ? InstanceType::PREFILL : InstanceType::DECODE;
+  }
+
+  if (info.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND &&
+      info.type != InstanceType::DEFAULT) {
+    LOG(ERROR) << "Reject non-aggregated vLLM-Ascend instance: " << name;
+    return false;
+  }
+
   if (info.provider_descriptor.has_value()) {
     const provider::ContractResult validation =
         provider::validate_provider_descriptor(*info.provider_descriptor);
     if (!validation.ok()) {
       LOG(ERROR) << "Reject invalid Provider Descriptor for " << name << ": "
                  << validation.message();
+      return false;
+    }
+    if (info.provider_descriptor->serving().role() != get_engine_role(info)) {
+      LOG(ERROR) << "Reject Provider Descriptor role mismatch for " << name;
       return false;
     }
   }
@@ -1340,20 +1455,30 @@ bool InstanceMgr::gather_link_operations(
     case InstanceType::DEFAULT:
       break;
     case InstanceType::PREFILL: {
-      for (auto& d_name : decode_index_) {
-        out_ops->emplace_back(instances_[d_name].rpc_address, info);
+      for (const std::string& decode_name : decode_index_) {
+        const InstanceMetaInfo& peer_info = instances_[decode_name];
+        if (peer_info.provider_id == info.provider_id &&
+            get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_DECODE) {
+          out_ops->emplace_back(peer_info.rpc_address, info);
+        }
       }
       break;
     }
     case InstanceType::DECODE: {
-      for (auto& p_name : prefill_index_) {
-        out_ops->emplace_back(info.rpc_address, instances_[p_name]);
+      for (const std::string& prefill_name : prefill_index_) {
+        const InstanceMetaInfo& peer_info = instances_[prefill_name];
+        if (peer_info.provider_id == info.provider_id &&
+            get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_PREFILL) {
+          out_ops->emplace_back(info.rpc_address, peer_info);
+        }
       }
       break;
     }
     case InstanceType::MIX: {
       for (const auto& [peer_name, peer_info] : instances_) {
-        if (peer_name == info.name) {
+        if (peer_name == info.name ||
+            peer_info.provider_id != info.provider_id ||
+            get_engine_role(peer_info) == get_engine_role(info)) {
           continue;
         }
         out_ops->emplace_back(info.rpc_address, peer_info);
@@ -1387,16 +1512,25 @@ void InstanceMgr::gather_unlink_operations(
     std::vector<std::pair<std::string, InstanceMetaInfo>>* out_ops) {
   out_ops->clear();
   if (info.type == InstanceType::PREFILL) {
-    for (auto& d_name : decode_index_) {
-      out_ops->emplace_back(instances_[d_name].rpc_address, info);
+    for (const std::string& decode_name : decode_index_) {
+      const InstanceMetaInfo& peer_info = instances_[decode_name];
+      if (peer_info.provider_id == info.provider_id &&
+          get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_DECODE) {
+        out_ops->emplace_back(peer_info.rpc_address, info);
+      }
     }
   } else if (info.type == InstanceType::DECODE) {
-    for (auto& p_name : prefill_index_) {
-      out_ops->emplace_back(instances_[p_name].rpc_address, info);
+    for (const std::string& prefill_name : prefill_index_) {
+      const InstanceMetaInfo& peer_info = instances_[prefill_name];
+      if (peer_info.provider_id == info.provider_id &&
+          get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_PREFILL) {
+        out_ops->emplace_back(peer_info.rpc_address, info);
+      }
     }
   } else if (info.type == InstanceType::MIX) {
     for (const auto& [peer_name, peer_info] : instances_) {
-      if (peer_name == name) {
+      if (peer_name == name || peer_info.provider_id != info.provider_id ||
+          get_engine_role(peer_info) == get_engine_role(info)) {
         continue;
       }
       out_ops->emplace_back(peer_info.rpc_address, info);
@@ -1423,15 +1557,13 @@ void InstanceMgr::add_instance_to_index(const std::string& name,
       LOG(INFO) << "Register a new decode instance, instance name : " << name;
       break;
     case InstanceType::MIX:
-      if (decode_index_.size() > 0) {
+      if (info.current_type == InstanceType::PREFILL) {
         info.instance_index = prefill_index_.size();
-        info.current_type = InstanceType::PREFILL;
         prefill_index_.emplace_back(name);
         LOG(INFO) << "Register a new prefill instance, instance name : "
                   << name;
       } else {
         info.instance_index = decode_index_.size();
-        info.current_type = InstanceType::DECODE;
         decode_index_.emplace_back(name);
         LOG(INFO) << "Register a new decode instance, instance name : " << name;
       }

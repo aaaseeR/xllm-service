@@ -27,6 +27,17 @@ cc_library(
 
 cc_library(
   NAME
+    provider_route_selector
+  HDRS
+    provider_route_selector.h
+  SRCS
+    provider_route_selector.cpp
+  DEPS
+    proto_xllm
+)
+
+cc_library(
+  NAME
     execution_hold
   HDRS
     execution_hold.h

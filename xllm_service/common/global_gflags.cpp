@@ -206,8 +206,8 @@ BRPC_VALIDATE_GFLAG(readiness_check_interval_s, brpc::PositiveInteger);
 
 DEFINE_string(default_backend_type,
               "xllm",
-              "Backend type this cluster serves: 'xllm' or 'vllm'. "
-              "Mixed-backend clusters are P1.");
+              "Deprecated compatibility flag. Runtime provider selection is "
+              "derived from registered Provider identity.");
 
 DEFINE_int32(vllm_http_timeout_ms,
              60000,
