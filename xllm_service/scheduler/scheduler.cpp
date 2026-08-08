@@ -505,7 +505,7 @@ bool Scheduler::install_execution_hold_locked(
   }
   const InstanceMetaInfo prefill_info =
       instance_mgr_->get_instance_info(request->routing.prefill_name);
-  if (prefill_info.backend_type == "vllm") {
+  if (prefill_info.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     // vLLM AGGREGATED holds require the Provider Agent submit identity and are
     // installed by that path when it is opened.
     return true;
@@ -639,7 +639,7 @@ bool Scheduler::select_retry_instances(
   }
   const InstanceMetaInfo prefill_info =
       instance_mgr_->get_instance_info(request->routing.prefill_name);
-  if (prefill_info.backend_type == "vllm" ||
+  if (prefill_info.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND ||
       request->routing.decode_name.empty()) {
     LOG(ERROR) << "First-output retry selected an incompatible execution "
                   "mode, routing="

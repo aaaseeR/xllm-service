@@ -91,11 +91,19 @@ def build_instance_meta(
     `InstanceMetaInfo::parse_from_json`. ``register_ts_ms`` is real epoch-ms so
     the master's logs/ordering are meaningful (the manual script hard-coded 1).
     """
+    if backend_type != "vllm":
+        raise ValueError(f"unsupported vLLM sidecar backend_type: {backend_type}")
     return {
         "name": addr,
         "rpc_address": addr,
         "type": int(instance_type),
         "backend_type": backend_type,
+        # Provider identity is authoritative for V2 readers. Contract version
+        # zero marks this sidecar payload as the legacy BEST_EFFORT bridge;
+        # the production Provider Agent will publish a full Descriptor.
+        "provider_id": 2,
+        "provider_contract_version": 0,
+        "provider_profile_digest": "",
         "incarnation_id": incarnation_id,
         "register_ts_ms": int(time.time() * 1000),
     }

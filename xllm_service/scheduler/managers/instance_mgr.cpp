@@ -37,6 +37,7 @@ limitations under the License.
 #include "common/xllm/output.h"
 #include "common/xllm/status.h"
 #include "disagg_pd.pb.h"
+#include "provider/provider_contract.h"
 #include "scheduler/scheduler.h"
 
 namespace {
@@ -503,7 +504,7 @@ bool InstanceMgr::init_brpc_channel(
     std::shared_ptr<brpc::Channel>* out_channel) {
   auto channel = std::make_shared<brpc::Channel>();
   brpc::ChannelOptions options;
-  if (info.backend_type == "vllm") {
+  if (info.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     // Pass the bare host:port to Init: brpc treats any "scheme://" prefix as a
     // naming service, and "http" is not one, so a "http://" target fails with
     // "Unknown naming service". options.protocol selects HTTP instead.
@@ -520,7 +521,8 @@ bool InstanceMgr::init_brpc_channel(
   if (channel->Init(instance_name.c_str(), load_balancer.c_str(), &options) !=
       0) {
     LOG(ERROR) << "Fail to initialize channel for " << instance_name
-               << " (backend=" << info.backend_type << ")";
+               << " (provider="
+               << xllm::proto::ProviderId_Name(info.provider_id) << ")";
     return false;
   }
   *out_channel = std::move(channel);
@@ -1184,6 +1186,16 @@ bool InstanceMgr::register_instance(const std::string& name,
   info.latest_timestamp = current_time_ms();
   info.name = name;
 
+  if (info.provider_descriptor.has_value()) {
+    const provider::ContractResult validation =
+        provider::validate_provider_descriptor(*info.provider_descriptor);
+    if (!validation.ok()) {
+      LOG(ERROR) << "Reject invalid Provider Descriptor for " << name << ": "
+                 << validation.message();
+      return false;
+    }
+  }
+
   {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
     if (instances_.find(name) != instances_.end() ||
@@ -1321,7 +1333,7 @@ bool InstanceMgr::gather_link_operations(
     const InstanceMetaInfo& info,
     std::vector<std::pair<std::string, InstanceMetaInfo>>* out_ops) {
   out_ops->clear();
-  if (info.backend_type == "vllm") {
+  if (info.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     return true;
   }
   switch (info.type) {

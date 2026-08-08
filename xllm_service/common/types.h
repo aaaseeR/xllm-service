@@ -16,10 +16,11 @@ limitations under the License.
 #pragma once
 
 #include <glog/logging.h>
+#include <google/protobuf/util/json_util.h>
 
 #include <chrono>
 #include <cstdint>
-#include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,6 +28,7 @@ limitations under the License.
 
 #include "common/hash_util.h"
 #include "nlohmann/json.hpp"
+#include "provider.pb.h"
 
 namespace xllm_service {
 
@@ -101,10 +103,32 @@ inline const char* runtime_state_name(InstanceRuntimeState state) {
   }
 }
 
+inline const char* legacy_backend_type(xllm::proto::ProviderId provider_id) {
+  switch (provider_id) {
+    case xllm::proto::PROVIDER_ID_XLLM_NATIVE:
+      return "xllm";
+    case xllm::proto::PROVIDER_ID_VLLM_ASCEND:
+      return "vllm";
+    default:
+      return "";
+  }
+}
+
+inline std::optional<xllm::proto::ProviderId> provider_id_from_legacy_backend(
+    const std::string& backend_type) {
+  if (backend_type == "xllm") {
+    return xllm::proto::PROVIDER_ID_XLLM_NATIVE;
+  }
+  if (backend_type == "vllm") {
+    return xllm::proto::PROVIDER_ID_VLLM_ASCEND;
+  }
+  return std::nullopt;
+}
+
 struct LoadMetrics {
-  LoadMetrics() : waiting_requests_num(0), gpu_cache_usage_perc(0) {};
+  LoadMetrics() : waiting_requests_num(0), gpu_cache_usage_perc(0){};
   LoadMetrics(const uint64_t& waiting_reqs_num, const float& usage)
-      : waiting_requests_num(waiting_reqs_num), gpu_cache_usage_perc(usage) {};
+      : waiting_requests_num(waiting_reqs_num), gpu_cache_usage_perc(usage){};
 
   uint64_t waiting_requests_num;
   float gpu_cache_usage_perc;
@@ -198,8 +222,8 @@ struct InstanceMetaInfo {
   InstanceType type = InstanceType::DEFAULT;
   std::vector<uint64_t> cluster_ids;
   std::vector<std::string> addrs;
-  int32_t dp_size;
-  int32_t kv_split_size;
+  int32_t dp_size = 0;
+  int32_t kv_split_size = 1;
   // transfer listen ports
   std::vector<uint16_t> ports;
   // ttft profiling data
@@ -219,7 +243,12 @@ struct InstanceMetaInfo {
   // only used when the SLO Aware scheduling policy is enabled.
   InstanceType current_type = InstanceType::PREFILL;
 
-  std::string backend_type = "xllm";
+  // Provider identity is the runtime routing truth. backend_type survives only
+  // as a JSON compatibility field for old Engine/sidecar registrations.
+  xllm::proto::ProviderId provider_id = xllm::proto::PROVIDER_ID_XLLM_NATIVE;
+  uint32_t provider_contract_version = 0;
+  std::string provider_profile_digest;
+  std::optional<xllm::proto::ProviderDescriptor> provider_descriptor;
 
   nlohmann::json serialize_to_json() const {
     nlohmann::json json_val;
@@ -235,7 +264,23 @@ struct InstanceMetaInfo {
     json_val["ports"] = ports;
     json_val["ttft_profiling_data"] = ttft_profiling_data;
     json_val["tpot_profiling_data"] = tpot_profiling_data;
-    json_val["backend_type"] = backend_type;
+    json_val["provider_id"] = static_cast<int32_t>(provider_id);
+    json_val["provider_contract_version"] = provider_contract_version;
+    json_val["provider_profile_digest"] = provider_profile_digest;
+    json_val["backend_type"] = legacy_backend_type(provider_id);
+    if (provider_descriptor.has_value()) {
+      std::string descriptor_text;
+      const google::protobuf::util::Status status =
+          google::protobuf::util::MessageToJsonString(*provider_descriptor,
+                                                      &descriptor_text);
+      if (status.ok()) {
+        nlohmann::json descriptor_json = nlohmann::json::parse(
+            descriptor_text, nullptr, /*allow_exceptions=*/false);
+        if (!descriptor_json.is_discarded()) {
+          json_val["provider_descriptor"] = std::move(descriptor_json);
+        }
+      }
+    }
     return json_val;
   }
 
@@ -278,7 +323,55 @@ struct InstanceMetaInfo {
         }
       }
 
-      backend_type = json_value.value("backend_type", std::string("xllm"));
+      const bool has_legacy_backend = json_value.contains("backend_type");
+      const std::string backend_type =
+          json_value.value("backend_type", std::string("xllm"));
+      const std::optional<xllm::proto::ProviderId> legacy_provider_id =
+          provider_id_from_legacy_backend(backend_type);
+      if (!legacy_provider_id.has_value()) {
+        LOG(ERROR) << "Unknown legacy backend_type: " << backend_type;
+        return false;
+      }
+
+      const int32_t provider_id_value = json_value.value(
+          "provider_id", static_cast<int32_t>(*legacy_provider_id));
+      if (!xllm::proto::ProviderId_IsValid(provider_id_value) ||
+          provider_id_value == xllm::proto::PROVIDER_ID_UNSPECIFIED) {
+        LOG(ERROR) << "Unknown provider_id: " << provider_id_value;
+        return false;
+      }
+      provider_id = static_cast<xllm::proto::ProviderId>(provider_id_value);
+      if (has_legacy_backend && provider_id != *legacy_provider_id) {
+        LOG(ERROR) << "provider_id conflicts with legacy backend_type";
+        return false;
+      }
+
+      provider_contract_version =
+          json_value.value("provider_contract_version", uint32_t(0));
+      provider_profile_digest =
+          json_value.value("provider_profile_digest", std::string());
+      provider_descriptor.reset();
+      if (json_value.contains("provider_descriptor")) {
+        xllm::proto::ProviderDescriptor descriptor;
+        const std::string descriptor_text =
+            json_value.at("provider_descriptor").dump();
+        const google::protobuf::util::Status status =
+            google::protobuf::util::JsonStringToMessage(descriptor_text,
+                                                        &descriptor);
+        if (!status.ok() ||
+            descriptor.identity().provider_id() != provider_id ||
+            descriptor.contract_version() != provider_contract_version ||
+            descriptor.profile_digest() != provider_profile_digest ||
+            descriptor.identity().incarnation_id() != incarnation_id) {
+          LOG(ERROR) << "Provider Descriptor conflicts with instance metadata";
+          return false;
+        }
+        provider_descriptor = std::move(descriptor);
+      } else if (provider_contract_version != 0 ||
+                 !provider_profile_digest.empty()) {
+        LOG(ERROR) << "Provider contract identity requires a full Descriptor";
+        return false;
+      }
 
       runtime_state = InstanceRuntimeState::ACTIVE;
       set_init_timestamp();

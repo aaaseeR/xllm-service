@@ -63,6 +63,9 @@ def test_meta_has_required_fields_and_values():
     assert meta["rpc_address"] == "127.0.0.1:18000"
     assert meta["type"] == 0  # DEFAULT, the routable type for a lone instance
     assert meta["backend_type"] == "vllm"
+    assert meta["provider_id"] == 2
+    assert meta["provider_contract_version"] == 0
+    assert meta["provider_profile_digest"] == ""
     assert meta["incarnation_id"] == "vllm-abc123"
     assert isinstance(meta["register_ts_ms"], int) and meta["register_ts_ms"] > 0
 
@@ -71,3 +74,8 @@ def test_addr_has_no_scheme():
     # init_brpc_channel prepends http://; the registered addr must be bare.
     meta = build_instance_meta("127.0.0.1:18000", "x")
     assert "://" not in meta["name"]
+
+
+def test_meta_rejects_non_vllm_provider_identity():
+    with pytest.raises(ValueError, match="unsupported vLLM sidecar backend_type"):
+        build_instance_meta("127.0.0.1:18000", "x", backend_type="xllm")

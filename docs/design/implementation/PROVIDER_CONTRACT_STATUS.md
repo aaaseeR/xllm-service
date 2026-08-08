@@ -51,6 +51,11 @@ limitations under the License.
   template 渲染契约，STRICT 编码结果必须与 Descriptor 相等。
 - Adapter registry 按 `(provider_id, profile_digest)` 保存不可变 Adapter；这是
   Provider/profile 级 Adapter 注册表，不替代 G3 的 Engine incarnation Registry。
+- `InstanceMetaInfo` 已携带 `provider_id`、contract version、profile digest 与可选
+  完整 `ProviderDescriptor`。完整 Descriptor 在 JSON 入口执行摘要/incarnation
+  交叉校验，并在实例进入生产索引前运行公共 Descriptor validator；旧
+  `backend_type` 只在 JSON 兼容入口映射一次，未知值或双身份冲突 fail closed。
+  当前 vLLM sidecar 明确发布 contract version 0，继续属于 BEST_EFFORT 兼容桥。
 - 明确不支持范围：本批次尚未把 Adapter 接入生产 Scheduler，也没有实现
   Submit、Stream、Cancel、Reserve 和 State Stream；不声称任何真实 NPU
   Provider 已通过 conformance。
@@ -68,8 +73,9 @@ limitations under the License.
 | Adapter registry | ownership、lookup、重复 key 与非法 Descriptor | N/A | N/A | PASS |
 | 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
 
-Service 的 `ProviderContractTest` 当前为 22 项；当前全量 service CPU 回归为
-210/210，xLLM CPU 公共路径基线为 96/96。
+Service 的 `ProviderContractTest` 当前为 22 项，`InstanceMetaInfoTest` 为 13 项；
+当前全量 service CPU 回归为 214/214，vLLM sidecar CPU 回归为 29/29（其中
+metadata 11/11），xLLM CPU 公共路径基线为 96/96。
 
 ## 完善情况
 

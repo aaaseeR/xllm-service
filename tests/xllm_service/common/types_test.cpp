@@ -39,7 +39,7 @@ InstanceMetaInfo make_full_instance() {
   info.ports = {1000, 1001};
   info.ttft_profiling_data = {{10, 1.5}};
   info.tpot_profiling_data = {{20, 30, 2.5}};
-  info.backend_type = "vllm";
+  info.provider_id = xllm::proto::PROVIDER_ID_VLLM_ASCEND;
   return info;
 }
 
@@ -61,32 +61,81 @@ TEST(InstanceMetaInfoTest, SerializeParseRoundtripPreservesFields) {
   EXPECT_EQ(dst.ports, src.ports);
   EXPECT_EQ(dst.ttft_profiling_data, src.ttft_profiling_data);
   EXPECT_EQ(dst.tpot_profiling_data, src.tpot_profiling_data);
-  EXPECT_EQ(dst.backend_type, src.backend_type);
+  EXPECT_EQ(dst.provider_id, src.provider_id);
+  EXPECT_EQ(dst.provider_contract_version, src.provider_contract_version);
+  EXPECT_EQ(dst.provider_profile_digest, src.provider_profile_digest);
 }
 
-TEST(InstanceMetaInfoTest, SerializeIncludesBackendType) {
+TEST(InstanceMetaInfoTest, SerializeIncludesProviderAndLegacyIdentity) {
   InstanceMetaInfo info = make_full_instance();
 
   nlohmann::json json_val = info.serialize_to_json();
+  ASSERT_TRUE(json_val.contains("provider_id"));
+  EXPECT_EQ(json_val["provider_id"].get<int32_t>(),
+            static_cast<int32_t>(xllm::proto::PROVIDER_ID_VLLM_ASCEND));
   ASSERT_TRUE(json_val.contains("backend_type"));
   EXPECT_EQ(json_val["backend_type"].get<std::string>(), "vllm");
 }
 
-TEST(InstanceMetaInfoTest, ParseDefaultsBackendTypeToXllmWhenAbsent) {
+TEST(InstanceMetaInfoTest, ParseDefaultsProviderToXllmWhenAbsent) {
   const std::string json_str = R"({"name":"i1","rpc_address":"addr","type":0})";
 
   InstanceMetaInfo info;
   ASSERT_TRUE(info.parse_from_json(json_str));
-  EXPECT_EQ(info.backend_type, "xllm");
+  EXPECT_EQ(info.provider_id, xllm::proto::PROVIDER_ID_XLLM_NATIVE);
+  EXPECT_EQ(info.provider_contract_version, 0u);
+  EXPECT_TRUE(info.provider_profile_digest.empty());
 }
 
-TEST(InstanceMetaInfoTest, ParseAcceptsVllmBackendType) {
+TEST(InstanceMetaInfoTest, ParseMapsLegacyVllmBackendTypeOnce) {
   const std::string json_str =
       R"({"name":"i1","rpc_address":"addr","type":0,"backend_type":"vllm"})";
 
   InstanceMetaInfo info;
   ASSERT_TRUE(info.parse_from_json(json_str));
-  EXPECT_EQ(info.backend_type, "vllm");
+  EXPECT_EQ(info.provider_id, xllm::proto::PROVIDER_ID_VLLM_ASCEND);
+}
+
+TEST(InstanceMetaInfoTest, ParseRejectsConflictingProviderIdentity) {
+  const std::string json_str =
+      R"({"name":"i1","rpc_address":"addr","type":0,"backend_type":"vllm","provider_id":1})";
+
+  InstanceMetaInfo info;
+  EXPECT_FALSE(info.parse_from_json(json_str));
+}
+
+TEST(InstanceMetaInfoTest, ParseRejectsUnknownLegacyBackend) {
+  const std::string json_str =
+      R"({"name":"i1","rpc_address":"addr","type":0,"backend_type":"other"})";
+
+  InstanceMetaInfo info;
+  EXPECT_FALSE(info.parse_from_json(json_str));
+}
+
+TEST(InstanceMetaInfoTest, ProviderDescriptorRoundtripPreservesWire) {
+  InstanceMetaInfo src = make_full_instance();
+  src.provider_contract_version = 1;
+  src.provider_profile_digest = "profile-sha256";
+  xllm::proto::ProviderDescriptor descriptor;
+  descriptor.set_contract_version(src.provider_contract_version);
+  descriptor.mutable_identity()->set_provider_id(src.provider_id);
+  descriptor.mutable_identity()->set_incarnation_id(src.incarnation_id);
+  descriptor.set_profile_digest(src.provider_profile_digest);
+  src.provider_descriptor = descriptor;
+
+  InstanceMetaInfo dst;
+  ASSERT_TRUE(dst.parse_from_json(src.serialize_to_json().dump()));
+  ASSERT_TRUE(dst.provider_descriptor.has_value());
+  EXPECT_EQ(dst.provider_descriptor->SerializeAsString(),
+            descriptor.SerializeAsString());
+}
+
+TEST(InstanceMetaInfoTest, ParseRejectsPartialProviderContractIdentity) {
+  const std::string json_str =
+      R"({"name":"i1","rpc_address":"addr","type":0,"provider_id":2,"provider_contract_version":1,"provider_profile_digest":"p"})";
+
+  InstanceMetaInfo info;
+  EXPECT_FALSE(info.parse_from_json(json_str));
 }
 
 TEST(InstanceMetaInfoTest, ParseDefaultsKvSplitSizeWhenAbsent) {

@@ -14,6 +14,7 @@ cc_library(
     :chat_template
     :common
     :etcd_client
+    :provider_contract
     :request
     absl::random_random
     absl::strings
