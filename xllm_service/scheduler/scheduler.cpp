@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <unordered_set>
 
 #include "chat_template/deepseek_v4_cpp_chat_template.h"
 #include "chat_template/model_type.h"
@@ -32,6 +33,7 @@ limitations under the License.
 #include "loadbalance_policy/cache_aware_routing.h"
 #include "loadbalance_policy/round_robin.h"
 #include "loadbalance_policy/slo_aware_policy.h"
+#include "rpc_service/disagg_generation_adapter.h"
 #include "scheduler/xllm_chat_parse_bridge.h"
 #include "tokenizer/tokenizer_factory.h"
 
@@ -73,6 +75,14 @@ xllm::proto::ExecutionHolder decode_holder(
   return holder;
 }
 
+xllm::proto::ExecutionHolder prefill_holder(
+    const xllm_service::Request& request) {
+  xllm::proto::ExecutionHolder holder;
+  holder.set_engine_uid(request.routing.prefill_name);
+  holder.set_incarnation_id(request.prefill_incarnation_id);
+  return holder;
+}
+
 bool same_attempt_key(const xllm::proto::RequestAttemptKey& key,
                       const xllm::proto::ExecutionAttemptId& attempt,
                       const xllm::proto::ExecutionHolder& holder) {
@@ -89,6 +99,18 @@ bool terminal_attempt_state(xllm::proto::AttemptLifecycleState state) {
          state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_FAILED ||
          state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_CANCELLED_BEFORE_CREATE;
 }
+
+struct FirstEventQueryContext {
+  std::shared_ptr<xllm_service::Request> service_request;
+  xllm::proto::ExecutionAttemptId attempt;
+  xllm::proto::ExecutionHolder decode;
+  xllm::proto::ExecutionHolder prefill;
+  std::shared_ptr<brpc::Channel> channel;
+  xllm::proto::AttemptControlRequest rpc_request;
+  xllm::proto::AttemptControlResponse response;
+  brpc::Controller controller;
+  bool issued = false;
+};
 }  // namespace
 
 namespace xllm_service {
@@ -116,6 +138,10 @@ Scheduler::Scheduler(const Options& options)
   }
   if (options_.request_watchdog_interval_ms() <= 0 ||
       options_.output_gap_timeout_ms() <= 0 ||
+      options_.output_gap_query_timeout_ms() <= 0 ||
+      options_.output_gap_query_timeout_ms() >
+          options_.output_gap_timeout_ms() ||
+      options_.output_gap_query_batch_size() == 0 ||
       !first_event_retry_policy.has_value() ||
       !first_event_retry_policy->fits_within_gap_timeout_ms(
           static_cast<uint64_t>(options_.output_gap_timeout_ms())) ||
@@ -536,6 +562,7 @@ void Scheduler::fail_output_dispatch_locked(
   {
     std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
     output_gap_watchlist_.erase(request_uid);
+    failed_prefill_recovery_watchlist_.erase(request_uid);
   }
 
   size_t output_thread_index = 0;
@@ -639,6 +666,118 @@ bool Scheduler::call_attempt_control(
          terminal_attempt_state(response.status().state());
 }
 
+void Scheduler::recover_first_output_events(
+    const std::vector<std::shared_ptr<Request>>& requests,
+    bool fail_if_unavailable) {
+  std::vector<std::unique_ptr<FirstEventQueryContext>> contexts;
+  contexts.reserve(requests.size());
+  for (const std::shared_ptr<Request>& service_request : requests) {
+    {
+      std::lock_guard<std::mutex> output_guard(
+          service_request->output_dispatch_mutex);
+      if (service_request->output_dispatch_closed ||
+          service_request->output_event_sequencer == nullptr ||
+          service_request->output_event_sequencer->next_expected_seq() != 0) {
+        continue;
+      }
+      std::lock_guard<std::mutex> request_guard(request_mutex_);
+      const auto it =
+          requests_.find(service_request->correlation.request_uid());
+      if (it == requests_.end() || it->second != service_request) {
+        continue;
+      }
+    }
+    auto context = std::make_unique<FirstEventQueryContext>();
+    context->service_request = service_request;
+    context->attempt = execution_attempt(*service_request);
+    context->decode = decode_holder(*service_request);
+    context->prefill = prefill_holder(*service_request);
+    context->channel = instance_mgr_->get_channel(context->decode.engine_uid());
+    if (context->channel != nullptr) {
+      xllm::proto::RequestAttemptKey* key = context->rpc_request.mutable_key();
+      key->set_request_uid(context->attempt.request_uid());
+      if (context->attempt.has_attempt_seq()) {
+        key->set_attempt_seq(context->attempt.attempt_seq());
+      }
+      key->set_incarnation_id(context->decode.incarnation_id());
+
+      uint64_t timeout_ms =
+          static_cast<uint64_t>(options_.output_gap_query_timeout_ms());
+      if (service_request->request_deadline.has_value()) {
+        timeout_ms = std::min(
+            timeout_ms, service_request->request_deadline->remaining_ms());
+      }
+      if (timeout_ms > 0) {
+        context->controller.set_timeout_ms(static_cast<int32_t>(timeout_ms));
+        xllm::proto::DisaggPDService_Stub stub(context->channel.get());
+        stub.QueryRequest(&context->controller,
+                          &context->rpc_request,
+                          &context->response,
+                          brpc::DoNothing());
+        context->issued = true;
+      }
+    }
+    contexts.emplace_back(std::move(context));
+  }
+
+  for (const auto& context : contexts) {
+    if (context->issued) {
+      brpc::Join(context->controller.call_id());
+    }
+  }
+
+  for (const auto& context : contexts) {
+    bool recovered = false;
+    if (context->issued && !context->controller.Failed()) {
+      RequestOutputConversionResult conversion =
+          first_output_from_query_response(context->response,
+                                           context->attempt,
+                                           context->decode,
+                                           context->prefill,
+                                           options_.output_reorder_max_bytes());
+      if (conversion.status.ok() && conversion.output.has_value()) {
+        recovered = handle_generation(*conversion.output);
+      } else {
+        LOG(ERROR) << "Failed to validate recovered first event, request_uid="
+                   << context->attempt.request_uid()
+                   << ", error=" << conversion.status.message();
+      }
+    }
+    if (recovered) {
+      continue;
+    }
+
+    const std::shared_ptr<Request>& service_request = context->service_request;
+    std::lock_guard<std::mutex> output_guard(
+        service_request->output_dispatch_mutex);
+    const std::string request_uid = service_request->correlation.request_uid();
+    {
+      std::lock_guard<std::mutex> request_guard(request_mutex_);
+      const auto it = requests_.find(request_uid);
+      if (it == requests_.end() || it->second != service_request) {
+        continue;
+      }
+    }
+    if (service_request->output_event_sequencer == nullptr ||
+        service_request->output_event_sequencer->next_expected_seq() != 0) {
+      continue;
+    }
+    if (!fail_if_unavailable &&
+        !service_request->output_event_sequencer->gap_expired(
+            OutputEventSequencer::Clock::now(),
+            std::chrono::milliseconds(options_.output_gap_timeout_ms()))) {
+      continue;
+    }
+    fail_output_dispatch_locked(
+        service_request,
+        fail_if_unavailable ? llm::StatusCode::CANCELLED
+                            : llm::StatusCode::DEADLINE_EXCEEDED,
+        fail_if_unavailable
+            ? "Prefill process failed before seq=0 could be recovered"
+            : "Output seq=0 recovery failed after the local gap timeout");
+  }
+}
+
 void Scheduler::run_execution_hold_cleanup() {
   std::unique_lock<std::mutex> wait_lock(execution_hold_cleanup_wait_mutex_);
   while (!execution_hold_cleanup_stopped_) {
@@ -722,6 +861,25 @@ void Scheduler::run_request_watchdog() {
     }
     deadline_backlog = request_deadline_queue_->has_expired(now);
 
+    std::vector<std::shared_ptr<Request>> failed_prefill_requests;
+    std::unordered_set<std::string> failed_prefill_request_uids;
+    {
+      std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+      for (auto it = failed_prefill_recovery_watchlist_.begin();
+           it != failed_prefill_recovery_watchlist_.end() &&
+           failed_prefill_requests.size() <
+               options_.output_gap_query_batch_size();) {
+        std::shared_ptr<Request> request = it->second.lock();
+        if (request != nullptr) {
+          failed_prefill_request_uids.insert(it->first);
+          failed_prefill_requests.emplace_back(std::move(request));
+        }
+        it = failed_prefill_recovery_watchlist_.erase(it);
+      }
+    }
+    recover_first_output_events(failed_prefill_requests,
+                                /*fail_if_unavailable=*/true);
+
     std::vector<std::shared_ptr<Request>> gap_requests;
     {
       std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
@@ -738,6 +896,9 @@ void Scheduler::run_request_watchdog() {
       }
     }
 
+    std::vector<std::shared_ptr<Request>> first_event_recovery_requests;
+    first_event_recovery_requests.reserve(
+        options_.output_gap_query_batch_size());
     for (const std::shared_ptr<Request>& request : gap_requests) {
       std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
       if (request->output_event_sequencer == nullptr ||
@@ -748,6 +909,10 @@ void Scheduler::run_request_watchdog() {
       }
 
       const std::string request_uid = request->correlation.request_uid();
+      if (failed_prefill_request_uids.find(request_uid) !=
+          failed_prefill_request_uids.end()) {
+        continue;
+      }
       {
         std::lock_guard<std::mutex> request_guard(request_mutex_);
         const auto it = requests_.find(request_uid);
@@ -755,11 +920,21 @@ void Scheduler::run_request_watchdog() {
           continue;
         }
       }
+      if (request->output_event_sequencer->next_expected_seq() == 0) {
+        if (first_event_recovery_requests.size() <
+            options_.output_gap_query_batch_size() -
+                failed_prefill_requests.size()) {
+          first_event_recovery_requests.emplace_back(request);
+        }
+        continue;
+      }
       fail_output_dispatch_locked(
           request,
           llm::StatusCode::DEADLINE_EXCEEDED,
           "Output sequence gap exceeded the local timeout");
     }
+    recover_first_output_events(first_event_recovery_requests,
+                                /*fail_if_unavailable=*/false);
 
     wait_lock.lock();
   }
@@ -1060,6 +1235,7 @@ void Scheduler::finish_request(const std::string& service_request_id,
   {
     std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
     output_gap_watchlist_.erase(service_request_id);
+    failed_prefill_recovery_watchlist_.erase(service_request_id);
   }
   request_deadline_queue_->erase(service_request_id);
 
@@ -1074,6 +1250,7 @@ void Scheduler::clear_requests_on_failed_instance(
     const std::string& incarnation_id,
     InstanceType type) {
   std::vector<std::shared_ptr<Request>> cleared_requests;
+  std::vector<std::shared_ptr<Request>> first_event_recovery_requests;
   {
     std::lock_guard<std::mutex> cleanup_guard(execution_hold_cleanup_mutex_);
     xllm::proto::ExecutionHolder terminated_holder;
@@ -1089,12 +1266,20 @@ void Scheduler::clear_requests_on_failed_instance(
             ((type == InstanceType::DEFAULT || type == InstanceType::PREFILL) &&
              it->second->routing.prefill_name == instance_name &&
              it->second->prefill_incarnation_id == incarnation_id &&
-             !it->second->prefill_stage_finished);
+             !it->second->prefill_stage_finished.load(
+                 std::memory_order_acquire));
         const bool clear_decode =
             (type == InstanceType::DECODE &&
              it->second->routing.decode_name == instance_name &&
              it->second->decode_incarnation_id == incarnation_id);
-        if (clear_prefill || clear_decode) {
+        const bool recover_first_event =
+            clear_prefill && !clear_decode &&
+            !it->second->routing.decode_name.empty() &&
+            it->second->output_event_sequencer != nullptr;
+        if (recover_first_event) {
+          first_event_recovery_requests.emplace_back(it->second);
+          ++it;
+        } else if (clear_prefill || clear_decode) {
           cleared_requests.emplace_back(it->second);
           it = requests_.erase(it);
         } else {
@@ -1112,6 +1297,15 @@ void Scheduler::clear_requests_on_failed_instance(
             xllm::proto::HOLDER_CONVERGENCE_PROOF_PROCESS_TERMINATED);
       }
       cancel_or_detach_execution_hold_locked(request);
+    }
+  }
+
+  if (!first_event_recovery_requests.empty()) {
+    std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+    for (const std::shared_ptr<Request>& request :
+         first_event_recovery_requests) {
+      failed_prefill_recovery_watchlist_.insert_or_assign(
+          request->correlation.request_uid(), request);
     }
   }
 
@@ -1210,6 +1404,7 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
       request->output_event_sequencer->buffered_events() == 0) {
     std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
     output_gap_watchlist_.erase(service_request_id);
+    failed_prefill_recovery_watchlist_.erase(service_request_id);
   }
 
   for (const llm::RequestOutput& ready_output : sequence_result.ready_outputs) {
@@ -1296,7 +1491,7 @@ void Scheduler::update_request_metrics(std::shared_ptr<Request> request,
                                        bool finished_on_prefill_instance) {
   request->num_generated_tokens += 1;
   if (finished_on_prefill_instance) {
-    request->prefill_stage_finished = true;
+    request->prefill_stage_finished.store(true, std::memory_order_release);
     // update instance request metrics for prefill finished request
     instance_mgr_->update_request_metrics(request,
                                           RequestAction::FINISH_PREFILL);

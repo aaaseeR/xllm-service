@@ -104,6 +104,10 @@ class Options {
 
   PROPERTY(int32_t, output_gap_timeout_ms) = 1000;
 
+  PROPERTY(int32_t, output_gap_query_timeout_ms) = 100;
+
+  PROPERTY(size_t, output_gap_query_batch_size) = 8;
+
   PROPERTY(int32_t, p_first_event_retry_ub_ms) = 700;
 
   PROPERTY(int32_t, first_event_dispatch_margin_ms) = 200;

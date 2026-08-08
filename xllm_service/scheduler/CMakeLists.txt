@@ -58,6 +58,7 @@ cc_library(
     :usage_proto_adapter
     :chat_template
     :deepseek_v4_cpp_chat_template
+    :disagg_generation_adapter
     :model_type
     :common
     :etcd_client

@@ -29,13 +29,14 @@ limitations under the License.
 | --- | --- | --- | --- | --- |
 | xLLM Native | `REMOTE_PD` | P/D 输出序号和执行身份 | CPU_VERIFIED | P 从 0、D 从 1 单调生成；wire 字段号、presence、roundtrip 和角色序号测试通过；实际生产 TU 以 Clang C++20 `-Werror` 编译 |
 | xLLM Service + xLLM Native | `REMOTE_PD` | 当前 attempt/incarnation 输出接收 | PARTIAL | 已按 `(attempt_seq, sender_engine_uid, sender_incarnation_id)` fencing，并在 request→thread 投递前执行有界重排；尚缺 fake-brpc 跨线程 loopback 和 NPU 数据面验证 |
-| xLLM Service | `REMOTE_PD` | 缺口 watchdog 和失败收敛 | PARTIAL | 本地 steady clock、弱引用 watchlist、明确 `DEADLINE_EXCEEDED`、Cancel/hold detach 已接生产路径；尚未实现 seq=0 Query 恢复 |
+| xLLM Service | `REMOTE_PD` | 缺口 watchdog 和失败收敛 | PARTIAL | 本地 steady clock、弱引用 watchlist、seq=0 同 incarnation Query 精确恢复、明确 `DEADLINE_EXCEEDED`、Cancel/hold detach 已接生产路径；尚缺 fake-brpc 竞态和 Query 失败后的预算内重试 |
 | xLLM Service + xLLM Native | `REMOTE_PD` | 显式请求截止时间 | PARTIAL | Chat/Completion 显式携带 remaining duration 时，Service、P、D 均转换为本地 monotonic deadline；Service 有界 deadline 队列、P/D hop 重算、D reservation 截断和 Engine 调度边界停止已接生产路径并完成 CPU 编译/单测；尚缺 Gateway/profile 默认值和 loopback 故障矩阵 |
 | Legacy / 非远程 P-D | 既有输出路径 | 全部 | COMPATIBLE | 未安装 V2 sequencer 时维持原有单发送方亲和线程路径；新增 wire 字段为 additive |
 | `LOCAL_PREFILL_DECODE` / `PREFILL_ONLY` / vLLM `AGGREGATED` | V2 首发模式 | 全部 | NOT_IMPLEMENTED | 尚未接各 mode 的生产输出源和统一 deadline/watchdog；vLLM raw JSON relay 不转发 Native deadline 字段 |
 
 这里的 `CPU_VERIFIED` 只描述独立协议核心和生产编译。G2 仍缺统一默认 deadline、
-恢复策略和端到端故障矩阵，因此整体在这些生产闭环完成前保持 `PARTIAL`。
+Query 失败后的完整重试策略和端到端故障矩阵，因此整体在这些生产闭环完成前保持
+`PARTIAL`。
 
 ## 实现
 
@@ -63,6 +64,18 @@ limitations under the License.
   `requests_`。默认每 100 ms 检查一次，以本地 monotonic time 判定 1000 ms gap；
   超时后向仍连接客户端投递明确终态，关闭 sequencer，通过现有 hold 路径向绑定 holder
   Cancel，并从 request、watchlist 和输出线程映射清理。停机共享条件变量并 join。
+- seq=0 Query 恢复：P 在 `GenerationCommit` 前只生成一次客户端首事件，使用与实时
+  `Generations` 相同的权威 adapter 序列化；D 在 fingerprint、attempt、sender 和
+  seq=0 校验后最多保留 4 MiB 原始 payload，并通过 live/tombstone `QueryRequest`
+  返回。Service 只对 `next_expected_seq=0` 的到期 gap 发起同一 D incarnation Query，
+  默认并发批次 8、单 RPC 100 ms，并受整请求剩余 deadline 截断；响应必须处于
+  `GENERATION_COMMITTED/RUNNING/DONE` 且完全匹配 D key、P sender、attempt 和 seq=0。
+  校验成功后复用现有 sequencer 补洞并释放已缓存的 D 事件，不重新 tokenize、decode
+  或 replay parser；实时 P 发送与 Query 恢复竞争时由 seq duplicate 规则幂等收敛。
+  P 进程在 commit ACK 后、实时 seq=0 到达前退出时，Service 不再立即删除请求，而是
+  将它放入同一个弱引用、有界批次恢复队列；下一轮 watchdog 立即 Query 绑定 D，成功则
+  继续请求，无法证明 committed exact event 则明确 `CANCELLED`。Commit/Cancel/Begin
+  响应不回显最多 4 MiB payload，只有显式 Query 返回，避免正常路径双倍传输首事件。
 - 首事件 timer 关系：Service 以同一个权威策略对象生成 P retry budget 和 dispatch
   margin，默认分别为 700 ms 和 200 ms，并在启动时强制
   `retry_budget + dispatch_margin <= output_gap_timeout`。两个 duration 通过 additive
@@ -88,14 +101,16 @@ limitations under the License.
   不会覆盖先发生的 cancel；最终输出携带对应稳定状态。
 - 配置：`output_reorder_max_events=64`、`output_reorder_max_bytes=4 MiB`、
   `request_watchdog_interval_ms=100`、`output_gap_timeout_ms=1000`、
+  `output_gap_query_timeout_ms=100`、`output_gap_query_batch_size=8`、
   `p_first_event_retry_ub_ms=700`、`first_event_dispatch_margin_ms=200`；构造时拒绝
-  零容量、非正 timer、deadline 零容量/零批次、scan interval 大于 gap timeout，或
-  retry budget 与 margin 之和超过 gap timeout。
+  零容量、非正 timer、Query timeout 大于 gap timeout、deadline 零容量/零批次、
+  scan interval 大于 gap timeout，或 retry budget 与 margin 之和超过 gap timeout。
 - 明确不支持范围：当前只有请求显式携带 `remaining_deadline_ms` 才安装 deadline，
   Gateway、租户策略和 profile 尚未提供统一默认值；vLLM raw relay 和其余 V2 mode 尚未
-  接入；gap 到期尚未先 Query D 保存的 FirstGeneration 来恢复 seq=0；未知/已终止
-  输出只有既有 per-item `false`，尚无稳定 reason/metrics；配置尚未接 profile/CLI；
-  无 fake-brpc、sanitizer 全链、NPU、RDMA 或真实流式故障矩阵结论。
+  接入；seq=0 Query 不可用时尚未按 retry/device/deadline 预算 cancel 旧 D 并创建新
+  attempt；未知/已终止输出只有既有 per-item `false`，尚无稳定 reason/metrics；配置
+  尚未接 profile/CLI；无 fake-brpc、sanitizer 全链、NPU、RDMA 或真实流式故障矩阵
+  结论。
 
 ## 需求与测试追踪
 
@@ -111,8 +126,8 @@ limitations under the License.
 | G2 Service deadline 索引 | 顺序到期、7 条小批次、容量/重复/零配置/弱引用/主动删除/超大 batch 截断；8 线程并发写入 256 条无丢失；6 项重复 100 轮共 600 次 | N/A，纯控制路径 | N/A | PASS |
 | G2 P retry timer 关系 | fake monotonic policy、零值/溢出、等号边界和超界；Service 默认值/负值/错误序关系 fail-closed；xLLM 1 项重复 100 轮、Service 2 项重复 100 轮共 200 次；P Commit/Query/Cancel 生产对象以 C++20 `-Werror` 编译 | N/A，纯控制/RPC timeout | 待真实 RPC timeout 与迟到 ACK | PASS（CPU 核心）；loopback 待补 |
 | G2 Engine stop/资源边界 | Request parse/output、Service/P/D hop、D admission/reservation cap、六类调度路径共 10 个受影响生产 TU 以 Clang C++20 `-Werror` 编译 | 生产目标链接 Torch CPU；本批无 tensor 数值变化 | 待真实 KV/执行中 cancel | PASS（CPU 编译）；loopback 待补 |
-| 双仓回归 | xLLM 95/95；Service 181/181；Service 三个生产二进制 build/link verify | Torch CPU 依赖可加载；本批无 tensor 数值变化 | N/A | PASS |
-| G2 seq=0 Query 恢复 | 未实现 | N/A | 未实现 | OPEN |
+| 双仓回归 | xLLM 98/98；Service 183/183；Service 三个生产二进制 build/link verify | Torch CPU 依赖可加载；本批无 tensor 数值变化 | N/A | PASS |
+| G2 seq=0 Query 恢复 | xLLM 首事件 exact adapter、wire field 24、identity/seq/4 MiB 上限；Service UTF-8/token/logprob 精确恢复、state/D/P/attempt/seq/payload/index 拒绝；xLLM protocol 1 项、adapter 2 项和 Service 2 项各重复 100 轮；gap/reorder 3 项重复 100 轮；P/D/Service 生产对象严格编译 | xLLM adapter 目标链接 Torch CPU；本逻辑不执行 tensor 数值计算 | 待 fake-brpc P 退出、RPC timeout、D 重启和真实流 | PASS（CPU 核心与生产接线）；loopback 待补 |
 
 ## 完善情况
 
@@ -121,19 +136,21 @@ limitations under the License.
   affinity 有序失败、客户端断连抑制、execution hold Cancel/detach 收敛，以及显式 Native
   request deadline 的 Service/P/D duration 传播、有界 watchdog、Engine 本地停止和
   D reservation cap 接线；P retry budget、dispatch margin 与 Service gap timeout 的
-  不等式已由共享策略和生产启动校验强制执行。
-- 已知缺口/风险：当前 gap 超时是安全的明确失败，不是设计要求的优先 Query 恢复；
-  未携带显式 deadline 的请求仍可能无限等待；deadline 的生产并发路径主要由纯核心
-  测试和严格编译覆盖，仍需 fake provider loopback 验证 callback、instance failure、
-  watchdog、正常 terminal 和 KV 释放的竞态。
+  不等式已由共享策略和生产启动校验强制执行；seq=0 gap 已优先 Query D 保存的 exact
+  首事件并经同一 sequencer 恢复。
+- 已知缺口/风险：Query 无 payload、超时或 D 已终止时当前会明确失败，尚未实现设计
+  允许的预算内 cancel/retry 新 attempt；未携带显式 deadline 的请求仍可能无限等待；
+  deadline 与 Query 的生产并发路径主要由纯核心测试和严格编译覆盖，仍需 fake
+  provider loopback 验证 callback、P 退出、instance failure、watchdog、正常 terminal
+  和 KV 释放的竞态。
 - 回滚与兼容：字段全部 additive；未安装 sequencer 的 legacy/非 REMOTE_PD 请求继续
   使用原路径。Native REMOTE_PD 已安装 sequencer 后严格要求 sequence 和 identity，
   因此双仓必须同步发布或由 capability/version 门禁阻止新旧混跑。
 - 性能、容量和观测证据：单请求缓存有 event/byte/distance 三重上限，watchdog 只扫描
   活跃 gap 或到期 deadline；deadline 索引有 65,536 record 和 1,024/轮双上限；尚无
   1 万并发请求的扫描开销、buffer/deadline 水位、gap reason 和迟到事件指标。
-- 达到 CPU_VERIFIED 仍需完成：fake-brpc 双发送方/断连/实例失效竞态，seq=0 Query
-  恢复，Gateway/profile 默认 deadline，vLLM/其余 mode 接入，稳定 per-item
-  reason/metrics 及配置化。
+- 达到 CPU_VERIFIED 仍需完成：fake-brpc 双发送方/断连/实例失效/Query timeout 竞态，
+  Query 不可恢复时的预算内 cancel/retry，Gateway/profile 默认 deadline，vLLM/其余
+  mode 接入，稳定 per-item reason/metrics 及配置化。
 - 达到 VERIFIED 仍需完成：NPU P→D 流式乱序、Cancel 丢失、Engine 重启/incarnation
   变化、deadline 资源释放和 1 万次故障门禁。

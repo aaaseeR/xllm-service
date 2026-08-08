@@ -115,6 +115,9 @@ class Scheduler final {
                             const xllm::proto::ExecutionHolder& holder,
                             bool query,
                             int32_t timeout_ms);
+  void recover_first_output_events(
+      const std::vector<std::shared_ptr<Request>>& requests,
+      bool fail_if_unavailable);
   void run_execution_hold_cleanup();
   void run_request_watchdog();
 
@@ -140,6 +143,8 @@ class Scheduler final {
 
   std::mutex output_gap_watch_mutex_;
   std::unordered_map<std::string, std::weak_ptr<Request>> output_gap_watchlist_;
+  std::unordered_map<std::string, std::weak_ptr<Request>>
+      failed_prefill_recovery_watchlist_;
 
   bool exited_ = false;
 

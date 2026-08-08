@@ -221,5 +221,129 @@ TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   EXPECT_FALSE(converted_logprob.top_logprobs->front().finished_token);
 }
 
+TEST(DisaggGenerationAdapterTest, RecoversExactFirstOutputFromQuery) {
+  const std::string request_uid = "01234567-89ab-7cde-bf01-23456789abcd";
+  proto::DisaggStreamGeneration generation =
+      make_generation(/*num_prompt_tokens=*/8,
+                      /*num_generated_tokens=*/1,
+                      /*num_total_tokens=*/9,
+                      /*num_cache_hit_tokens=*/6);
+  generation.set_service_req_id(request_uid);
+  generation.set_output_event_seq(0);
+  generation.set_attempt_seq(7);
+  generation.set_sender_engine_uid("prefill-1");
+  generation.set_sender_incarnation_id("prefill-incarnation-1");
+  generation.set_finished_on_prefill_instance(true);
+  proto::SequenceOutput* sequence = generation.add_outputs();
+  sequence->set_index(0);
+  sequence->set_text("精确首事件");
+  sequence->add_token_ids(101);
+
+  xllm::proto::AttemptControlResponse response;
+  response.set_ok(true);
+  response.mutable_status()->mutable_key()->set_request_uid(request_uid);
+  response.mutable_status()->mutable_key()->set_attempt_seq(7);
+  response.mutable_status()->mutable_key()->set_incarnation_id(
+      "decode-incarnation-1");
+  response.mutable_status()->set_state(
+      xllm::proto::ATTEMPT_LIFECYCLE_STATE_RUNNING);
+  ASSERT_TRUE(generation.SerializeToString(
+      response.mutable_status()->mutable_first_event_payload()));
+
+  xllm::proto::ExecutionAttemptId attempt;
+  attempt.set_request_uid(request_uid);
+  attempt.set_attempt_seq(7);
+  xllm::proto::ExecutionHolder decode;
+  decode.set_engine_uid("decode-1");
+  decode.set_incarnation_id("decode-incarnation-1");
+  xllm::proto::ExecutionHolder prefill;
+  prefill.set_engine_uid("prefill-1");
+  prefill.set_incarnation_id("prefill-incarnation-1");
+
+  RequestOutputConversionResult result = first_output_from_query_response(
+      response, attempt, decode, prefill, 4 * 1024 * 1024);
+  ASSERT_TRUE(result.status.ok()) << result.status.message();
+  ASSERT_TRUE(result.output.has_value());
+  ASSERT_EQ(result.output->outputs.size(), 1u);
+  EXPECT_EQ(result.output->outputs.front().text, "精确首事件");
+  EXPECT_EQ(result.output->outputs.front().token_ids,
+            (std::vector<int32_t>{101}));
+  EXPECT_EQ(result.output->output_event_seq, 0);
+}
+
+TEST(DisaggGenerationAdapterTest, RejectsMismatchedRecoveredFirstOutput) {
+  const std::string request_uid = "01234567-89ab-7cde-bf01-23456789abcd";
+  proto::DisaggStreamGeneration generation;
+  generation.set_service_req_id(request_uid);
+  generation.set_output_event_seq(1);
+  generation.set_attempt_seq(7);
+  generation.set_sender_engine_uid("prefill-1");
+  generation.set_sender_incarnation_id("prefill-incarnation-1");
+  generation.set_finished_on_prefill_instance(true);
+  generation.add_outputs()->set_text("wrong-sequence");
+
+  xllm::proto::AttemptControlResponse response;
+  response.set_ok(true);
+  response.mutable_status()->mutable_key()->set_request_uid(request_uid);
+  response.mutable_status()->mutable_key()->set_attempt_seq(7);
+  response.mutable_status()->mutable_key()->set_incarnation_id(
+      "decode-incarnation-1");
+  response.mutable_status()->set_state(
+      xllm::proto::ATTEMPT_LIFECYCLE_STATE_RUNNING);
+  ASSERT_TRUE(generation.SerializeToString(
+      response.mutable_status()->mutable_first_event_payload()));
+
+  xllm::proto::ExecutionAttemptId attempt;
+  attempt.set_request_uid(request_uid);
+  attempt.set_attempt_seq(7);
+  xllm::proto::ExecutionHolder decode;
+  decode.set_engine_uid("decode-1");
+  decode.set_incarnation_id("decode-incarnation-1");
+  xllm::proto::ExecutionHolder prefill;
+  prefill.set_engine_uid("prefill-1");
+  prefill.set_incarnation_id("prefill-incarnation-1");
+
+  EXPECT_FALSE(first_output_from_query_response(
+                   response, attempt, decode, prefill, 4 * 1024 * 1024)
+                   .status.ok());
+  generation.set_output_event_seq(0);
+  generation.set_sender_incarnation_id("stale-prefill");
+  ASSERT_TRUE(generation.SerializeToString(
+      response.mutable_status()->mutable_first_event_payload()));
+  EXPECT_FALSE(first_output_from_query_response(
+                   response, attempt, decode, prefill, 4 * 1024 * 1024)
+                   .status.ok());
+  response.mutable_status()->mutable_key()->set_incarnation_id("stale-decode");
+  EXPECT_FALSE(first_output_from_query_response(
+                   response, attempt, decode, prefill, 4 * 1024 * 1024)
+                   .status.ok());
+  generation.set_sender_incarnation_id("prefill-incarnation-1");
+  ASSERT_TRUE(generation.SerializeToString(
+      response.mutable_status()->mutable_first_event_payload()));
+  response.mutable_status()->mutable_key()->set_incarnation_id(
+      "decode-incarnation-1");
+  response.mutable_status()->set_state(
+      xllm::proto::ATTEMPT_LIFECYCLE_STATE_RESERVED);
+  EXPECT_FALSE(first_output_from_query_response(
+                   response, attempt, decode, prefill, 4 * 1024 * 1024)
+                   .status.ok());
+  response.mutable_status()->set_state(
+      xllm::proto::ATTEMPT_LIFECYCLE_STATE_RUNNING);
+  ASSERT_GT(response.status().first_event_payload().size(), 1u);
+  EXPECT_FALSE(first_output_from_query_response(
+                   response,
+                   attempt,
+                   decode,
+                   prefill,
+                   response.status().first_event_payload().size() - 1)
+                   .status.ok());
+  generation.mutable_outputs(0)->set_index(-1);
+  ASSERT_TRUE(generation.SerializeToString(
+      response.mutable_status()->mutable_first_event_payload()));
+  EXPECT_FALSE(first_output_from_query_response(
+                   response, attempt, decode, prefill, 4 * 1024 * 1024)
+                   .status.ok());
+}
+
 }  // namespace
 }  // namespace xllm_service

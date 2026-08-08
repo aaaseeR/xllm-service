@@ -38,6 +38,10 @@ TEST(RequestTimingPolicyTest, DefaultsFitWithinOutputGapTimeout) {
   ASSERT_TRUE(policy.has_value());
   EXPECT_TRUE(policy->fits_within_gap_timeout_ms(
       static_cast<uint64_t>(options.output_gap_timeout_ms())));
+  EXPECT_GT(options.output_gap_query_timeout_ms(), 0);
+  EXPECT_LE(options.output_gap_query_timeout_ms(),
+            options.output_gap_timeout_ms());
+  EXPECT_GT(options.output_gap_query_batch_size(), 0u);
 }
 
 TEST(RequestTimingPolicyTest, InvalidAndMisorderedOptionsFailClosed) {

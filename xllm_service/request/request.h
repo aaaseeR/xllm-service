@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <absl/time/time.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -94,7 +95,7 @@ struct Request {
   bool output_dispatch_closed = false;
 
   // prefill stage finished
-  bool prefill_stage_finished = false;
+  std::atomic<bool> prefill_stage_finished{false};
 
   // the number of generated tokens
   int64_t num_generated_tokens = 0;

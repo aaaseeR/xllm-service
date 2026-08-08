@@ -15,10 +15,13 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
 #include <optional>
 
 #include "common/xllm/output.h"
 #include "common/xllm/status.h"
+#include "disagg_pd.pb.h"
+#include "provider.pb.h"
 #include "xllm_rpc_service.pb.h"
 
 namespace xllm_service {
@@ -30,5 +33,14 @@ struct RequestOutputConversionResult {
 
 RequestOutputConversionResult request_output_from_disagg_generation(
     const proto::DisaggStreamGeneration& generation);
+
+// Validates a D Query response and reconstructs the exact P-side seq=0 event
+// retained at GenerationCommit. No token decoding or parser replay occurs.
+RequestOutputConversionResult first_output_from_query_response(
+    const xllm::proto::AttemptControlResponse& response,
+    const xllm::proto::ExecutionAttemptId& expected_attempt,
+    const xllm::proto::ExecutionHolder& expected_decode,
+    const xllm::proto::ExecutionHolder& expected_prefill,
+    size_t max_payload_bytes);
 
 }  // namespace xllm_service

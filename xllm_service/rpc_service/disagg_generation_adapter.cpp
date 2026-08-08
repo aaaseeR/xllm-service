@@ -47,6 +47,12 @@ RequestOutputConversionResult validate_usage(const proto::OutputUsage& usage) {
   return {};
 }
 
+bool recoverable_first_event_state(xllm::proto::AttemptLifecycleState state) {
+  return state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_GENERATION_COMMITTED ||
+         state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_RUNNING ||
+         state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_DONE;
+}
+
 }  // namespace
 
 RequestOutputConversionResult request_output_from_disagg_generation(
@@ -130,6 +136,54 @@ RequestOutputConversionResult request_output_from_disagg_generation(
     request_output.outputs.emplace_back(std::move(sequence_output));
   }
   return {llm::Status(), std::move(request_output)};
+}
+
+RequestOutputConversionResult first_output_from_query_response(
+    const xllm::proto::AttemptControlResponse& response,
+    const xllm::proto::ExecutionAttemptId& expected_attempt,
+    const xllm::proto::ExecutionHolder& expected_decode,
+    const xllm::proto::ExecutionHolder& expected_prefill,
+    size_t max_payload_bytes) {
+  if (!response.ok() || !response.has_status() ||
+      expected_attempt.request_uid().empty() ||
+      !expected_attempt.has_attempt_seq() ||
+      expected_decode.engine_uid().empty() ||
+      expected_decode.incarnation_id().empty() ||
+      expected_prefill.engine_uid().empty() ||
+      expected_prefill.incarnation_id().empty() || max_payload_bytes == 0) {
+    return invalid_usage("query response does not match the execution hold");
+  }
+  const xllm::proto::AttemptStatus& status = response.status();
+  const xllm::proto::RequestAttemptKey& key = status.key();
+  if (!recoverable_first_event_state(status.state()) ||
+      key.request_uid() != expected_attempt.request_uid() ||
+      !key.has_attempt_seq() ||
+      key.attempt_seq() != expected_attempt.attempt_seq() ||
+      key.incarnation_id() != expected_decode.incarnation_id()) {
+    return invalid_usage("query response does not match the execution hold");
+  }
+
+  proto::DisaggStreamGeneration generation;
+  if (status.first_event_payload().empty() ||
+      status.first_event_payload().size() > max_payload_bytes ||
+      !generation.ParseFromString(status.first_event_payload()) ||
+      generation.req_id().empty() ||
+      generation.service_req_id() != expected_attempt.request_uid() ||
+      !generation.has_output_event_seq() ||
+      generation.output_event_seq() != 0 || !generation.has_attempt_seq() ||
+      generation.attempt_seq() != expected_attempt.attempt_seq() ||
+      generation.sender_engine_uid() != expected_prefill.engine_uid() ||
+      generation.sender_incarnation_id() != expected_prefill.incarnation_id() ||
+      !generation.finished_on_prefill_instance() ||
+      generation.outputs().empty()) {
+    return invalid_usage("query response has no valid canonical seq=0 event");
+  }
+  for (const proto::SequenceOutput& output : generation.outputs()) {
+    if (output.index() < 0) {
+      return invalid_usage("query response has an invalid output index");
+    }
+  }
+  return request_output_from_disagg_generation(generation);
 }
 
 }  // namespace xllm_service
