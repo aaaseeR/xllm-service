@@ -1,14 +1,18 @@
-# xLLM Service V1 实现规格
+# xLLM Service V2 基础协议规格（原 V1 能力集）
 
-## 1. V1 定义
+> 版本口径：首个产品版本直接交付 V2，不存在独立 V1 版本。本文为保持既有
+> 评审编号可追溯而保留的 “V1” 表述，全部解释为 V2 内部基础门 `V2-B0`；
+> 它们必须与 08/09/11 的 V2 能力一起交付，不能单独上线或宣称完成。
+
+## 1. V2 基础能力定义
 
 **当前基线：** `Scheduler + InstanceMgr + LoadBalancePolicy` 已能从全量 Registry 为 xLLM 请求选出一个 P/D，但使用 3 秒 etcd 负载快照并在请求到达时锁定 D；旧 RR 可绕过状态新鲜度，Engine reservation 缺少完整 TTL、幂等和回收闭环。vLLM 由 sidecar 注册并经独立 HTTP relay 执行，当前依赖全局 `backend_type` 分支，尚未提供完整 Provider、能力、状态与 fencing 语义。
 
-**V1 结果：** 保留上述代码结构和成熟数据通路，增加公共 Engine Provider SPI，将后端分支迁入 `XllmNativeAdapter` 与 `VllmAscendAdapter/Agent`。多个无持久请求状态的 Service 副本共享实时 Engine 视图并生成 `ExecutionPlan`：xLLM Native 为“选定 P + 有序 D candidates”，vLLM-Ascend 首先为单个聚合 Engine。各 Provider 以本地原子操作决定最终准入。V1 必须通过 Provider 对应的正确性、性能、容量和故障门禁后才能成为生产默认。
+**V2-B0 结果：** 保留上述代码结构和成熟数据通路，增加公共 Engine Provider SPI，将后端分支迁入 `XllmNativeAdapter` 与 `VllmAscendAdapter/Agent`。多个无持久请求状态的 Service 副本共享实时 Engine 视图并生成 `ExecutionPlan`：xLLM Native 为“选定 P + 有序 D candidates”，vLLM-Ascend 首先为单个聚合 Engine。各 Provider 以本地原子操作决定最终准入。V2-B0 必须通过 Provider 对应的正确性、性能、容量和故障门禁，但通过该门不等于 V2 已交付。
 
-V1 范围为单 domain、单 `model_revision`，首批支持 `XLLM_NATIVE` 和 `VLLM_ASCEND`。xLLM P 池内实例使用同一种已验证 P profile，D 池内实例使用同一种已验证 D profile；P/D profile 可以采用不同 TP/DP 或设备数，但组合必须满足 KV layout、分片和传输兼容矩阵。vLLM-Ascend 先以经过 Provider Agent 门禁的 `AGGREGATED` profile 接入；其远程 P/D 不是首个上线范围。每个 Service 仍在内存中保存自己正在处理的 `RequestContext`，Provider Engine/Agent 执行本地硬准入和资源回收。
+V2-B0 范围为单 domain、单 `model_revision`，首批支持 `XLLM_NATIVE` 和 `VLLM_ASCEND`。xLLM P 池内实例使用同一种已验证 P profile，D 池内实例使用同一种已验证 D profile；P/D profile 可以采用不同 TP/DP 或设备数，但组合必须满足 KV layout、分片和传输兼容矩阵。vLLM-Ascend 先以经过 Provider Agent 门禁的 `AGGREGATED` profile 接入；其远程 P/D 不是 V2 首发范围。每个 Service 仍在内存中保存自己正在处理的 `RequestContext`，Provider Engine/Agent 执行本地硬准入和资源回收。
 
-V1 交付：
+V2-B0 基础门：
 
 - 内置 State Stream 取代 3 秒 etcd 负载快照，所有策略共用 `IsSchedulable`；
 - 公共 Provider Descriptor、Capability、RequestCodec、EngineState 和 ExecutionPlan；
@@ -21,9 +25,9 @@ V1 交付：
 - 客户端携带完整历史的多轮请求，每轮独立完整 Prefill；
 - M0/M1/M2 三步选择算法按 workload bucket 灰度。
 
-V1 不包含请求级持久状态、跨 Service 接管、结果 replay、策略感知 Service 侧队列、动态多模型、精确全局 KV 索引、跨 domain、Decode 状态迁移和 Store KV。V1 过载时按 STRICT/BEST_EFFORT 契约稳定拒绝；V2 再引入有界 flow control，不得把它作为 V1-M2 的隐含能力。
+V2-B0 本身不包含请求级持久状态、跨 Service 接管、结果 replay、策略感知 Service 侧队列、动态多模型、精确全局 KV 索引、跨 domain、Decode 状态迁移和 Store KV。V2-B0 的过载语义按 STRICT/BEST_EFFORT 契约稳定拒绝；完整 V2 必须继续按 08/09 加入有界 flow control、多模型和精确 HBM KVIndex，不能在该基础门停止开发。
 
-V1 首次上线不把所有请求直接切到新 Provider 动态池。请求只有同时满足以下条件，才进入对应执行模式：
+V2 首发不把所有请求直接切到新 Provider 动态池。请求只有同时满足以下条件，才进入对应执行模式：
 
 1. Provider Descriptor 完整，`provider_id + profile_digest + incarnation_id` 有效，目标 mode 的 capability 与 conformance test 均通过。
 2. 只生成一条候选结果，即 `n == 1 && best_of == 1`。
@@ -32,7 +36,7 @@ V1 首次上线不把所有请求直接切到新 Provider 动态池。请求只�
 5. 首次生产远程 P/D 只开放 xLLM Native 可靠逐层 PUSH。vLLM-Ascend PULL/layerwise PUSH 只有在 Adapter 补齐硬准入、attempt、deadline、取消和 GenerationCommit 并通过专用门禁后才可加入。
 6. vLLM-Ascend `AGGREGATED` 必须经 Provider Agent 入口，具备可靠健康、带标签状态、deadline、cancel 和 ingress fencing；旧 sidecar/raw relay 只进入显式 BEST_EFFORT 兼容 bucket。
 
-满足以上条件并通过上线门禁的生产 bucket 默认进入 Provider 动态池。不满足条件的请求继续使用现有单对或 relay 兼容路径，避免上线删掉已有功能；兼容路径不是 V1 的主调度方案，也不能绕过 Registry identity、稳定错误、Service readiness 和本地资源保护。跨 Provider P/D 默认禁止。
+满足以上条件并通过上线门禁的生产 bucket 默认进入 Provider 动态池。不满足条件的请求继续使用现有单对或 relay 兼容路径，避免上线删掉已有功能；兼容路径不是 V2 的主调度方案，也不能绕过 Registry identity、稳定错误、Service readiness 和本地资源保护。跨 Provider P/D 默认禁止。
 
 ## 2. 组件与状态边界
 
@@ -92,7 +96,7 @@ V1 不提供跨 Service 的请求去重或 exactly-once 生成。`request_id` �
 3. P submission、D reservation 和 output subscriber 都有本地时限，超时必回收；V2 local submission 同样受 request deadline、queue TTL 和 tombstone 约束。
 4. 传输终态未证明前，源/目标内存不得重新分配。
 5. Provider/profile 未通过显式模式兼容矩阵时 fail closed。P/D 模式按 `P/D provider + profile + model_revision + kv_layout_digest + connector/version + transfer_mode + topology_transform` 验证；不要求两端 `profile_digest` 相等，但跨 Provider P/D 默认禁止。
-6. 任何执行模式只能在自身的 `GenerationCommit` 屏障成立后向 Service 交付 `output_event_seq=0`：`AGGREGATED` 以 Provider 原子接受完整请求并建立唯一输出 attempt 为准；`REMOTE_PD` 以 P 获得 D `FirstGeneration` ACK（D 已进入 `DECODING/DONE`）为准；V2 `LOCAL_PREFILL_DECODE` 以 D 原子授予完整 mixed Prefill+Decode 资源并安装幂等 local submission 为准；`PREFILL_ONLY` 以 P 原子准入已确认无后续 D 的完整执行为准。本条不把 V2 模式加入 V1 交付范围，只固定跨阶段首 token 不变量；`first_token_emitted=true` 后当前 attempt 不再自动替换。
+6. 任何执行模式只能在自身的 `GenerationCommit` 屏障成立后向 Service 交付 `output_event_seq=0`：`AGGREGATED` 以 Provider 原子接受完整请求并建立唯一输出 attempt 为准；`REMOTE_PD` 以 P 获得 D `FirstGeneration` ACK（D 已进入 `DECODING/DONE`）为准；V2 `LOCAL_PREFILL_DECODE` 以 D 原子授予完整 mixed Prefill+Decode 资源并安装幂等 local submission 为准；`PREFILL_ONLY` 以 P 原子准入已确认无后续 D 的完整执行为准。后两种模式不属于 V2-B0 内部门，但属于 V2 首发范围；`first_token_emitted=true` 后当前 attempt 不再自动替换。
 7. Service 只向客户端交付当前 attempt 连续的 `output_event_seq`，跨 P/D 乱序不得造成 token 缺失或重复。
 8. 同一 `request_uid` 同时最多存在一个 outcome 不明的 **执行资源持有**：`REMOTE_D_RESERVATION`、`LOCAL_DECODE_SUBMISSION` 和 `AGGREGATED_EXECUTION` 都计入，普通 P submission 不计入。`max_unresolved_execution_holds_per_request=1` 是固定协议常量；它防止重试在多个执行单元并发占用 KV/credit/slot 或完整生成容量，不声称任意时刻最多只有一个进程在计算。已证明进入 `GenerationCommit/DECODING` 的旧 attempt 在 cancel 传播期间可与新 attempt 短暂重叠，但必须先发 cancel，Service 丢弃旧输出，且重叠计入 retry/device-time 浪费预算。远程 hold 的安全作用域是 plan 的有界 D 候选集，聚合 hold 的作用域是已提交 Agent/Engine；Query 的 `ABSENT` 只是观测，只有 terminal outcome、已安装的 cancel fence、self-fencing/进程终止，或全部硬 duration 上界成立才能解除。普通 P submission 仍不计入该常量。
 9. Provider 动态池、RR/CAR/SLO-aware 和兼容 fallback 共用同一 `IsSchedulable`。正常观测下必须检查 Descriptor、目标 mode capability、Registry lease、READY lifecycle、Engine/Agent heartbeat hard TTL 和 state hard TTL；观测失明时只能按第 8.1 节使用缓存状态或近期直接成功证据，任何路径都不能绕过 Registry 身份、本地硬准入或 Service readiness。
@@ -128,7 +132,7 @@ XllmRemotePdPayload = {
 
 该接口是现有 `LoadBalancePolicy::select_instances_pair` 的演进，不是新建并行调度器。灰度期保留 RR/CAR/SLO-aware 和 raw relay 作为兼容策略；动态策略统一返回 `ExecutionPlan`，按 Provider/mode/profile/workload bucket 切流。收益对照使用各 Provider 当前生产基线，不能把两套 Runtime 的 trace 混成一个基线。
 
-### 4.2 V1 三步迭代
+### 4.2 V2-B0 三步迭代
 
 | 版本 | 算法 | 上线条件 |
 | --- | --- | --- |
@@ -633,7 +637,7 @@ V2 的 Service 队列和 saturation detector 不改变上述观测模式。队�
 
 G0 记录现网 etcd 状态年龄和冲突率；G3/G4 测量 State Stream p99 延迟、带宽、有界队列、FULL 恢复时间、直接探测覆盖率和 readiness 收敛时间。Service 副本之间不交换请求状态，也不执行请求级 peer RPC。
 
-### 8.2 初始容量与 V1 人工扩缩容
+### 8.2 初始容量与 V2 首发人工扩缩容
 
 冷启动由 `CapacityProfile + BootstrapEnvelope` 驱动：
 
@@ -924,6 +928,6 @@ E_reassign + E_credit + E_service_crash
 3. 指标适配保留 vLLM 的 model/engine/DP label，至少接入 running、waiting-by-reason、KV usage、queue、TTFT、ITL/TPOT、E2E、preemption 和 prefix cache；按 §8.1 的资源语义聚合。
 4. 健康由 API EngineDead 状态、进程状态和 NPU 深层检查共同构成；当前 worker `check_health()` 会吞掉 `npu-smi` 非 OK 异常并无条件返回，无法发布 `DEEP_HEALTH=true`。Agent 必须独立执行并验证 `npu-smi`，或等待上游接口修复。
 5. Agent 代理 OpenAI/SSE，维护有界 request_uid/attempt 映射；客户端断连、Cancel、deadline 或 ownership fencing 时中断上游并验证 vLLM request 已 abort。错误映射和迟到 SSE 由 attempt/incarnation fencing 过滤。
-6. 首个版本只发布 `AGGREGATED`。PULL/layerwise PUSH 后续复用 vLLM-Ascend 现有 Proxy/`kv_transfer_params`/Connector，但必须先增加与公共 reservation、QueryAttempt、GenerationCommit 和 LinkState 的等价映射及测试。
+6. vLLM-Ascend 在 V2 首发中只发布 `AGGREGATED`。PULL/layerwise PUSH 后续复用 vLLM-Ascend 现有 Proxy/`kv_transfer_params`/Connector，但必须先增加与公共 reservation、QueryAttempt、GenerationCommit 和 LinkState 的等价映射及测试。
 7. Provider 版本元组至少包含 vLLM、vLLM-Ascend、torch/torch-npu、CANN/driver、SOC 和 scheduler/Connector 配置；任一兼容性字段变化创建新 profile/incarnation 并重新校准 CapacityProfile。
 8. Agent 与受控 vLLM 必须处于同一失效域，并隔离原始 API 端口；`agent_fate_bound` 必须早于 Service 可创建替代 attempt 的最早时刻。只杀 Agent 的负向测试不通过时不得发布 `SELF_FENCING`。

@@ -1,6 +1,6 @@
 # xLLM Service 设计决策记录
 
-实现要求以[总体架构](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md)和[V1 实现规格](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md)为准。
+开发与版本要求以[V2 代码开发与交付规范](./00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md)为准，系统边界以[总体架构](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md)为准；02 是 V2 基础协议，08/09/11 分别补齐 V2 路由、流控/执行模式和多 Provider 门禁。
 
 ## D1：按请求调度、执行拓扑和 KV 内存层三轴演进
 
@@ -215,3 +215,11 @@ Compatibility Resolver 固定检查 `required_capabilities(mode) ⊆ published_c
 ## D53：成员资格丧失后立即停止新计划
 
 只有带 revision 的权威 Registry DELETE/revoke 或 incarnation 变化能把实例置为 `MEMBERSHIP_LOST`；下一次选择立即排除，宽限仅收敛在飞请求。heartbeat、地址探活和 watch 恢复不是成员证明，不能恢复旧 incarnation；重新加入必须使用新 incarnation。watch 断连、list 歧义或探活失败走 `REGISTRY_BLIND`/状态降级，不能伪造成 DELETE。该决策与 D40 的 Engine self-fencing 配对，任一端缺失都不能形成 fencing 闭环。
+
+## D54：首个产品版本直接交付 V2
+
+不设置独立 V1 产品版本、发布包或先行上线里程碑。原 02 和既有决策中称为 V1 的 Provider SPI、State Stream、原子准入、attempt、deadline、fencing、资源回收和观测闭环全部重分类为 V2-B0 内部基础门；首发必须继续完成 08 的 V2 精确 HBM KV-aware、09 的有界流控/公平性/逐请求执行模式和 11 的多 Provider 门禁。只通过 V2-B0 不构成交付。该决策覆盖 D1、D13、D21 等条目中的旧版本/上线口径，但不改变其协议机制和正确性约束；V2.5 Store、V3 Placement 及后续阶段范围不变。
+
+## D55：V2 实现采用 xLLM 风格和 CPU-first 完成度门禁
+
+`xllm` 与 `xllm-service` 统一遵循 xLLM 项目级 custom code style 和 `.clang-format`，不维护第二套风格。除硬件专属 kernel、CANN/驱动和设备 DMA 外，全部可移植逻辑必须由 CPU 与 Torch CPU 测试覆盖；每个需求、状态迁移和支持矩阵项都要映射到可复现测试。每项功能随代码维护开发状态文档，准确列出支持范围、缺口、CPU/NPU 状态和验证证据。结构上禁止复制状态机、协议、资源账本和新旧双路径；未满足代码、测试、文档任一门禁的功能不得标记完成。完整规则见 00。

@@ -2,10 +2,14 @@
 
 ## 1. 文档定位
 
-- 状态：V1 多引擎接入与能力门禁基线
+- 状态：V2 首发的多引擎接入与能力门禁基线
 - 日期：2026-08-07
 - 代码基线：xllm-service `322bcda03793`、xLLM `8164a701bab7`、vLLM-Ascend `ba58907c6d1c`
 - 首批 Provider：xLLM Native、vLLM-Ascend
+- 开发与交付门禁：[V2 代码开发与交付规范](./00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md)
+
+本文原有 V1 表述统一解释为 V2-B0 基础能力，不对应独立 V1 产品版本；
+Provider 基础门必须与 08/09 的 V2 路由、流控和执行模式一起交付。
 
 本文解决一个具体问题：同一个 xLLM Service 如何同时纳管不同 Runtime，而不把两套内部协议强行做成一套，也不因能力差异破坏准入、SLO 和故障语义。
 
@@ -22,7 +26,7 @@
 | 注册与状态 | Engine 原生注册、heartbeat、xllm-service Registry | 当前 Python sidecar 注册，抓取 `/health`、`/metrics` |
 | P/D 方式 | 原生 P→D 逐层 PUSH 与 link RPC | 外部 Proxy 编排；PULL 或 layerwise PUSH，通过 `kv_transfer_params` 交接 |
 | KV Connector | xLLM 自有传输协议 | Mooncake、AscendStore、UCM、LMCache、CPU offload 等 vLLM Connector |
-| 原子 reservation | 当前协议需按 V1 补齐 | vLLM 内部会分配 KV，但没有对 xLLM Service 暴露等价的硬 reservation/query/fence 协议 |
+| 原子 reservation | 当前协议需按 V2-B0 补齐 | vLLM 内部会分配 KV，但没有对 xLLM Service 暴露等价的硬 reservation/query/fence 协议 |
 | 公共可观测性 | heartbeat 与自有事件，需补齐阶段事件 | vLLM 指标已有 running/waiting、KV、TTFT、ITL/TPOT、queue 等；当前 sidecar 只消费少量聚合值 |
 | 健康语义 | 需实现 incarnation 与 self-fencing | `/health` 可发现 EngineDeadError；Ascend worker 的 `check_health()` 会吞掉 `npu-smi` 非 OK 异常并无条件返回，不能向调用方提供深层健康失败信号 |
 
@@ -183,13 +187,13 @@ ExecutionPlan = {
 
 绑定顺序由 `(provider_id, mode, transfer_mode)` 决定，而不是由 transfer mode 单独决定：
 
-| Provider | mode / transfer | `selection_order` | `binding_stage` | 首 token 提交屏障 | V1 |
+| Provider | mode / transfer | `selection_order` | `binding_stage` | 首 token 提交屏障 | V2 首发 |
 | --- | --- | --- | --- | --- | --- |
 | xLLM Native | `REMOTE_PD / LAYERWISE_PUSH` | `P_FIRST`：P + 有序 D 候选 | `BEFORE_PREFILL` | P 获得 D `FirstGeneration` ACK | 开放 |
 | vLLM-Ascend | `AGGREGATED / NONE` | `SINGLE`：一个 Agent/Engine | `AT_SUBMIT` | Agent 原子接受完整请求并安装唯一 attempt | 门禁后开放 |
-| vLLM-Ascend | `REMOTE_PD / LAYERWISE_PUSH` | `D_FIRST`：先 D，P 由 metaserver 选择 | `BEFORE_PREFILL` | D 完成 KV 预分配并接管 Decode | V1 关闭 |
+| vLLM-Ascend | `REMOTE_PD / LAYERWISE_PUSH` | `D_FIRST`：先 D，P 由 metaserver 选择 | `BEFORE_PREFILL` | D 完成 KV 预分配并接管 Decode | 关闭 |
 
-`D_FIRST` 计划首项必须是 D，并置 `p_selection_delegated=true`；Adapter 在 attempt status 中回填实际 P。该模式会失去 Service 对 P 的 KV-aware 选择能力，开放前必须显式接受这一代价或补充 metaserver 选择接口。V1 不执行 `D_FIRST`，但 Provider Contract 和 conformance test 必须能往返表达并稳定拒绝未开放 profile。`EPD` 不进入本表，直至其绑定和提交屏障有可测试定义。
+`D_FIRST` 计划首项必须是 D，并置 `p_selection_delegated=true`；Adapter 在 attempt status 中回填实际 P。该模式会失去 Service 对 P 的 KV-aware 选择能力，开放前必须显式接受这一代价或补充 metaserver 选择接口。V2 首发不执行 `D_FIRST`，但 Provider Contract 和 conformance test 必须能往返表达并稳定拒绝未开放 profile。`EPD` 不进入本表，直至其绑定和提交屏障有可测试定义。
 
 ### 4.3 Mode 与能力矩阵
 
@@ -201,7 +205,7 @@ STRICT Resolver 固定执行 `required_capabilities(mode) ⊆ published_capabili
 | `REMOTE_PD / LAYERWISE_PUSH` | `REMOTE_PD_LAYERWISE_PUSH`、`NATIVE_RESERVATION`、`ATTEMPT_QUERY`、`CANCEL_FENCE`、`ENGINE_LOCAL_DEADLINE`、`SELF_FENCING`、`DRAIN` | 同上 | `AGGREGATED` | remote D reservation |
 | `REMOTE_PD / PULL` | `REMOTE_PD_PULL`、`NATIVE_RESERVATION`、`ATTEMPT_QUERY`、`CANCEL_FENCE`、`ENGINE_LOCAL_DEADLINE`、`SELF_FENCING`、`DRAIN` | 同上 | `AGGREGATED` | remote D reservation |
 
-可选观测能力缺失时，对应字段为 `UNKNOWN` 并退出相关硬预测，不能按 0 参与评分。`DEEP_HEALTH` 是否为某个硬件/上线 profile 的额外发布前置，由该 profile 的 release policy 明确；vLLM-Ascend 当前上游接口不能发布该能力，见 §7.2。xLLM Native 的 `LOCAL_PREFILL_DECODE/PREFILL_ONLY` 属于 09 定义的后续模式，开放前必须以同样规则补全矩阵，不能在 Adapter 内写散落特例。
+可选观测能力缺失时，对应字段为 `UNKNOWN` 并退出相关硬预测，不能按 0 参与评分。`DEEP_HEALTH` 是否为某个硬件/上线 profile 的额外发布前置，由该 profile 的 release policy 明确；vLLM-Ascend 当前上游接口不能发布该能力，见 §7.2。xLLM Native 的 `LOCAL_PREFILL_DECODE/PREFILL_ONLY` 属于 09 定义的 V2 首发模式；开放前必须以同样规则补全矩阵，这是 V2 交付前置，不能在 Adapter 内写散落特例。
 
 ## 5. 状态、指标与容量语义
 
@@ -252,7 +256,7 @@ P/D compatibility key 为：
 
 vLLM-Ascend 当前实现已经表明 Connector 兼容不仅是名称：Mooncake metadata 还包含 engine ID、layer/group 映射、block size、cache 地址/stride/length 和握手信息；部分 P/D 模式要求 `P_TP >= D_TP` 且 `P_TP % D_TP == 0`，混合模型还有更严格限制，异构 A2/A3 P/D 也不是默认支持项。
 
-因此 V1 采用以下规则：
+因此 V2-B0 采用以下规则：
 
 - xLLM P ↔ xLLM D：只开放已验证 profile 组合；
 - vLLM-Ascend P ↔ vLLM-Ascend D：由独立 Adapter/Connector 门禁开放；
@@ -284,7 +288,7 @@ Provider 进入生产 STRICT 池必须满足：
 - 将断连、abort、EngineDeadError、Connector 失败映射为稳定终态；
 - 可选编排 vLLM-Ascend P/D 和 `kv_transfer_params`。
 
-发布 `SELF_FENCING` 必须同时证明两项部署前置：原始 vLLM 端口只允许 Agent/本机访问；Agent 与受控 vLLM 处于同一失效域。V1 只接受以下两种同命实现：Agent 作为父进程并在自身死亡时由进程监管机制终止整个 vLLM 进程组，或二者位于同一重启单元且 Agent 退出会重启整个单元。需要 vLLM 自己持有 Agent lease 的第三种方案依赖上游改造，不属于 V1。
+发布 `SELF_FENCING` 必须同时证明两项部署前置：原始 vLLM 端口只允许 Agent/本机访问；Agent 与受控 vLLM 处于同一失效域。V2 首发只接受以下两种同命实现：Agent 作为父进程并在自身死亡时由进程监管机制终止整个 vLLM 进程组，或二者位于同一重启单元且 Agent 退出会重启整个单元。需要 vLLM 自己持有 Agent lease 的第三种方案依赖上游改造，不属于 V2 首发。
 
 `agent_fate_bound` 是从 Agent 消失到 vLLM 停止接单、终止在飞请求并释放资源的硬上界，必须早于 Service 可能创建替代 attempt 的最早时刻。Agent 单独 `SIGKILL` 的负向测试若不能在该上界内关闭原始入口并中止在飞请求，该部署只能作为 BEST_EFFORT。
 
@@ -292,7 +296,7 @@ Provider 进入生产 STRICT 池必须满足：
 
 ## 8. 首批 Provider 落地范围
 
-| 能力 | xLLM Native V1 | vLLM-Ascend V1 | 后续 |
+| 能力 | xLLM Native V2 首发 | vLLM-Ascend V2 首发 | 后续 |
 | --- | --- | --- | --- |
 | 统一注册、Descriptor、State | 必须 | 必须 | 扩展更多 Provider |
 | 聚合推理 | 可保留默认/兼容模式 | 首个生产接入模式 | 按请求在已验证 Provider 间选择 |
@@ -302,7 +306,7 @@ Provider 进入生产 STRICT 池必须满足：
 | Prefix/KV event | 后续接入 | Connector 有能力时接入 | 统一 KVIndex namespace |
 | 跨 Provider P/D | 禁止 | 禁止 | 只对经过转换和故障测试的组合开放 |
 
-“同时支持两种 Engine”不等于首版要求所有执行模式功能对称。V1 的共同底座必须支持两种 Provider 的发现、状态、请求、取消、观测和能力门禁；xLLM Native 先交付严格远程 P/D，vLLM-Ascend 先交付严格聚合模式。任何未满足的能力通过门禁排除，不能靠调度器猜测补偿。
+“同时支持两种 Engine”不等于首版要求所有执行模式功能对称。V2 的共同底座必须支持两种 Provider 的发现、状态、请求、取消、观测和能力门禁；xLLM Native 交付严格远程 P/D，并按 09 开放本地模式，vLLM-Ascend 交付严格聚合模式。任何未满足的能力通过门禁排除，不能靠调度器猜测补偿。
 
 ## 9. 代码改造顺序
 
@@ -323,7 +327,7 @@ Provider 进入生产 STRICT 池必须满足：
 - Registry DELETE 或 incarnation 变化后，下一次选择零计划指向旧 incarnation；全池 Registry 失明走 `REGISTRY_BLIND`，不能用探活/heartbeat 恢复旧成员。
 - 仅 `SIGKILL` Agent 时，受控 vLLM 在 `agent_fate_bound` 内停止接单、中止在飞请求并释放 KV；否则不得发布 `SELF_FENCING`。
 - `AGGREGATED` Submit 已接受但响应超时时，Query/cancel/fence 收敛前不得并发提交替代 attempt；一万次故障注入后无 slot/KV 泄漏。
-- mode/capability 矩阵逐行通过 Resolver conformance；`D_FIRST` schema 可往返但 V1 profile 稳定拒绝，`EPD` 不可注册。
+- mode/capability 矩阵逐行通过 Resolver conformance；`D_FIRST` schema 可往返但 V2 首发 profile 稳定拒绝，`EPD` 不可注册。
 - 仅 `kv_layout_digest` 不同必须拒绝 P/D；仅 `storage_kv_layout_digest` 不同必须生成不同 Store key，而 08 §4 的 Router block hash 保持相同。
 - xLLM Native 与 vLLM-Ascend 分别通过 API/SSE、取消、deadline、崩溃、drain 和状态陈旧测试。
 - vLLM-Ascend 远程 P/D 未通过 reservation、KV 正确性、首 token commit、取消和重启测试前，仅开放聚合模式。

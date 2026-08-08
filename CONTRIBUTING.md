@@ -27,6 +27,10 @@ limitations under the License. -->
 
 For developers who want to contribute to our code, here is the guidance:
 
+## 0. Read the mandatory development standard
+
+Before coding, read the [xLLM Service V2 Development Standard](./docs/design/00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md). The first product delivery is the complete V2 scope; there is no independent V1 release. Code must follow the xLLM style, all portable behavior must be covered by CPU/Torch CPU tests, and every feature change must update its support and completion-status documentation.
+
 ## 1. Choose an issue to contribute
 + Issues with label `PR welcome`, which means:
     + A reproducible bug

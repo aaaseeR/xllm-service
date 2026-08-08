@@ -2,12 +2,12 @@
 
 ## 1. 文档定位
 
-- 状态：V2 专项设计；不改变 V1 G-2/G-1/G0–G4/M0 范围
+- 状态：首个交付版本 V2 的专项设计；与 V2-B0 基础协议一并完成
 - 日期：2026-08-05
-- 依赖：[总体架构](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md)、[V1 实现规格](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md)、[KV-aware Router](./08_XLLM_SERVICE_CLUSTER_KV_AWARE_ROUTER_DESIGN.md)、[多引擎 Provider 设计](./11_XLLM_SERVICE_MULTI_ENGINE_PROVIDER_DESIGN.md)
+- 依赖：[V2 开发规范](./00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md)、[总体架构](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md)、[V2 基础协议规格](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md)、[KV-aware Router](./08_XLLM_SERVICE_CLUSTER_KV_AWARE_ROUTER_DESIGN.md)、[多引擎 Provider 设计](./11_XLLM_SERVICE_MULTI_ENGINE_PROVIDER_DESIGN.md)
 - 目标：定义策略感知有界队列，以及 xLLM Native 逐请求选择远程 P/D、本地 Prefill+Decode 或 Prefill-only 的协议、资源账本、成本模型和故障边界
 
-V2 新增的队列和本地 Prefill 都是请求快环能力。它们不持久化请求、不提供跨 Service 接管、不改变 Engine 注册角色，也不取代 Engine 本地硬准入。Provider-neutral `ExecutionPlan` 还包含 V1 的 `AGGREGATED`；该模式由 11 定义，本文以下“三种模式”专指 xLLM Native 子集。
+首个产品版本直接交付 V2，不设置独立 V1 版本。02 的基础协议与本文新增的队列和本地 Prefill 必须一起完成；基础协议通过但本文范围未完成时只能标记 V2 开发中。队列和本地 Prefill 都是请求快环能力：它们不持久化请求、不提供跨 Service 接管、不改变 Engine 注册角色，也不取代 Engine 本地硬准入。Provider-neutral `ExecutionPlan` 还包含 V2 基础层的 `AGGREGATED`；该模式由 11 定义，本文以下“三种模式”专指 xLLM Native 子集。
 
 ## 2. 统一执行模式
 
@@ -368,7 +368,7 @@ drain_deadline >=
 | V2-L0 | 本地 Prefill shadow plan 和 co-resident TPOT 外部性预测 | 不执行本地 Prefill |
 | V2-L1 | `LOCAL_PREFILL_DECODE` 执行模式 | 仅 allowlist profile/bucket |
 
-Q/L 两条子线都依赖 V1 的 `IsSchedulable`、RequestContext、Engine 幂等和输出协议，但彼此可以独立 shadow 和上线。M0/REMOTE_PD 永久保留为回退。
+Q/L 两条子线都依赖 V2-B0 的 `IsSchedulable`、RequestContext、Engine 幂等和输出协议，但彼此可以独立 shadow；完整 V2 首发必须同时通过两条子线门禁。M0/REMOTE_PD 永久保留为回退。
 
 ## 9. 上线门禁
 

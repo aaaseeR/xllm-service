@@ -30,6 +30,10 @@ xLLM-Service致力于为每一位用户和开发者提供开放的XX，因此无
 
 如果您希望参与xLLM的开发，请参考以下提示：
 
+## 0. 阅读强制开发规范
+
+开始编码前必须阅读 [xLLM Service V2 代码开发与交付规范](./docs/design/00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md)。首个产品版本直接交付完整 V2，不设置独立 V1 版本；代码严格遵循 xLLM 风格，全部可移植逻辑必须完成 CPU/Torch CPU 测试，并随代码维护功能支持与完成度文档。
+
 ## 1. 选择参与贡献的issue
 + 您可以选择带有`PR welcome`标签的issue，包括:
     + 可复现的bug

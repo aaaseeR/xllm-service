@@ -6,13 +6,16 @@
 - 日期：2026-08-07
 - 设计对象：xLLM Service 请求控制面；xLLM Native 与 vLLM-Ascend Provider 为首批执行数据面
 - 实现基线：xllm-service `322bcda03793`，xLLM `8164a701bab7`，vLLM-Ascend `ba58907c6d1c`，Mooncake `129a9db9579c`
-- V1 实现协议：[xLLM Service V1 实现规格](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md)
+- V2 开发规范：[V2 代码开发与交付规范](./00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md)
+- V2 基础协议：[V2 基础协议规格（原 V1 能力集）](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md)
 - 集群 KV 路由：[集群级 KV-aware Router](./08_XLLM_SERVICE_CLUSTER_KV_AWARE_ROUTER_DESIGN.md)
 - V2 流控与执行模式：[有界流控与执行模式](./09_XLLM_SERVICE_V2_FLOW_CONTROL_AND_EXECUTION_MODES_DESIGN.md)
 - 集群 KV 内存层：[Mooncake Store 与跨请求 KV](./05_XLLM_PD_STORE_SESSION_DESIGN.md)
 - 多引擎接入：[Provider 与 Adapter 设计](./11_XLLM_SERVICE_MULTI_ENGINE_PROVIDER_DESIGN.md)
 
-本文只保留确定方案。V1 是首个生产版本；后续阶段沿请求调度、执行拓扑和 KV 内存层级三条轴扩展，不改变“Service 软选择和协调、Engine/Store 持有资源与数据真相”的基础边界。
+本文只保留确定方案。首个生产版本直接交付 V2，不设置独立 V1 产品版本。原 V1 范围并入 V2 基础能力，必须与 V2 的多模型、精确 HBM KV-aware、有界流控、优先级/租户公平和逐请求执行模式一起完成；后续阶段沿请求调度、执行拓扑和 KV 内存层级三条轴扩展，不改变“Service 软选择和协调、Engine/Store 持有资源与数据真相”的基础边界。
+
+为保持既有评审、门禁和决策编号可追溯，本文后续残留的 V1、V1-M0/M1/M2 表述均解释为 V2-B0 基础门及其算法层级，不代表独立产品版本或上线里程碑。
 
 ### 1.1 业界推理服务框架与演进方向
 
@@ -31,11 +34,11 @@
 4. **KV 从 Engine 私有缓存演进为集群级分层资源：** Router 消费 KV 事件建立位置索引，HBM、DRAM、SSD 和共享 Store 共同扩大可复用容量，但资源与数据真相仍留在 Engine/Store。
 5. **多 Runtime 通过能力接口接入：** 控制面选择经过验证的执行计划，Provider Adapter 适配 Runtime 的请求、状态和故障语义，不要求所有 Engine 使用相同 wire 或支持相同 P/D 模式。
 
-xLLM Service 的最终目标与这条主线一致，但不照搬某个框架：V1 先补齐实时状态、P-D pair 就绪、延迟绑定、Engine 原子准入、本地 deadline 和观测闭环；后续再增加有界流控、精确 KV 路由、分层 Store、Placement/Autoscale 和跨域执行。现有逐层 P→D PUSH 重叠继续保留，Service 不持久化对话/工具状态，也不默认承诺控制面崩溃后的在飞请求跨副本续传。更完整的技术对照见 [推理系统优化技术全景](./90_VLLM_INFERENCE_SYSTEM_OPTIMIZATION_GUIDE.md) 和 [外部架构评估](./opus5_xllm_review.md)。
+xLLM Service 的最终目标与这条主线一致，但不照搬某个框架：V2 首发同时补齐实时状态、P-D pair 就绪、延迟绑定、Engine 原子准入、本地 deadline、观测闭环、有界流控、精确 HBM KV 路由和逐请求执行模式；后续再增加分层 Store、Placement/Autoscale 和跨域执行。现有逐层 P→D PUSH 重叠继续保留，Service 不持久化对话/工具状态，也不默认承诺控制面崩溃后的在飞请求跨副本续传。更完整的技术对照见 [推理系统优化技术全景](./90_VLLM_INFERENCE_SYSTEM_OPTIMIZATION_GUIDE.md) 和 [外部架构评估](./opus5_xllm_review.md)。
 
 ## 2. 当前现状与最终目标
 
-这里的三种形态不是三套系统：当前 xLLM Service 已经是推理控制面，V1 在现有实现上补齐生产能力，最终形态再把同一个控制面扩展为整个推理集群的调度与资源协调中心。
+这里的三种形态不是三套系统：当前 xLLM Service 已经是推理控制面，V2 首发在现有实现上一次性补齐基础生产能力和 V2 快环能力，最终形态再把同一个控制面扩展为整个推理集群的调度与资源协调中心。
 
 **当前现状**
 
@@ -47,15 +50,15 @@ xLLM Service 的最终目标与这条主线一致，但不照搬某个框架：V
 
 所以，**当前系统解决的是“分别通过两条路径把请求跑起来”，还没有完整解决“在统一能力边界下，从多个 Runtime 选择可验证执行计划，并在并发、故障和 SLO 约束下可靠地跑完”。**
 
-**V1 目标**
+**V2 首发目标**
 
-V1 不是推倒重写，也不急于加入复杂的全局优化；它先把现有 xllm-service 改造成单域、单模型、支持多个 Engine Provider 的生产控制面。Registry 保存完整 Provider Descriptor、能力、profile、incarnation 和 lease，实时 State Stream 提供带 DP/rank 语义的队列、KV、吞吐和延迟视图；Service 通过公共 Provider SPI 和 Adapter 生成执行计划，不再直接依赖全局 backend 分支。
+V2 不是推倒重写。它先在现有 xllm-service 上完成原 V1 规格定义的基础协议：把系统改造成单域、支持多个 Engine Provider 的生产控制面。Registry 保存完整 Provider Descriptor、能力、profile、incarnation 和 lease，实时 State Stream 提供带 DP/rank 语义的队列、KV、吞吐和延迟视图；Service 通过公共 Provider SPI 和 Adapter 生成执行计划，不再直接依赖全局 backend 分支。
 
-V1 中，xLLM Native 使用严格 `REMOTE_PD + LAYERWISE_PUSH`：请求先选择 P 和少量有序 D 候选，在 P 真正 admission 前结合最新容量、链路和剩余时间绑定 D。vLLM-Ascend 先使用严格 `AGGREGATED` 计划，由与受控 vLLM 同一失效域的 Provider Agent 代理 HTTP/SSE、状态、取消、deadline 和 fencing；远程 P/D 等到其 reservation、KV 交接和首 token 提交语义通过独立门禁后再开放。Service 负责软选择与协调，所有 Provider 的本地 Engine/Agent 仍是资源权威。
+V2 基础层中，xLLM Native 使用严格 `REMOTE_PD + LAYERWISE_PUSH`：请求先选择 P 和少量有序 D 候选，在 P 真正 admission 前结合最新容量、链路和剩余时间绑定 D。vLLM-Ascend 先使用严格 `AGGREGATED` 计划，由与受控 vLLM 同一失效域的 Provider Agent 代理 HTTP/SSE、状态、取消、deadline 和 fencing；远程 P/D 等到其 reservation、KV 交接和首 token 提交语义通过独立门禁后再开放。Service 负责软选择与协调，所有 Provider 的本地 Engine/Agent 仍是资源权威。
 
-V1 同时补齐故障与观测闭环：Engine 状态不确定时停止接收新工作，确认失效后旧实例不能原身份复活；单条 P-D 链路故障只摘除该组合，不影响其他健康组合。Gateway、Service、P、D 使用统一请求标识和结构化事件，使每个 Admission attempt 都有唯一终态，并能分别解释 TTFT、TPOT、完成时间、重试、拒绝和超时后的资源浪费。
+V2 同时补齐故障与观测闭环：Engine 状态不确定时停止接收新工作，确认失效后旧实例不能原身份复活；单条 P-D 链路故障只摘除该组合，不影响其他健康组合。Gateway、Service、P、D 使用统一请求标识和结构化事件，使每个 Admission attempt 都有唯一终态，并能分别解释 TTFT、TPOT、完成时间、重试、拒绝和超时后的资源浪费。
 
-V1 完成后，系统应该能够明确回答：**为什么选择这个 Provider 和执行模式、请求是否真正获得资源、时间花在哪一段、失败后资源何时释放、Engine/Agent 或 Service 故障影响了哪些请求。** 这时它才具备生产高可用和持续性能优化的基础。V1 仍不建设 Service 侧策略队列、全局租户公平、共享 KV Store、自动 Placement、跨 Provider P/D 或在飞请求跨副本续传。
+基础协议完成后，系统应该能够明确回答：**为什么选择这个 Provider 和执行模式、请求是否真正获得资源、时间花在哪一段、失败后资源何时释放、Engine/Agent 或 Service 故障影响了哪些请求。** 但此时仍不能宣称版本交付。V2 首发还必须完成多模型、策略感知有界队列、优先级/租户公平、精确 HBM KVIndex，以及能力允许时逐请求选择本地或远程 Prefill。V2 仍不建设共享 KV Store、自动 Placement、跨 Provider P/D 或在飞请求跨副本续传。
 
 **最终形态**
 
@@ -69,11 +72,11 @@ V1 完成后，系统应该能够明确回答：**为什么选择这个 Provider
 
 **三者关系与演进轴**
 
-当前到 V1 是先补正确性、可用性和可观测性；V1 到最终形态才逐步增加流控、KV、Placement 和跨域能力。演进不是只扩大拓扑的一条直线，而是三条可以独立开发、独立验收的能力轴：
+当前到 V2 首发先在内部补齐正确性、可用性和可观测性基础门，再完成流控、精确 HBM KV 和逐请求执行模式；之后继续演进共享 KV、Placement 和跨域能力。演进不是只扩大拓扑的一条直线，而是三条可以独立开发、独立验收的能力轴：
 
-- **请求调度轴：** V1 硬准入与快速拒绝 → V2 策略感知的有界流控 → V2 优先级与租户公平 → 持续演进 SLO goodput 与成本联合优化。
-- **执行拓扑轴：** V1 单域单模型、多 Provider（xLLM 动态 P/D + vLLM-Ascend 聚合）→ V2 多模型与逐请求执行模式 → V3 模型与角色自动放置 → V4 跨域整请求溢出 → V5 收益可证明的有限跨域 P/D。
-- **KV 内存轴：** V1 Engine 本地 HBM → V2 精确 Prefix 位置索引 → V2.5 DRAM、SSD 与共享 Store → V2.5 跨请求恢复、复用与放置。
+- **请求调度轴：** V2-B0 硬准入与快速拒绝 → V2 策略感知的有界流控、优先级与租户公平 → 持续演进 SLO goodput 与成本联合优化。
+- **执行拓扑轴：** V2-B0 单域单模型、多 Provider（xLLM 动态 P/D + vLLM-Ascend 聚合）→ V2 多模型与逐请求执行模式 → V3 模型与角色自动放置 → V4 跨域整请求溢出 → V5 收益可证明的有限跨域 P/D。
+- **KV 内存轴：** V2-B0 Engine 本地 HBM → V2 精确 Prefix 位置索引 → V2.5 DRAM、SSD 与共享 Store → V2.5 跨请求恢复、复用与放置。
 
 箭头只表示同一轴内部的能力成熟顺序，不表示三条轴之间存在全序依赖。例如 V2.5 KV 内存层与 V3 Placement 可以并行开发和独立上线。三条轴共用一个不变边界：**Service 做软选择和协调，Engine/Store 持有资源与数据真相。**
 
@@ -199,7 +202,7 @@ flowchart TB
 | Provider Adapter/Agent | 把公共 Descriptor、状态、请求、取消、deadline、fencing 和可选 P/D 语义映射到具体 Runtime；不伪造 Runtime 不具备的能力 |
 | Engine Registry | Service/Engine 发现、incarnation、模型和静态能力 |
 | State Stream | V1 的 xllm-service 内置模块，负责全量 Engine 高频软状态扇出；不独立部署 |
-| Aggregated Engine | 在一个 Provider 实例内完成完整推理；vLLM-Ascend V1 的首个严格接入模式 |
+| Aggregated Engine | 在一个 Provider 实例内完成完整推理；vLLM-Ascend V2 首发的严格接入模式 |
 | P Engine | Prefill、本地准入、源 KV 和传输驱动 |
 | D Engine | 目标 KV/credit 原子准入、预留 TTL、Decode 和输出 |
 | Placement Controller | V3 慢环：模型 load/warmup/drain、角色和副本目标 |
@@ -355,32 +358,32 @@ PlanPrediction =
 | master 计划或非计划切换 | key 变化本身不触发降级；仅状态实际陈旧时按 State Stream 故障处理，不引入额外交接协议 |
 | output subscriber 不可达 | D 在有界等待后终止该请求并释放资源，不阻塞其他请求 |
 
-V1 高可用承诺是：单 Service 故障不影响其他副本的新请求；计划发布在允许等待完整 request deadline 时无损。它不承诺单个流在进程崩溃后透明续传。
+V2 高可用承诺是：单 Service 故障不影响其他副本的新请求；计划发布在允许等待完整 request deadline 时无损。它不承诺单个流在进程崩溃后透明续传。
 
 Engine 恢复是“替换实例”而不是“恢复旧进程内执行状态”：部署系统保持 desired count，创建新 Engine，依次执行 load、warmup、health、注册新 incarnation 和 READY。旧 Engine 的 HBM KV、reservation 和 Decode 状态不恢复；其他 Engine 或 V2.5 共享层中仍存在的 Prefix KV 只帮助后续请求，不能续接已经开始输出的 Decode。如果 D 已 ACK 且首事件已经交付，后续 token 由 D 直达 Service，P 此后故障不必中断该 Decode；D 故障则明确中断流。
 
-xLLM Native 的 V1 远程 P/D 池只接受注册为固定 `PREFILL` 或 `DECODE` 的 Engine。现有 `MIX` 实例的本地 `flip_prefill_to_decode/flip_decode_to_prefill` 在该池中关闭；角色变化由 V3 placement 慢环执行 drain，并以新 incarnation 重新注册。vLLM-Ascend 的 `AGGREGATED` 实例进入独立执行模式池，不参与 xLLM P/D 配对。
+xLLM Native 的 V2 远程 P/D 池只接受注册为固定 `PREFILL` 或 `DECODE` 的 Engine。现有 `MIX` 实例的本地 `flip_prefill_to_decode/flip_decode_to_prefill` 在该池中关闭；角色变化由 V3 placement 慢环执行 drain，并以新 incarnation 重新注册。vLLM-Ascend 的 `AGGREGATED` 实例进入独立执行模式池，不参与 xLLM P/D 配对。
 
 ## 7. 阶段交付与并行演进轴
 
-阶段号描述能力成熟度，不是全序依赖图。V1 是共同基础，V2 的流控/KVIndex、V2.5 的共享 KV 层和 V3 的 Placement 可以按依赖分别 shadow；尤其 V2.5 与 V3 可并行、独立上线，任何一方失败都不得阻塞另一方或基础 request router。
+阶段号描述能力成熟度，不是全序依赖图。原 V1 范围是 V2 内部基础门，不独立上线；V2.5 的共享 KV 层和 V3 的 Placement 可以按依赖分别 shadow，尤其 V2.5 与 V3 可并行、独立上线，任何一方失败都不得阻塞另一方或 V2 request router。
 
 | 阶段 | 可上线能力 | 主要新增机制 |
 | --- | --- | --- |
-| V1 | 单 domain、单模型、多 Provider；xLLM Native 动态 P/D，vLLM-Ascend 聚合模式；完整历史多轮对话 | Provider SPI/Adapter、全链路事件、实时 State Stream、统一 `IsSchedulable`、Engine 原子准入与 TTL、能力门禁；M0 上线，M1/M2 迭代 |
-| V2 | 单 domain 多模型、策略感知有界流控、优先级/租户公平与集群级 HBM KV-aware 路由 | ModelCatalog/ModelPool、有界队列和饱和检测、按 class 账本、KV 事件索引、Prefix/负载联合评分；能力允许时逐请求选择本地或远程 Prefill |
+| V2-B0（内部开发门） | 单 domain、单模型、多 Provider；xLLM Native 动态 P/D，vLLM-Ascend 聚合模式；完整历史多轮对话 | Provider SPI/Adapter、全链路事件、实时 State Stream、统一 `IsSchedulable`、Engine 原子准入与 TTL、能力门禁；只作为 V2 基础，不独立上线 |
+| V2（首个交付版本） | 单 domain 多模型、策略感知有界流控、优先级/租户公平与集群级 HBM KV-aware 路由 | 在 V2-B0 全部机制之上增加 ModelCatalog/ModelPool、有界队列和饱和检测、按 class 账本、KV 事件索引、Prefix/负载联合评分；能力允许时逐请求选择本地或远程 Prefill |
 | V2.5 | 集群 KV 内存层和跨请求/agentic Prefix 恢复 | D 生成 KV 写穿共享层、D→P 直传、Store restore、分层 tier credit、复制/预取/淘汰与重算决策 |
 | V3 | 动态模型放置与 Engine 复用 | placement leader、模型生命周期、角色/副本 autoscale、路由与放置联合模型 |
 | V4 | 跨 domain 整请求溢出 | 候选集扩展、domain 容量摘要、入口 RTT/故障域模型；无新请求协议 |
 | V5 | 有限异构与低优先级跨域 P/D | link-aware 兼容矩阵、跨域传输模型和 break-even 门禁 |
 
-### 7.1 V1
+### 7.1 V2 基础门（原 V1 范围，不独立交付）
 
-V1 复用现有 xllm-service 代码骨架、Registry/lease、heartbeat 入口、xLLM PD 数据通路和 vLLM relay，但不复用现状的全局 backend 分支与调度行为。首个生产版本必须交付 Provider Contract/Adapter、全链路请求事件、实时 State Stream、统一 `IsSchedulable`、Engine 原子准入与完整回收、能力化 `ExecutionPlan`、首 token 前有界重试、完整历史多轮对话和 M0。xLLM Native 计划包含“选定 P + 有序 D candidates”并在 P admission 前绑定 D；vLLM-Ascend 计划先为单个严格聚合实例。满足对应 Provider 门禁的 bucket 才能进入生产动态池，现有单对和 relay 仅承接兼容矩阵外请求与紧急回退。
+V2 基础门复用现有 xllm-service 代码骨架、Registry/lease、heartbeat 入口、xLLM PD 数据通路和 vLLM relay，但不复用现状的全局 backend 分支与调度行为。该门必须完成 Provider Contract/Adapter、全链路请求事件、实时 State Stream、统一 `IsSchedulable`、Engine 原子准入与完整回收、能力化 `ExecutionPlan`、首 token 前有界重试、完整历史多轮对话和 M0。xLLM Native 计划包含“选定 P + 有序 D candidates”并在 P admission 前绑定 D；vLLM-Ascend 计划先为单个严格聚合实例。满足对应 Provider 门禁的 bucket 才能进入生产动态池，现有单对和 relay 仅承接兼容矩阵外请求与紧急回退。
 
-其中 D `received_request_map_` 无预留超时、`unlink_instance` 只删 map 不释放 allocator 资源、3 秒 etcd 负载快照、RR 绕过状态新鲜度和 MIX 本地角色翻转都必须在 V1 关闭。M1/M2 作为 V1.x 在相同协议上按 bucket 迭代，不阻塞 M0 上线。V1 不引入策略感知 Service 排队，每轮可以按完整历史独立 Prefill；有界流控进入 V2，跨请求 KV 内存层进入 V2.5。详细接口与门禁见 [V1 实现规格](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md)。
+其中 D `received_request_map_` 无预留超时、`unlink_instance` 只删 map 不释放 allocator 资源、3 秒 etcd 负载快照、RR 绕过状态新鲜度和 MIX 本地角色翻转都必须在 V2 首发前关闭。M1/M2 在相同协议上按 bucket 迭代。V2 基础门本身不含策略感知 Service 排队，但首发必须继续完成 08/09 定义的有界流控和精确 HBM KVIndex；跨请求 KV 内存层进入 V2.5。详细基础接口与门禁见 [V2 基础协议规格](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md)。
 
-V1 各 Provider/profile 的实例数量由容量规划离线确定，运行期允许人工独立扩缩容，不做自动 autoscale。xLLM Native 分别规划 P/D，vLLM-Ascend 聚合模式按完整请求 CapacityProfile 规划；两者的 trace、拐点和 residual 不混池。冷启动时先分离两类未知量：Engine 能力通过合成长度网格离线压测得到；业务到达率和输入/输出分布来自业务容量包络 `BootstrapEnvelope`。最低输入为峰值 QPS、burst、SLO、prompt/output 长度均值与分布、请求 `max_new_tokens` 策略和 prefix 命中率假设。
+V2 首发时各 Provider/profile 的实例数量由容量规划离线确定，运行期允许人工独立扩缩容，不做自动 autoscale。xLLM Native 分别规划 P/D，vLLM-Ascend 聚合模式按完整请求 CapacityProfile 规划；两者的 trace、拐点和 residual 不混池。冷启动时先分离两类未知量：Engine 能力通过合成长度网格离线压测得到；业务到达率和输入/输出分布来自业务容量包络 `BootstrapEnvelope`。最低输入为峰值 QPS、burst、SLO、prompt/output 长度均值与分布、请求 `max_new_tokens` 策略和 prefix 命中率假设。
 
 单请求到达后，Provider `RequestCodec` 使用 Descriptor 中的 tokenizer/template contract 得到准确或带保守上界的 `prompt_tokens`；STRICT 调度要求计数 profile 与目标 Provider 一致。输出长度始终未知，单请求准入使用 `min(max_new_tokens, conditional_output_quantile)`。没有历史样本时使用 BootstrapEnvelope 的保守分位数并扩大 guard；池规模的单位时间总工作量仍使用长度均值，不把每个请求都按分位数计算。
 
@@ -483,7 +486,7 @@ cross_pd_cost_ub =
 
 | 阶段 | 核心上线门禁 |
 | --- | --- |
-| V1 | 请求/attempt 事件 100% 可关联且计时有效；pair READY 与 incarnation fencing 可验证；deadline 后执行有界停止；无永久资源泄漏；Service 永久可行性预判与 Engine 结构化 Admission；相对现网 RR 的 SLO goodput 与失衡收益 |
+| V2-B0 | 请求/attempt 事件 100% 可关联且计时有效；pair READY 与 incarnation fencing 可验证；deadline 后执行有界停止；无永久资源泄漏；Service 永久可行性预判与 Engine 结构化 Admission；相对现网 RR 的 SLO goodput 与失衡收益；只作为 V2 内部门 |
 | V2 | 多模型隔离、公平性和错误预算；有界队列在过载下不形成无界内存或饥饿；KV 索引故障自动退回 load-only；相对静态模型池和 load-only 的 SLO goodput 提升 |
 | V2.5 | agentic/共享 Prefix bucket 的写穿成功率、恢复成本和 SLO goodput 优于重算；Store 故障不影响普通请求；跨租户隔离和对象 GC 正确 |
 | V3 | load/warmup/drain 故障隔离；换版和 autoscale 不破坏在飞请求 |

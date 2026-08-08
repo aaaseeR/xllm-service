@@ -14,7 +14,7 @@ SelectCandidates(SchedulingContext, ClusterSnapshot) -> [Candidate]
 
 1. KV 索引是可丢失的软路由提示，不承担正确性、资源所有权或准入。
 2. Engine 本地 Prefix 查询、allocator 和 reservation 是最终事实；索引错误最多造成一次 miss、拒绝或选点次优。
-3. V1 只交付 hash tie-break、真实命中观测和负载模型；V2 才让精确 KV 事件进入主评分。
+3. V2-B0 只建立 hash tie-break、真实命中观测和负载模型；V2 首发必须继续让精确 KV 事件进入主评分，V2-B0 不独立交付。
 4. 索引异常时自动回退负载路由，不能拒绝原本可以执行的请求。
 5. Mooncake Store 是 V2.5 KV 内存层，不是 Router 正确性依赖，也不替代正常 P→D 直传。
 6. KVIndex 只定位 KV，不负责移动 KV。尤其在跨请求场景中，索引命中 D 不代表下一个 P 已经拥有历史 KV；必须由本地/append Prefill、D→P、Store restore 或重算闭环。
@@ -86,7 +86,7 @@ mm_digest[i] = 与 block i 重叠的多模态项的内容摘要 + 块内 token �
 
 `cache_semantics_digest` 只描述会改变 KV 内容或可复用语义的因素。Provider ID 本身不强制进入 namespace；只有 Runtime/插件/attention 实现差异会改变 KV 数值语义时才进入 digest，避免无谓切断已经验证可复用的 Prefix。它不包含 TP/DP/CP/EP 数量、rank、设备地址等物理放置，也不包含 11 的执行侧 `kv_layout_digest` 或 05 的 `storage_kv_layout_digest`；前者由 P/D 兼容矩阵检查，后者只绑定 Store 对象键。不能用 hash 相同替代布局兼容。不同 namespace 的 block 永不互认。
 
-`positions` 不进入前像：V1 hash contract 只对从零开始、由链深度唯一推导的标准连续 position 开放全局 KV credit，链式结构已经使 `h[i]` 唯一确定 block 序号。显式 position IDs、非连续 position、多轴 position 或其他不能从 parent chain 唯一推导的模式必须关闭受影响 Prefix 的全局 credit；未来若要支持，需在全系统一起加入规范化的 `position_digest[i]` 并 bump `hash_version`，不能由单侧临时扩展。
+`positions` 不进入前像：V2-B0 hash contract 只对从零开始、由链深度唯一推导的标准连续 position 开放全局 KV credit，链式结构已经使 `h[i]` 唯一确定 block 序号。显式 position IDs、非连续 position、多轴 position 或其他不能从 parent chain 唯一推导的模式必须关闭受影响 Prefix 的全局 credit；未来若要支持，需在全系统一起加入规范化的 `position_digest[i]` 并 bump `hash_version`，不能由单侧临时扩展。
 
 缺少可验证输入时按作用域关闭 KV credit，请求仍正常执行：动态 adapter 身份或租户 salt 不可验证时关闭整请求的 credit；某个多模态项无可验证摘要时，**只从第一个受影响 block 起**关闭，其之前的 block 不受影响——链式哈希保证前缀部分的取值与后续内容无关。
 
@@ -247,7 +247,7 @@ prefix_observation = {
 }
 ```
 
-V1 用固定共享前缀/无共享前缀 A/B 验证该观测闭环；`MISSING`、P/D 语义不一致或实际 Prefill/传输无法对账时，V2-K1 不得启用 KV 主评分。
+V2-B0 用固定共享前缀/无共享前缀 A/B 验证该观测闭环；`MISSING`、P/D 语义不一致或实际 Prefill/传输无法对账时，V2-K1 不得启用 KV 主评分。
 
 共享 system prompt、RAG、batch、多轮和 agentic 请求都不要求 session sticky；完整输入会产生相同 Prefix hash。但在 P/D 分离下，上一轮新增历史通常位于 D，而下一轮 Prefill 默认在 P，KVIndex 只能发现位置，不能凭空完成 D→P 移动。V2 若命中兼容 P 或 D 已有共享 Prefix 可直接获益；否则在 V2.5 交付前退化为重算。V2.5 按 [集群 KV 内存层](./05_XLLM_PD_STORE_SESSION_DESIGN.md)依次选择 D 本地 append、D→P 直传、Store restore 或完整 Prefill。默认 full-history 模式的 cache miss 不返回 session 冲突。
 
@@ -281,7 +281,7 @@ KV index 健康不进入 Service 基础 readiness；它只决定 `kv_routing_ena
 
 | 阶段 | KV-aware 增量 | 可上线结果 |
 | --- | --- | --- |
-| V1 | 固定 hash contract；一致性 hash 仅作 tie-break；打通 Prefix metric state 与执行结果对账 | 动态 P/D 池不依赖全局 KV 索引 |
+| V2-B0 | 固定 hash contract；一致性 hash 仅作 tie-break；打通 Prefix metric state 与执行结果对账 | V2 内部基础门；动态 P/D 池不依赖全局 KV 索引 |
 | V2-K0 | Engine 事件、P block/eviction/residence、KV lane、epoch/sequence、shadow index、snapshot recovery | 只观测，不影响路由 |
 | V2-K1 | HBM P/D Prefix + load 联合评分，按 bucket 灰度 | 首个精确 KV-aware 生产版本 |
 | V2-K2 | 多模型、优先级、公平性与可观测的低层 shadow credit | 为分层 KV 成本模型准备数据 |
@@ -326,7 +326,7 @@ V2-K1 只有同时满足以下条件才可成为目标 bucket 默认：
 2. `CacheAwareRouting` 迁移到统一 `SelectCandidates`，删除整数归一化与单一手工 score。
 3. `Scheduler` 计算 hash 一次，构造 least-load/top-prefix shortlist 并调用 Engine/Service Prediction。
 4. State Stream 为 KV lane 设置独立队列、带宽、FULL/snapshot 恢复和指标。
-5. V1 的 M0/M1 永久保留为 timeout、UNKNOWN、OOD 和人工回退路径。
+5. V2 基础层的 M0/M1 永久保留为 timeout、UNKNOWN、OOD 和人工回退路径。
 
 ## 14. 业界对齐
 
