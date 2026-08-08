@@ -27,8 +27,8 @@ limitations under the License.
 
 | Provider | Mode | Model/Profile | 支持状态 | 限制与证据 |
 | --- | --- | --- | --- | --- |
-| xLLM Native | CPU 公共路径 | 协议、Provider/Event wire、流式语义、JSON 解析 | CPU_VERIFIED | 63/63 tests passed |
-| xLLM Service + xLLM Native | 模板、Provider/Event Contract、请求身份与 Service 公共路径 | 当前外层 xLLM `service_dev` | CPU_VERIFIED | 136/136 tests passed；三个生产二进制 build/link verify |
+| xLLM Native | CPU 公共路径 | 协议、Provider/Event wire、资源状态机、流式语义、JSON 解析 | CPU_VERIFIED | 84/84 tests passed |
+| xLLM Service + xLLM Native | 模板、Provider/Event Contract、请求身份、execution hold 与 Service 公共路径 | 当前外层 xLLM `service_dev` | CPU_VERIFIED | 155/155 tests passed；三个生产二进制 build/link verify |
 | vLLM-Ascend | Python sidecar 公共逻辑 | 无设备路径 | PARTIAL | Provider Agent 尚未进入 B1-B6 实现 |
 
 ## 实现
@@ -45,8 +45,8 @@ limitations under the License.
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
 | DEV-STYLE | `git diff --check`；xLLM clang-format 规则人工核对 | N/A | N/A | PASS |
-| DEV-CPU-XLLM | `xllm-dev xllm-test <xllm> native Debug` | 当前目标链接 Torch CPU；新增契约不含 tensor 逻辑 | N/A | PASS，63/63 |
-| DEV-CPU-SERVICE | `XLLM_SOURCE_DIR=<xllm> xllm-dev service-test <xllm-service> native Debug` | 新增契约不含 tensor 逻辑 | N/A | PASS，136/136 |
+| DEV-CPU-XLLM | `xllm-dev xllm-test <xllm> native Debug` | 当前目标链接 Torch CPU；新增资源核心不含 tensor 逻辑 | N/A | PASS，84/84 |
+| DEV-CPU-SERVICE | `XLLM_SOURCE_DIR=<xllm> xllm-dev service-test <xllm-service> native Debug` | 新增 execution hold 不含 tensor 逻辑 | N/A | PASS，155/155 |
 | DEV-PRODUCTION-SERVICE | `service-build` + `service-verify` | 三个 ARM64 Debug ELF；无缺失动态库 | N/A | PASS |
 | DEV-CROSS-REPO | xllm-service 对外层 xLLM `service_dev` override 构建与测试 | N/A | N/A | PASS |
 
@@ -58,7 +58,7 @@ limitations under the License.
 - 已知缺口/风险：xLLM CPU 沙箱只覆盖当前公共测试目标；完整无设备 runtime
   构建仍因上游 `PlatformStream`、VMM 类型仅在设备宏下定义而失败。随着 V2 Engine
   状态机、allocator 和 tensor 元数据逻辑进入开发，必须扩展目标而不能沿用
-  63 项数量作为完整 V2 证明。
+  当前 84 项数量作为完整 V2 证明。
 - 回滚与兼容：请求协议仅做 additive 扩展；旧客户端未携带 correlation 时继续走
   legacy 路径，`service_request_id/service_req_id` 保持为 `request_uid` 的 wire 兼容镜像。
 - 性能、容量和观测证据：当前只建立 CPU 正确性与有界 recorder 基线；真实请求

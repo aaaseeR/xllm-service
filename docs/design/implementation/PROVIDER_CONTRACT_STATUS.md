@@ -53,7 +53,7 @@ limitations under the License.
 
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
-| G-1/F66 单一 wire 真相 | xLLM `ProviderProtocolTest` golden wire、roundtrip、optional presence、field number | N/A，无 tensor 逻辑 | N/A | PASS，4/4 |
+| G-1/F66 单一 wire 真相 | xLLM `ProviderProtocolTest` golden wire、roundtrip、optional presence、field number | N/A，无 tensor 逻辑 | N/A | PASS，7/7（含 G1 additive resource wire） |
 | G-2/F80 mode/capability | `ResolvesEveryCompleteV2CapabilityRow`、未知 mode/transfer 负向测试 | N/A | 待真实 Provider | PASS |
 | G-2/F81 Descriptor | 四种开放 profile、缺能力、重复项、runtime alias 负向测试 | N/A | 待真实 Provider | PASS |
 | G-2/F82 ExecutionPlan | 四种 role shape、capability、deadline、identity 门禁 | N/A | 待真实 Provider | PASS |
@@ -61,8 +61,8 @@ limitations under the License.
 | EngineState schema | UNKNOWN 与 0、per-DP、ratio、histogram 负向测试 | N/A | 待 State Stream | PASS |
 | Adapter registry | ownership、lookup、重复 key 与非法 Descriptor | N/A | N/A | PASS |
 
-Service 新增 17 个 `ProviderContractTest`，全量 service CPU 回归为 113/113；
-xLLM CPU 公共路径为 56/56。
+Service 的 `ProviderContractTest` 保持 17 项；当前全量 service CPU 回归为
+155/155，xLLM CPU 公共路径为 84/84。
 
 ## 完善情况
 

@@ -55,13 +55,13 @@ limitations under the License.
 
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
-| G0 单一事件 schema | xLLM `RequestEventProtocolTest` golden wire、presence、profile/P-D roundtrip、字段号、UUIDv7/source 校验 | N/A，无 tensor 逻辑 | N/A | PASS，7/7 |
+| G0 单一事件 schema | xLLM `RequestEventProtocolTest` golden wire、presence、profile/P-D roundtrip、字段号、UUIDv7/source 校验 | N/A，无 tensor 逻辑 | N/A | PASS，8/8 |
 | G0 Service 入口身份 | UUIDv7 layout/边界/唯一性；header 输入、traceparent、非法值、来源和 generator fallback | N/A | 待真实 Gateway | PASS，10/10 |
 | G0 Service→P→D 透传 | Completion golden wire、DisaggRequest roundtrip、UID mismatch/空对象 fail closed；RequestParams/Request CPU compile-only | N/A | 待真实 P/D | PASS（完整 xLLM CPU target 受既有无设备 platform 类型缺口限制） |
 | G0 有界非阻塞 recorder | capacity/drop、zero capacity、ring wrap FIFO、并发 producer、identity 上限 | N/A | N/A | PASS |
 | G0 Admission 终态 | ACCEPTED、非法参数后重试、重复 terminal、RAII missing terminal、clock regression | N/A | 待真实 D | PASS |
 | G0 指标正确性 | TTFT/TPOT/E2E/ITL、TPOT=0、单 token、缺首 token、时钟回退 | N/A | 待真实请求 | PASS |
-| G0 双仓回归 | xLLM 63/63；Service 136/136；Service 三个生产二进制 build/link verify | 当前目标链接 Torch CPU；新增逻辑不含 tensor 运算 | N/A | PASS |
+| G0 双仓回归 | xLLM 84/84；Service 155/155；Service 三个生产二进制 build/link verify | 当前目标链接 Torch CPU；新增逻辑不含 tensor 运算 | N/A | PASS |
 
 ## 完善情况
 

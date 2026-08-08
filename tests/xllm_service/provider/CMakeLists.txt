@@ -11,3 +11,14 @@ cc_test(
     GTest::gtest_main
     proto_xllm
 )
+
+cc_test(
+  NAME
+    execution_hold_test
+  SRCS
+    execution_hold_test.cpp
+  DEPS
+    :execution_hold
+    GTest::gtest_main
+    proto_xllm
+)

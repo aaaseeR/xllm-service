@@ -23,3 +23,14 @@ cc_library(
     :provider_contract
     proto_xllm
 )
+
+cc_library(
+  NAME
+    execution_hold
+  HDRS
+    execution_hold.h
+  SRCS
+    execution_hold.cpp
+  DEPS
+    proto_xllm
+)
