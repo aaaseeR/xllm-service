@@ -26,14 +26,38 @@ cc_library(
 
 cc_library(
   NAME
+    first_output_retry_budget
+  HDRS
+    first_output_retry_budget.h
+  SRCS
+    first_output_retry_budget.cpp
+  DEPS
+    glog::glog
+)
+
+cc_library(
+  NAME
     request
   HDRS
     request.h
   DEPS
     :common
     :execution_hold
+    :first_output_retry_budget
     :output_event_sequencer
     proto_xllm
   INCLUDES
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm
+)
+
+cc_library(
+  NAME
+    client_disconnect_monitor
+  HDRS
+    client_disconnect_monitor.h
+  SRCS
+    client_disconnect_monitor.cpp
+  DEPS
+    :chat_template
+    :request
 )

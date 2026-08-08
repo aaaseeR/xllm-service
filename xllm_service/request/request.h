@@ -18,6 +18,7 @@ limitations under the License.
 #include <absl/time/time.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,7 @@ limitations under the License.
 #include "core/framework/request/request_deadline.h"
 #include "observability.pb.h"
 #include "provider/execution_hold.h"
+#include "request/first_output_retry_budget.h"
 #include "request/output_event_sequencer.h"
 
 namespace xllm_service {
@@ -93,6 +95,21 @@ struct Request {
   std::mutex output_dispatch_mutex;
   std::unique_ptr<OutputEventSequencer> output_event_sequencer;
   bool output_dispatch_closed = false;
+
+  // Set directly by the brpc connection/progressive-attachment stop callback;
+  // the bounded watchdog consumes the corresponding monitor notification.
+  std::atomic<bool> client_disconnected{false};
+
+  // Changes only after the output callback has successfully crossed the
+  // Service response boundary. It is the hard no-replacement fence.
+  std::atomic<bool> first_token_emitted{false};
+
+  std::unique_ptr<FirstOutputRetryBudget> first_output_retry_budget;
+
+  // Re-encodes only attempt/routing/deadline fields into the already owned
+  // request protobuf and starts an asynchronous native dispatch. It must not
+  // retain a shared_ptr back to this Request.
+  std::function<bool(const Request&)> retry_dispatch_callback;
 
   // prefill stage finished
   std::atomic<bool> prefill_stage_finished{false};

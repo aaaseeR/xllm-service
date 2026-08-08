@@ -200,6 +200,10 @@ class RequestExecutionHold final {
       const xllm::proto::ExecutionHolder& holder,
       xllm::proto::HolderConvergenceProof proof);
 
+  // Releases a hold only on the pre-dispatch rollback path. The caller must
+  // guarantee that no RPC capable of creating execution resources was sent.
+  ExecutionHoldStatus abandon_before_dispatch();
+
   bool has_hold() const;
   std::optional<xllm::proto::ExecutionResourceHold> snapshot() const;
 

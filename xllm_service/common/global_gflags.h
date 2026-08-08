@@ -65,6 +65,21 @@ DECLARE_int32(instance_delete_probe_attempts);
 
 DECLARE_int32(lease_lost_heartbeat_timeout_ms);
 
+DECLARE_uint64(output_reorder_max_events);
+DECLARE_uint64(output_reorder_max_bytes);
+DECLARE_int32(request_watchdog_interval_ms);
+DECLARE_int32(output_gap_timeout_ms);
+DECLARE_int32(output_gap_query_timeout_ms);
+DECLARE_uint64(output_gap_query_batch_size);
+DECLARE_int32(p_first_event_retry_ub_ms);
+DECLARE_int32(first_event_dispatch_margin_ms);
+DECLARE_uint64(max_first_output_attempt_retries);
+DECLARE_uint64(max_nonstream_retry_wasted_device_ms);
+DECLARE_uint64(min_first_output_retry_remaining_ms);
+DECLARE_uint64(request_deadline_capacity);
+DECLARE_uint64(request_watchdog_batch_size);
+DECLARE_int32(default_request_deadline_ms);
+
 DECLARE_int32(block_size);
 
 DECLARE_string(tokenizer_path);

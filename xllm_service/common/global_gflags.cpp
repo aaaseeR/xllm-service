@@ -111,6 +111,62 @@ DEFINE_int32(lease_lost_heartbeat_timeout_ms,
              "Heartbeat silence timeout in milliseconds before a "
              "LEASE_LOST instance enters SUSPECT.");
 
+DEFINE_uint64(output_reorder_max_events,
+              64,
+              "Maximum buffered output events for one Service request.");
+
+DEFINE_uint64(output_reorder_max_bytes,
+              4 * 1024 * 1024,
+              "Maximum dynamic bytes in one Service output reorder buffer.");
+
+DEFINE_int32(request_watchdog_interval_ms,
+             100,
+             "Service request watchdog scan interval in milliseconds.");
+
+DEFINE_int32(output_gap_timeout_ms,
+             1000,
+             "Maximum local duration for an output sequence gap.");
+
+DEFINE_int32(output_gap_query_timeout_ms,
+             100,
+             "Hard timeout for one Decode first-event QueryRequest.");
+
+DEFINE_uint64(output_gap_query_batch_size,
+              8,
+              "Maximum concurrent first-event recovery queries per scan.");
+
+DEFINE_int32(p_first_event_retry_ub_ms,
+             700,
+             "Prefill first-event Commit/Query retry budget.");
+
+DEFINE_int32(first_event_dispatch_margin_ms,
+             200,
+             "Reserved first-event delivery and Cancel margin.");
+
+DEFINE_uint64(max_first_output_attempt_retries,
+              1,
+              "Maximum Service attempt replacements before first output.");
+
+DEFINE_uint64(max_nonstream_retry_wasted_device_ms,
+              5000,
+              "Maximum cumulative device time discarded by request retry.");
+
+DEFINE_uint64(min_first_output_retry_remaining_ms,
+              1000,
+              "Minimum remaining request deadline required for retry.");
+
+DEFINE_uint64(request_deadline_capacity,
+              65536,
+              "Maximum indexed request deadlines and disconnect monitors.");
+
+DEFINE_uint64(request_watchdog_batch_size,
+              1024,
+              "Maximum deadline or disconnect records handled per scan.");
+
+DEFINE_int32(default_request_deadline_ms,
+             300000,
+             "Default business deadline when the client omits one.");
+
 DEFINE_int32(block_size,
              128,
              "Number of slots per kv cache block. Default is 128.");

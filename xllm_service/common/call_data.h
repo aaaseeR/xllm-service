@@ -41,6 +41,10 @@ class CallData {
 
   virtual bool is_disconnected() const = 0;
 
+  // The callback is owned and invoked exactly once by brpc, either when the
+  // client connection stops or when the completed call is destroyed.
+  virtual void notify_on_disconnect(google::protobuf::Closure* callback) = 0;
+
   void get_x_request_id(std::string& x_request_id, brpc::Controller* ctrl) {
     x_request_id = "";
     if (ctrl->http_request().GetHeader("x-request-id")) {
@@ -213,6 +217,14 @@ class StreamCallData : public CallData {
         return controller_->IsCanceled();
       }
       return true;
+    }
+  }
+
+  void notify_on_disconnect(google::protobuf::Closure* callback) override {
+    if (stream_) {
+      pa_->NotifyOnStopped(callback);
+    } else {
+      controller_->NotifyOnCancel(callback);
     }
   }
 

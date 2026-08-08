@@ -112,9 +112,19 @@ class Options {
 
   PROPERTY(int32_t, first_event_dispatch_margin_ms) = 200;
 
+  PROPERTY(size_t, max_first_output_attempt_retries) = 1;
+
+  PROPERTY(uint64_t, max_nonstream_retry_wasted_device_ms) = 5000;
+
+  PROPERTY(uint64_t, min_first_output_retry_remaining_ms) = 1000;
+
   PROPERTY(size_t, request_deadline_capacity) = 65536;
 
   PROPERTY(size_t, request_watchdog_batch_size) = 1024;
+
+  // Requests without an explicit client/Gateway duration receive this local
+  // business deadline. Zero is invalid for the V2 service path.
+  PROPERTY(int32_t, default_request_deadline_ms) = 300000;
 
   // tokenizer options
   PROPERTY(std::string, tokenizer_path);

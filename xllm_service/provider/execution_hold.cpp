@@ -569,6 +569,23 @@ ExecutionHoldStatus RequestExecutionHold::apply_convergence_proof(
   return ExecutionHoldStatus::kResolved;
 }
 
+ExecutionHoldStatus RequestExecutionHold::abandon_before_dispatch() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (detached_) {
+    return ExecutionHoldStatus::kAlreadyDetached;
+  }
+  if (!hold_.has_value() || !reservation_) {
+    return ExecutionHoldStatus::kNoHold;
+  }
+  if (hold_->proof() != xllm::proto::EXECUTION_HOLD_PROOF_OUTCOME_UNKNOWN) {
+    return ExecutionHoldStatus::kUnsafeProof;
+  }
+  hold_.reset();
+  converged_holders_.clear();
+  reservation_ = ExecutionHoldCleanupTable::Reservation();
+  return ExecutionHoldStatus::kResolved;
+}
+
 bool RequestExecutionHold::has_hold() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return hold_.has_value();

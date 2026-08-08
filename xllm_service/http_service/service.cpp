@@ -24,10 +24,13 @@ limitations under the License.
 #include <json2pb/json_to_pb.h>
 #include <json2pb/pb_to_json.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <nlohmann/json.hpp>
+#include <type_traits>
 
 #include "chat.pb.h"
 #include "common/anthropic_tracer.h"
@@ -213,20 +216,76 @@ void handle_non_stream_response(brpc::Controller* cntl,
 }
 
 // fire and forget
-template <typename T>
+template <typename RequestProto>
 void handle_first_send_request(brpc::Controller* cntl,
-                               std::shared_ptr<T> call_data,
+                               RequestProto* request_pb,
                                Scheduler* scheduler,
                                std::string service_request_id,
+                               uint64_t attempt_seq,
                                std::shared_ptr<brpc::Channel> channel) {
   std::unique_ptr<brpc::Controller> cntl_guard(cntl);
+  std::unique_ptr<RequestProto> request_guard(request_pb);
   UNUSED_PARAMETER(channel);
   if (cntl->Failed()) {
     LOG(ERROR) << "Fail to send stream generation, " << cntl->ErrorText();
-    call_data->finish_with_error(cntl->ErrorText());
-    scheduler->finish_request(service_request_id, /*error*/ true);
-    return;
+    scheduler->handle_attempt_dispatch_failure(
+        service_request_id, attempt_seq, cntl->ErrorText());
   }
+}
+
+template <typename T>
+bool dispatch_native_request(std::shared_ptr<T> call_data,
+                             const Request& request,
+                             Scheduler* scheduler) {
+  using RequestProto =
+      std::remove_cv_t<std::remove_reference_t<decltype(call_data->request())>>;
+  auto request_pb = std::make_unique<RequestProto>(call_data->request());
+  if (!set_request_execution_context(request_pb.get(), request)) {
+    return false;
+  }
+  request_pb->mutable_routing()->set_prefill_name(request.routing.prefill_name);
+  request_pb->mutable_routing()->set_decode_name(request.routing.decode_name);
+  request_pb->mutable_routing()->set_prefill_incarnation_id(
+      request.prefill_incarnation_id);
+  request_pb->mutable_routing()->set_decode_incarnation_id(
+      request.decode_incarnation_id);
+
+  const std::shared_ptr<brpc::Channel> channel =
+      scheduler->get_channel(request.routing.prefill_name);
+  if (channel == nullptr || !request.request_deadline.has_value() ||
+      !request.correlation.has_attempt_seq()) {
+    return false;
+  }
+  const uint64_t remaining_ms = request.request_deadline->remaining_ms();
+  if (remaining_ms == 0) {
+    return false;
+  }
+
+  auto* redirect_cntl = new brpc::Controller();
+  redirect_cntl->set_timeout_ms(static_cast<int>(std::min<uint64_t>(
+      remaining_ms, static_cast<uint64_t>(std::numeric_limits<int>::max()))));
+  google::protobuf::Closure* done =
+      brpc::NewCallback(&handle_first_send_request<RequestProto>,
+                        redirect_cntl,
+                        request_pb.get(),
+                        scheduler,
+                        request.correlation.request_uid(),
+                        request.correlation.attempt_seq(),
+                        channel);
+
+  xllm::proto::XllmAPIService_Stub stub(channel.get());
+  if constexpr (std::is_same_v<T, CompletionCallData>) {
+    stub.Completions(redirect_cntl, request_pb.get(), nullptr, done);
+  } else if constexpr (std::is_same_v<T, ChatCallData> ||
+                       std::is_same_v<T, AnthropicCallData>) {
+    stub.ChatCompletions(redirect_cntl, request_pb.get(), nullptr, done);
+  } else {
+    delete done;
+    delete redirect_cntl;
+    return false;
+  }
+  request_pb.release();
+  return true;
 }
 
 template <typename T>
@@ -380,8 +439,19 @@ size_t GetJsonContentLength(const brpc::Controller* ctrl) {
 template <typename T>
 void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
                                  std::shared_ptr<Request> request) {
+  request->first_output_retry_budget =
+      std::make_unique<FirstOutputRetryBudget>(FirstOutputRetryBudget::Config{
+          .max_attempt_retries = options_.max_first_output_attempt_retries(),
+          .max_wasted_device_ms =
+              options_.max_nonstream_retry_wasted_device_ms(),
+          .min_remaining_deadline_ms =
+              options_.min_first_output_retry_remaining_ms(),
+      });
+  request->retry_dispatch_callback =
+      [call_data, scheduler = scheduler_](const Request& retry_request) {
+        return dispatch_native_request(call_data, retry_request, scheduler);
+      };
   // record request
-  auto& req_pb = call_data->request();
   bool success = scheduler_->record_new_request(call_data, request);
   if (!success) {
     LOG(ERROR) << "rpc service add new request error: "
@@ -390,39 +460,11 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
     return;
   }
 
-  // async redistribute the request and wait the response
-  // TODO: optimize the thread pool to async mode.
-  auto& target_uri = request->routing.prefill_name;
-  std::shared_ptr<brpc::Channel> channel = scheduler_->get_channel(target_uri);
-  if (channel == nullptr) {
-    LOG(ERROR) << "Failed to get Prefill channel: " << target_uri;
-    call_data->finish_with_error("Prefill channel is unavailable.");
-    scheduler_->finish_request(request->correlation.request_uid(),
-                               /*error=*/true);
-    return;
-  }
-  // use stub
-  xllm::proto::XllmAPIService_Stub stub(channel.get());
-  // xllm::proto::Status* resp_pb = new xllm::proto::Status();
-  brpc::Controller* redirect_cntl = new brpc::Controller();
-  google::protobuf::Closure* done =
-      brpc::NewCallback(&handle_first_send_request<T>,
-                        redirect_cntl,
-                        call_data,
-                        scheduler_,
-                        request->correlation.request_uid(),
-                        channel);
-
-  if constexpr (std::is_same_v<T, CompletionCallData>) {
-    stub.Completions(redirect_cntl, &req_pb, nullptr, done);
-  } else if constexpr (std::is_same_v<T, ChatCallData>) {
-    stub.ChatCompletions(redirect_cntl, &req_pb, nullptr, done);
-  } else if constexpr (std::is_same_v<T, AnthropicCallData>) {
-    stub.ChatCompletions(redirect_cntl, &req_pb, nullptr, done);
-  } else {
-    delete redirect_cntl;
-    delete done;
-    LOG(ERROR) << "Unknown call_data type";
+  if (!request->retry_dispatch_callback(*request)) {
+    scheduler_->handle_attempt_dispatch_failure(
+        request->correlation.request_uid(),
+        request->correlation.attempt_seq(),
+        "Native dispatch could not be started");
   }
 }
 
@@ -442,6 +484,10 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
   if (request->request_deadline_present) {
     request->request_deadline = xllm::RequestDeadline::from_remaining_ms(
         req_pb->remaining_deadline_ms());
+  } else {
+    request->request_deadline_present = true;
+    request->request_deadline = xllm::RequestDeadline::from_remaining_ms(
+        static_cast<uint64_t>(options_.default_request_deadline_ms()));
   }
 
   if (req_pb->has_stream()) {

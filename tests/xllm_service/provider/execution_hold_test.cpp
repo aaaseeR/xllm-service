@@ -173,6 +173,32 @@ TEST(ExecutionHoldTest, CleanupCapacityIsReservedBeforeDispatchInstall) {
   EXPECT_FALSE(rejected.has_hold());
 }
 
+TEST(ExecutionHoldTest, PreDispatchRollbackReleasesAndReusesCapacity) {
+  ExecutionHoldCleanupTable table(make_config(/*record_capacity=*/1));
+  RequestExecutionHold request_hold;
+  const std::vector<ExecutionHolder> holders{make_holder("0")};
+
+  ASSERT_EQ(table.install_request_hold(
+                &request_hold,
+                xllm::proto::EXECUTION_HOLD_KIND_REMOTE_D_RESERVATION,
+                make_attempt(),
+                "coordinator-1",
+                holders),
+            ExecutionHoldStatus::kOk);
+  EXPECT_EQ(request_hold.abandon_before_dispatch(),
+            ExecutionHoldStatus::kResolved);
+  EXPECT_FALSE(request_hold.has_hold());
+  EXPECT_EQ(table.stats().reserved_records, 0);
+
+  EXPECT_EQ(table.install_request_hold(
+                &request_hold,
+                xllm::proto::EXECUTION_HOLD_KIND_REMOTE_D_RESERVATION,
+                make_attempt(1),
+                "coordinator-1",
+                holders),
+            ExecutionHoldStatus::kOk);
+}
+
 TEST(ExecutionHoldTest, LikelyHolderNeverNarrowsSafeCandidates) {
   ExecutionHoldCleanupTable table(make_config());
   RequestExecutionHold request_hold;

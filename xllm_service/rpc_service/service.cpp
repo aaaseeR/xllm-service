@@ -52,9 +52,9 @@ std::vector<std::string> XllmRpcServiceImpl::get_static_prefill_list(
   return scheduler_->get_static_prefill_list(instance_name);
 }
 
-bool XllmRpcServiceImpl::handle_generation(
+GenerationDeliveryResult XllmRpcServiceImpl::handle_generation(
     const llm::RequestOutput& request_output) {
-  return scheduler_->handle_generation(request_output);
+  return scheduler_->handle_generation_detailed(request_output);
 }
 
 XllmRpcService::XllmRpcService(const Options& options, Scheduler* scheduler) {
@@ -154,10 +154,16 @@ void XllmRpcService::Generations(google::protobuf::RpcController* cntl_base,
       LOG(ERROR) << "Rejecting invalid generation for request "
                  << generation.req_id() << ": " << conversion.status.message();
       status->set_ok(false);
+      status->set_delivery_code(
+          proto::GENERATION_DELIVERY_CODE_INVALID_PAYLOAD);
+      status->set_status_msg(conversion.status.message());
       continue;
     }
-    status->set_ok(
-        xllm_rpc_service_impl_->handle_generation(conversion.output.value()));
+    const GenerationDeliveryResult result =
+        xllm_rpc_service_impl_->handle_generation(conversion.output.value());
+    status->set_ok(result.accepted());
+    status->set_delivery_code(result.code());
+    status->set_status_msg(result.message());
   }
 }
 

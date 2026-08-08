@@ -19,6 +19,7 @@ limitations under the License.
 #include <unordered_map>
 
 #include "chat.pb.h"
+#include "common/generation_delivery_status.h"
 #include "common/options.h"
 #include "common/types.h"
 #include "common/xllm/output.h"
@@ -48,7 +49,8 @@ class XllmRpcServiceImpl final {
 
  public:
   // handle generations from prefill/decode instance
-  bool handle_generation(const llm::RequestOutput& request_output);
+  GenerationDeliveryResult handle_generation(
+      const llm::RequestOutput& request_output);
 
  private:
   Options options_;

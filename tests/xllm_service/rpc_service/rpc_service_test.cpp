@@ -91,6 +91,63 @@ TEST(DisaggGenerationAdapterTest, OutputSequenceRemainsWireCompatible) {
   EXPECT_EQ(receiver.sender_incarnation_id(), "decode-incarnation-1");
 }
 
+TEST(DisaggGenerationAdapterTest, DeliveryReasonRemainsWireCompatible) {
+  const google::protobuf::FieldDescriptor* sender_code =
+      xllm::proto::Status::descriptor()->FindFieldByName("delivery_code");
+  const google::protobuf::FieldDescriptor* receiver_code =
+      proto::Status::descriptor()->FindFieldByName("delivery_code");
+  const google::protobuf::FieldDescriptor* sender_message =
+      xllm::proto::Status::descriptor()->FindFieldByName("status_msg");
+  const google::protobuf::FieldDescriptor* receiver_message =
+      proto::Status::descriptor()->FindFieldByName("status_msg");
+
+  ASSERT_NE(sender_code, nullptr);
+  ASSERT_NE(receiver_code, nullptr);
+  ASSERT_NE(sender_message, nullptr);
+  ASSERT_NE(receiver_message, nullptr);
+  EXPECT_EQ(sender_code->number(), 2);
+  EXPECT_EQ(receiver_code->number(), 2);
+  EXPECT_EQ(sender_code->type(), receiver_code->type());
+  ASSERT_EQ(sender_code->enum_type()->value_count(),
+            receiver_code->enum_type()->value_count());
+  for (int32_t index = 0; index < sender_code->enum_type()->value_count();
+       ++index) {
+    EXPECT_EQ(sender_code->enum_type()->value(index)->name(),
+              receiver_code->enum_type()->value(index)->name());
+    EXPECT_EQ(sender_code->enum_type()->value(index)->number(),
+              receiver_code->enum_type()->value(index)->number());
+  }
+  EXPECT_EQ(sender_message->number(), 3);
+  EXPECT_EQ(receiver_message->number(), 3);
+
+  xllm::proto::Status sender;
+  sender.set_ok(false);
+  sender.set_delivery_code(
+      xllm::proto::GENERATION_DELIVERY_CODE_INVALID_IDENTITY);
+  sender.set_status_msg("stale incarnation");
+  proto::Status receiver;
+  ASSERT_TRUE(receiver.ParseFromString(sender.SerializeAsString()));
+  EXPECT_FALSE(receiver.ok());
+  EXPECT_TRUE(receiver.has_delivery_code());
+  EXPECT_EQ(receiver.delivery_code(),
+            proto::GENERATION_DELIVERY_CODE_INVALID_IDENTITY);
+  EXPECT_EQ(receiver.status_msg(), "stale incarnation");
+
+  proto::Status reverse_sender;
+  reverse_sender.set_ok(false);
+  reverse_sender.set_delivery_code(
+      proto::GENERATION_DELIVERY_CODE_REQUEST_CLOSED);
+  reverse_sender.set_status_msg("already closed");
+  xllm::proto::Status reverse_receiver;
+  ASSERT_TRUE(
+      reverse_receiver.ParseFromString(reverse_sender.SerializeAsString()));
+  EXPECT_FALSE(reverse_receiver.ok());
+  EXPECT_TRUE(reverse_receiver.has_delivery_code());
+  EXPECT_EQ(reverse_receiver.delivery_code(),
+            xllm::proto::GENERATION_DELIVERY_CODE_REQUEST_CLOSED);
+  EXPECT_EQ(reverse_receiver.status_msg(), "already closed");
+}
+
 TEST(DisaggGenerationAdapterTest, RejectsNegativeTokenCounts) {
   const proto::DisaggStreamGeneration generation =
       make_generation(/*num_prompt_tokens=*/-1,

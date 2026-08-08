@@ -2,6 +2,31 @@ include(cc_test)
 
 cc_test(
   NAME
+    first_output_retry_budget_test
+  SRCS
+    first_output_retry_budget_test.cpp
+  DEPS
+    :first_output_retry_budget
+    GTest::gtest
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    client_disconnect_monitor_test
+  SRCS
+    client_disconnect_monitor_test.cpp
+  INCLUDES
+    ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm
+  DEPS
+    :chat_template
+    :client_disconnect_monitor
+    GTest::gtest_main
+    brpc-static
+)
+
+cc_test(
+  NAME
     output_event_sequencer_test
   SRCS
     output_event_sequencer_test.cpp

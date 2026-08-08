@@ -15,10 +15,12 @@ limitations under the License.
 
 #include "scheduler/scheduler.h"
 
+#include <brpc/callback.h>
 #include <brpc/controller.h>
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <unordered_set>
 
 #include "chat_template/deepseek_v4_cpp_chat_template.h"
@@ -33,7 +35,7 @@ limitations under the License.
 #include "loadbalance_policy/cache_aware_routing.h"
 #include "loadbalance_policy/round_robin.h"
 #include "loadbalance_policy/slo_aware_policy.h"
-#include "rpc_service/disagg_generation_adapter.h"
+#include "rpc_service/first_event_recovery_client.h"
 #include "scheduler/xllm_chat_parse_bridge.h"
 #include "tokenizer/tokenizer_factory.h"
 
@@ -100,17 +102,31 @@ bool terminal_attempt_state(xllm::proto::AttemptLifecycleState state) {
          state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_CANCELLED_BEFORE_CREATE;
 }
 
-struct FirstEventQueryContext {
-  std::shared_ptr<xllm_service::Request> service_request;
-  xllm::proto::ExecutionAttemptId attempt;
-  xllm::proto::ExecutionHolder decode;
-  xllm::proto::ExecutionHolder prefill;
-  std::shared_ptr<brpc::Channel> channel;
-  xllm::proto::AttemptControlRequest rpc_request;
-  xllm::proto::AttemptControlResponse response;
-  brpc::Controller controller;
-  bool issued = false;
-};
+const char* retry_decision_name(
+    xllm_service::FirstOutputRetryDecision decision) {
+  switch (decision) {
+    case xllm_service::FirstOutputRetryDecision::ALLOWED:
+      return "ALLOWED";
+    case xllm_service::FirstOutputRetryDecision::FIRST_OUTPUT_EMITTED:
+      return "FIRST_OUTPUT_EMITTED";
+    case xllm_service::FirstOutputRetryDecision::ATTEMPT_BUDGET_EXHAUSTED:
+      return "ATTEMPT_BUDGET_EXHAUSTED";
+    case xllm_service::FirstOutputRetryDecision::DEADLINE_BUDGET_INSUFFICIENT:
+      return "DEADLINE_BUDGET_INSUFFICIENT";
+    case xllm_service::FirstOutputRetryDecision::DEVICE_TIME_BUDGET_EXHAUSTED:
+      return "DEVICE_TIME_BUDGET_EXHAUSTED";
+    case xllm_service::FirstOutputRetryDecision::CLOCK_REGRESSION:
+      return "CLOCK_REGRESSION";
+  }
+  return "UNKNOWN";
+}
+
+void signal_client_disconnect(
+    std::shared_ptr<xllm_service::ClientDisconnectMonitor> monitor,
+    std::string request_uid) {
+  monitor->notify_disconnected(request_uid);
+}
+
 }  // namespace
 
 namespace xllm_service {
@@ -122,6 +138,8 @@ Scheduler::Scheduler(const Options& options)
           std::make_unique<provider::ExecutionHoldCleanupTable>(
               execution_hold_config(options))),
       request_deadline_queue_(std::make_unique<RequestDeadlineQueue>(
+          options.request_deadline_capacity())),
+      client_disconnect_monitor_(std::make_shared<ClientDisconnectMonitor>(
           options.request_deadline_capacity())) {
   const std::optional<xllm::FirstEventRetryPolicy> first_event_retry_policy =
       xllm::FirstEventRetryPolicy::from_durations_ms(
@@ -147,9 +165,15 @@ Scheduler::Scheduler(const Options& options)
           static_cast<uint64_t>(options_.output_gap_timeout_ms())) ||
       options_.request_deadline_capacity() == 0 ||
       options_.request_watchdog_batch_size() == 0 ||
+      options_.default_request_deadline_ms() <= 0 ||
       options_.request_watchdog_interval_ms() >
           options_.output_gap_timeout_ms()) {
     LOG(FATAL) << "Invalid request watchdog configuration.";
+  }
+  if (options_.max_first_output_attempt_retries() > 0 &&
+      (options_.max_nonstream_retry_wasted_device_ms() == 0 ||
+       options_.min_first_output_retry_remaining_ms() == 0)) {
+    LOG(FATAL) << "Invalid first-output retry budget configuration.";
   }
   // vLLM-backend clusters forward the raw client JSON to vLLM, which does its
   // own tokenization / chat templating. Skip building the local tokenizer and
@@ -246,6 +270,7 @@ Scheduler::Scheduler(const Options& options)
 }
 
 Scheduler::~Scheduler() {
+  client_disconnect_monitor_->close();
   {
     std::lock_guard<std::mutex> lock(execution_hold_cleanup_wait_mutex_);
     execution_hold_cleanup_stopped_ = true;
@@ -508,6 +533,29 @@ bool Scheduler::install_execution_hold_locked(
   return false;
 }
 
+bool Scheduler::install_request_safety_guards_locked(
+    const std::shared_ptr<Request>& request) {
+  const std::string& request_uid = request->correlation.request_uid();
+  if (client_disconnect_monitor_->register_request(request_uid, request) !=
+      ClientDisconnectMonitorStatus::OK) {
+    LOG(ERROR) << "Failed to reserve client disconnect monitor capacity, "
+                  "request_uid="
+               << request_uid;
+    return false;
+  }
+  if (!install_execution_hold_locked(request)) {
+    client_disconnect_monitor_->erase(request_uid);
+    return false;
+  }
+  return true;
+}
+
+void Scheduler::rollback_request_safety_guards_locked(
+    const std::shared_ptr<Request>& request) {
+  request->execution_hold.abandon_before_dispatch();
+  client_disconnect_monitor_->erase(request->correlation.request_uid());
+}
+
 bool Scheduler::confirm_generation_commit(
     const std::shared_ptr<Request>& request) {
   if (request->routing.decode_name.empty()) {
@@ -547,6 +595,130 @@ bool Scheduler::resolve_terminal_execution_hold(
   return false;
 }
 
+bool Scheduler::converge_execution_hold_for_retry_locked(
+    const std::shared_ptr<Request>& request) {
+  const std::optional<xllm::proto::ExecutionResourceHold> hold =
+      request->execution_hold.snapshot();
+  if (!hold.has_value()) {
+    return true;
+  }
+
+  // Ordinary P submission is not an execution hold, but it still receives a
+  // best-effort attempt-scoped Cancel before replacement.
+  const xllm::proto::ExecutionHolder prefill = prefill_holder(*request);
+  if (!prefill.engine_uid().empty() && !prefill.incarnation_id().empty()) {
+    call_attempt_control(*hold,
+                         prefill,
+                         /*query=*/false,
+                         options_.instance_delete_probe_timeout_ms());
+  }
+
+  for (const xllm::proto::ExecutionHolder& holder : hold->potential_holders()) {
+    if (!call_attempt_control(*hold,
+                              holder,
+                              /*query=*/false,
+                              options_.instance_delete_probe_timeout_ms())) {
+      return false;
+    }
+    request->execution_hold.apply_convergence_proof(
+        hold->attempt(),
+        holder,
+        xllm::proto::HOLDER_CONVERGENCE_PROOF_CANCEL_FENCE_ACK);
+  }
+  return !request->execution_hold.has_hold();
+}
+
+bool Scheduler::select_retry_instances(
+    const std::shared_ptr<Request>& request) {
+  request->routing = Routing();
+  request->prefill_incarnation_id.clear();
+  request->decode_incarnation_id.clear();
+  if (!lb_policy_->select_instances_pair(request) ||
+      !instance_mgr_->bind_request_instance_incarnations(request)) {
+    return false;
+  }
+  const InstanceMetaInfo prefill_info =
+      instance_mgr_->get_instance_info(request->routing.prefill_name);
+  if (prefill_info.backend_type == "vllm" ||
+      request->routing.decode_name.empty()) {
+    LOG(ERROR) << "First-output retry selected an incompatible execution "
+                  "mode, routing="
+               << request->routing.debug_string();
+    return false;
+  }
+  return true;
+}
+
+bool Scheduler::retry_first_output_attempt_locked(
+    const std::shared_ptr<Request>& request,
+    std::string* failure_message) {
+  if (request->first_output_retry_budget == nullptr ||
+      request->retry_dispatch_callback == nullptr ||
+      !request->correlation.has_attempt_seq() ||
+      !request->request_deadline.has_value()) {
+    *failure_message = "First-output retry context is unavailable";
+    return false;
+  }
+
+  const FirstOutputRetryBudget::TimePoint now =
+      FirstOutputRetryBudget::Clock::now();
+  const uint64_t remaining_deadline_ms =
+      request->request_deadline->remaining_ms();
+  const FirstOutputRetryDecision decision =
+      request->first_output_retry_budget->evaluate(
+          request->first_token_emitted.load(std::memory_order_acquire),
+          remaining_deadline_ms,
+          now);
+  if (decision != FirstOutputRetryDecision::ALLOWED) {
+    *failure_message = std::string("First-output retry denied: ") +
+                       retry_decision_name(decision);
+    return false;
+  }
+  if (request->correlation.attempt_seq() ==
+      std::numeric_limits<uint64_t>::max()) {
+    *failure_message = "First-output retry denied: ATTEMPT_SEQUENCE_EXHAUSTED";
+    return false;
+  }
+  std::lock_guard<std::mutex> cleanup_guard(execution_hold_cleanup_mutex_);
+  if (!converge_execution_hold_for_retry_locked(request)) {
+    *failure_message = "First-output retry denied: OLD_EXECUTION_NOT_CONVERGED";
+    return false;
+  }
+  if (!request->first_output_retry_budget->commit_retry(now)) {
+    *failure_message = "First-output retry budget changed before commit";
+    return false;
+  }
+
+  instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
+  if (!select_retry_instances(request)) {
+    *failure_message = "First-output retry could not select a native P/D pair";
+    return false;
+  }
+  request->correlation.set_attempt_seq(request->correlation.attempt_seq() + 1);
+  request->prefill_stage_finished.store(false, std::memory_order_release);
+  request->latest_generate_time = absl::Now();
+  request->output_event_sequencer.reset();
+  if (!install_execution_hold_locked(request)) {
+    *failure_message = "First-output retry could not install execution hold";
+    return false;
+  }
+  instance_mgr_->update_request_metrics(request, RequestAction::SCHEDULE);
+
+  {
+    std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+    output_gap_watchlist_.erase(request->correlation.request_uid());
+    failed_prefill_recovery_watchlist_.erase(
+        request->correlation.request_uid());
+  }
+  LOG(INFO) << "Prepared bounded first-output retry, request_uid="
+            << request->correlation.request_uid()
+            << ", attempt_seq=" << request->correlation.attempt_seq()
+            << ", retries=" << request->first_output_retry_budget->retries()
+            << ", retry_wasted_device_ms="
+            << request->first_output_retry_budget->wasted_device_ms();
+  return true;
+}
+
 void Scheduler::fail_output_dispatch_locked(
     const std::shared_ptr<Request>& request,
     llm::StatusCode status_code,
@@ -583,7 +755,8 @@ void Scheduler::fail_output_dispatch_locked(
                callback = std::move(callback),
                status_code,
                message = std::move(message)]() mutable {
-    if (!request->call_data->is_disconnected()) {
+    if (!request->client_disconnected.load(std::memory_order_acquire) &&
+        !request->call_data->is_disconnected()) {
       llm::RequestOutput error_output;
       error_output.service_request_id = request_uid;
       error_output.status = llm::Status(status_code, std::move(message));
@@ -669,8 +842,10 @@ bool Scheduler::call_attempt_control(
 void Scheduler::recover_first_output_events(
     const std::vector<std::shared_ptr<Request>>& requests,
     bool fail_if_unavailable) {
-  std::vector<std::unique_ptr<FirstEventQueryContext>> contexts;
-  contexts.reserve(requests.size());
+  std::vector<std::shared_ptr<Request>> active_requests;
+  active_requests.reserve(requests.size());
+  std::vector<FirstEventRecoveryQuery> queries;
+  queries.reserve(requests.size());
   for (const std::shared_ptr<Request>& service_request : requests) {
     {
       std::lock_guard<std::mutex> output_guard(
@@ -687,94 +862,106 @@ void Scheduler::recover_first_output_events(
         continue;
       }
     }
-    auto context = std::make_unique<FirstEventQueryContext>();
-    context->service_request = service_request;
-    context->attempt = execution_attempt(*service_request);
-    context->decode = decode_holder(*service_request);
-    context->prefill = prefill_holder(*service_request);
-    context->channel = instance_mgr_->get_channel(context->decode.engine_uid());
-    if (context->channel != nullptr) {
-      xllm::proto::RequestAttemptKey* key = context->rpc_request.mutable_key();
-      key->set_request_uid(context->attempt.request_uid());
-      if (context->attempt.has_attempt_seq()) {
-        key->set_attempt_seq(context->attempt.attempt_seq());
-      }
-      key->set_incarnation_id(context->decode.incarnation_id());
-
-      uint64_t timeout_ms =
-          static_cast<uint64_t>(options_.output_gap_query_timeout_ms());
-      if (service_request->request_deadline.has_value()) {
-        timeout_ms = std::min(
-            timeout_ms, service_request->request_deadline->remaining_ms());
-      }
-      if (timeout_ms > 0) {
-        context->controller.set_timeout_ms(static_cast<int32_t>(timeout_ms));
-        xllm::proto::DisaggPDService_Stub stub(context->channel.get());
-        stub.QueryRequest(&context->controller,
-                          &context->rpc_request,
-                          &context->response,
-                          brpc::DoNothing());
-        context->issued = true;
-      }
+    uint64_t timeout_ms =
+        static_cast<uint64_t>(options_.output_gap_query_timeout_ms());
+    if (service_request->request_deadline.has_value()) {
+      timeout_ms = std::min(timeout_ms,
+                            service_request->request_deadline->remaining_ms());
     }
-    contexts.emplace_back(std::move(context));
+    active_requests.emplace_back(service_request);
+    queries.emplace_back(FirstEventRecoveryQuery{
+        .channel =
+            instance_mgr_->get_channel(service_request->routing.decode_name),
+        .attempt = execution_attempt(*service_request),
+        .decode = decode_holder(*service_request),
+        .prefill = prefill_holder(*service_request),
+        .max_payload_bytes = options_.output_reorder_max_bytes(),
+        .timeout_ms = timeout_ms,
+    });
   }
 
-  for (const auto& context : contexts) {
-    if (context->issued) {
-      brpc::Join(context->controller.call_id());
-    }
-  }
-
-  for (const auto& context : contexts) {
+  std::vector<FirstEventRecoveryResult> results =
+      query_first_output_events(queries);
+  CHECK_EQ(results.size(), active_requests.size());
+  for (size_t index = 0; index < active_requests.size(); ++index) {
+    const FirstEventRecoveryQuery& query = queries[index];
+    const FirstEventRecoveryResult& result = results[index];
     bool recovered = false;
-    if (context->issued && !context->controller.Failed()) {
-      RequestOutputConversionResult conversion =
-          first_output_from_query_response(context->response,
-                                           context->attempt,
-                                           context->decode,
-                                           context->prefill,
-                                           options_.output_reorder_max_bytes());
-      if (conversion.status.ok() && conversion.output.has_value()) {
-        recovered = handle_generation(*conversion.output);
-      } else {
-        LOG(ERROR) << "Failed to validate recovered first event, request_uid="
-                   << context->attempt.request_uid()
-                   << ", error=" << conversion.status.message();
-      }
+    if (result.status.ok() && result.output.has_value()) {
+      recovered = handle_generation(*result.output);
+    } else {
+      LOG(ERROR) << "Failed to recover first event, request_uid="
+                 << query.attempt.request_uid()
+                 << ", error=" << result.status.message();
     }
     if (recovered) {
       continue;
     }
 
-    const std::shared_ptr<Request>& service_request = context->service_request;
+    const std::shared_ptr<Request>& service_request = active_requests[index];
+    const std::string request_uid = service_request->correlation.request_uid();
+    bool retry_prepared = false;
+    uint64_t retry_attempt_seq = 0;
+    {
+      std::lock_guard<std::mutex> output_guard(
+          service_request->output_dispatch_mutex);
+      {
+        std::lock_guard<std::mutex> request_guard(request_mutex_);
+        const auto it = requests_.find(request_uid);
+        if (it == requests_.end() || it->second != service_request) {
+          continue;
+        }
+      }
+      if (service_request->output_dispatch_closed ||
+          service_request->output_event_sequencer == nullptr ||
+          service_request->output_event_sequencer->next_expected_seq() != 0) {
+        continue;
+      }
+      if (!fail_if_unavailable &&
+          !service_request->output_event_sequencer->gap_expired(
+              OutputEventSequencer::Clock::now(),
+              std::chrono::milliseconds(options_.output_gap_timeout_ms()))) {
+        continue;
+      }
+      std::string retry_failure;
+      retry_prepared =
+          retry_first_output_attempt_locked(service_request, &retry_failure);
+      if (retry_prepared) {
+        retry_attempt_seq = service_request->correlation.attempt_seq();
+      } else {
+        fail_output_dispatch_locked(
+            service_request,
+            fail_if_unavailable ? llm::StatusCode::CANCELLED
+                                : llm::StatusCode::DEADLINE_EXCEEDED,
+            (fail_if_unavailable
+                 ? "Prefill process failed before seq=0 could be recovered: "
+                 : "Output seq=0 recovery failed after the local gap "
+                   "timeout: ") +
+                retry_failure);
+      }
+    }
+    if (!retry_prepared) {
+      continue;
+    }
+    if (service_request->retry_dispatch_callback(*service_request)) {
+      continue;
+    }
+
     std::lock_guard<std::mutex> output_guard(
         service_request->output_dispatch_mutex);
-    const std::string request_uid = service_request->correlation.request_uid();
     {
       std::lock_guard<std::mutex> request_guard(request_mutex_);
       const auto it = requests_.find(request_uid);
-      if (it == requests_.end() || it->second != service_request) {
+      if (it == requests_.end() || it->second != service_request ||
+          !service_request->correlation.has_attempt_seq() ||
+          service_request->correlation.attempt_seq() != retry_attempt_seq) {
         continue;
       }
     }
-    if (service_request->output_event_sequencer == nullptr ||
-        service_request->output_event_sequencer->next_expected_seq() != 0) {
-      continue;
-    }
-    if (!fail_if_unavailable &&
-        !service_request->output_event_sequencer->gap_expired(
-            OutputEventSequencer::Clock::now(),
-            std::chrono::milliseconds(options_.output_gap_timeout_ms()))) {
-      continue;
-    }
     fail_output_dispatch_locked(
         service_request,
-        fail_if_unavailable ? llm::StatusCode::CANCELLED
-                            : llm::StatusCode::DEADLINE_EXCEEDED,
-        fail_if_unavailable
-            ? "Prefill process failed before seq=0 could be recovered"
-            : "Output seq=0 recovery failed after the local gap timeout");
+        llm::StatusCode::CANCELLED,
+        "First-output retry dispatch could not be started");
   }
 }
 
@@ -838,6 +1025,23 @@ void Scheduler::run_request_watchdog() {
       break;
     }
     wait_lock.unlock();
+
+    const std::vector<std::shared_ptr<Request>> disconnected_requests =
+        client_disconnect_monitor_->take_disconnected(
+            options_.request_watchdog_batch_size());
+    for (const std::shared_ptr<Request>& request : disconnected_requests) {
+      std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
+      const std::string request_uid = request->correlation.request_uid();
+      {
+        std::lock_guard<std::mutex> request_guard(request_mutex_);
+        const auto it = requests_.find(request_uid);
+        if (it == requests_.end() || it->second != request) {
+          continue;
+        }
+      }
+      fail_output_dispatch_locked(
+          request, llm::StatusCode::CANCELLED, "Client disconnected");
+    }
 
     const RequestDeadlineQueue::TimePoint now =
         xllm::RequestDeadline::Clock::now();
@@ -940,6 +1144,56 @@ void Scheduler::run_request_watchdog() {
   }
 }
 
+void Scheduler::arm_client_disconnect_notification(
+    const std::shared_ptr<Request>& request) {
+  request->call_data->notify_on_disconnect(
+      brpc::NewCallback(&signal_client_disconnect,
+                        client_disconnect_monitor_,
+                        request->correlation.request_uid()));
+}
+
+void Scheduler::handle_attempt_dispatch_failure(const std::string& request_uid,
+                                                uint64_t attempt_seq,
+                                                std::string message) {
+  std::shared_ptr<Request> request;
+  {
+    std::lock_guard<std::mutex> request_guard(request_mutex_);
+    const auto it = requests_.find(request_uid);
+    if (it == requests_.end()) {
+      return;
+    }
+    request = it->second;
+  }
+
+  std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
+  if (request->output_dispatch_closed ||
+      !request->correlation.has_attempt_seq() ||
+      request->correlation.attempt_seq() != attempt_seq) {
+    LOG(INFO) << "Ignore stale native dispatch failure, request_uid="
+              << request_uid << ", attempt_seq=" << attempt_seq;
+    return;
+  }
+  if (request->first_token_emitted.load(std::memory_order_acquire) ||
+      (request->output_event_sequencer != nullptr &&
+       request->output_event_sequencer->next_expected_seq() != 0)) {
+    LOG(WARNING) << "Ignore native submission response failure after output "
+                    "commit, request_uid="
+                 << request_uid << ", attempt_seq=" << attempt_seq
+                 << ", error=" << message;
+    return;
+  }
+
+  LOG(ERROR) << "Native attempt dispatch failed before first output, "
+                "request_uid="
+             << request_uid << ", attempt_seq=" << attempt_seq
+             << ", error=" << message;
+  {
+    std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
+    failed_prefill_recovery_watchlist_.insert_or_assign(request_uid, request);
+  }
+  execution_hold_cleanup_cv_.notify_all();
+}
+
 bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
                                    std::shared_ptr<Request> request) {
   {
@@ -951,7 +1205,7 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
                  << request->correlation.request_uid();
       return false;
     }
-    if (!install_execution_hold_locked(request)) {
+    if (!install_request_safety_guards_locked(request)) {
       return false;
     }
 
@@ -1024,6 +1278,7 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
             RequestDeadlineQueueStatus::kOk) {
       LOG(ERROR) << "Failed to index request deadline, request_uid="
                  << request->correlation.request_uid();
+      rollback_request_safety_guards_locked(request);
       return false;
     }
     requests_.emplace(request->correlation.request_uid(), request);
@@ -1037,6 +1292,8 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
         next_thread_idx;
     next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
+
+  arm_client_disconnect_notification(request);
 
   return true;
 }
@@ -1052,7 +1309,7 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
                  << request->correlation.request_uid();
       return false;
     }
-    if (!install_execution_hold_locked(request)) {
+    if (!install_request_safety_guards_locked(request)) {
       return false;
     }
 
@@ -1120,6 +1377,7 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
             RequestDeadlineQueueStatus::kOk) {
       LOG(ERROR) << "Failed to index request deadline, request_uid="
                  << request->correlation.request_uid();
+      rollback_request_safety_guards_locked(request);
       return false;
     }
     requests_.emplace(request->correlation.request_uid(), request);
@@ -1132,6 +1390,8 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
         next_thread_idx;
     next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
+
+  arm_client_disconnect_notification(request);
 
   return true;
 }
@@ -1148,7 +1408,7 @@ bool Scheduler::record_new_request(
                  << request->correlation.request_uid();
       return false;
     }
-    if (!install_execution_hold_locked(request)) {
+    if (!install_request_safety_guards_locked(request)) {
       return false;
     }
 
@@ -1188,6 +1448,7 @@ bool Scheduler::record_new_request(
             RequestDeadlineQueueStatus::kOk) {
       LOG(ERROR) << "Failed to index request deadline, request_uid="
                  << request->correlation.request_uid();
+      rollback_request_safety_guards_locked(request);
       return false;
     }
     requests_.emplace(request->correlation.request_uid(), request);
@@ -1201,6 +1462,8 @@ bool Scheduler::record_new_request(
         next_thread_idx;
     next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
+
+  arm_client_disconnect_notification(request);
 
   return true;
 }
@@ -1238,6 +1501,7 @@ void Scheduler::finish_request(const std::string& service_request_id,
     failed_prefill_recovery_watchlist_.erase(service_request_id);
   }
   request_deadline_queue_->erase(service_request_id);
+  client_disconnect_monitor_->erase(service_request_id);
 
   {
     std::lock_guard<std::mutex> guard(thread_map_mutex_);
@@ -1320,6 +1584,11 @@ void Scheduler::clear_requests_on_failed_instance(
 }
 
 bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
+  return handle_generation_detailed(request_output).accepted();
+}
+
+GenerationDeliveryResult Scheduler::handle_generation_detailed(
+    const llm::RequestOutput& request_output) {
   const std::string& service_request_id = request_output.service_request_id;
 
   OutputCallback cb;
@@ -1332,13 +1601,16 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
       LOG(ERROR) << "Can not found the callback for the received request "
                     "output, request id is: "
                  << service_request_id;
-      return false;
+      return GenerationDeliveryResult(
+          /*code=*/proto::GENERATION_DELIVERY_CODE_UNKNOWN_REQUEST,
+          /*message=*/"Unknown service request");
     }
     request = it->second;
     cb = request->output_callback;
 
     // check client connection
-    if (request->call_data->is_disconnected()) {
+    if (request->client_disconnected.load(std::memory_order_acquire) ||
+        request->call_data->is_disconnected()) {
       LOG(INFO) << "Client has disconnected and the request will be cancelled, "
                    "request id: "
                 << service_request_id;
@@ -1353,11 +1625,26 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
       request->output_event_sequencer->close();
     }
     finish_request(service_request_id, /*error=*/true);
-    return false;
+    return GenerationDeliveryResult(
+        /*code=*/proto::GENERATION_DELIVERY_CODE_CLIENT_DISCONNECTED,
+        /*message=*/"Client disconnected");
   }
 
   OutputEventSequenceResult sequence_result;
   if (request->output_event_sequencer != nullptr) {
+    if (request_output.attempt_seq.has_value() &&
+        request->correlation.has_attempt_seq() &&
+        *request_output.attempt_seq != request->correlation.attempt_seq()) {
+      LOG(INFO) << "Reject output from replaced attempt without closing the "
+                   "current request, request_uid="
+                << service_request_id
+                << ", output_attempt_seq=" << *request_output.attempt_seq
+                << ", current_attempt_seq="
+                << request->correlation.attempt_seq();
+      return GenerationDeliveryResult(
+          /*code=*/proto::GENERATION_DELIVERY_CODE_INVALID_IDENTITY,
+          /*message=*/"Output belongs to a replaced attempt");
+    }
     RemotePdOutputBinding binding;
     if (request->correlation.has_attempt_seq()) {
       binding.attempt_seq = request->correlation.attempt_seq();
@@ -1372,7 +1659,9 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
       fail_output_dispatch_locked(request,
                                   llm::StatusCode::INVALID_ARGUMENT,
                                   "Stale or mismatched V2 output identity");
-      return false;
+      return GenerationDeliveryResult(
+          /*code=*/proto::GENERATION_DELIVERY_CODE_INVALID_IDENTITY,
+          /*message=*/"Stale or mismatched output identity");
     }
     sequence_result = request->output_event_sequencer->push(
         request_output, /*require_sequence=*/true);
@@ -1386,10 +1675,14 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
       std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
       output_gap_watchlist_.insert_or_assign(service_request_id, request);
     }
-    return true;
+    return GenerationDeliveryResult(
+        /*code=*/proto::GENERATION_DELIVERY_CODE_ACCEPTED,
+        /*message=*/"");
   }
   if (sequence_result.status == OutputEventSequenceStatus::kClosed) {
-    return false;
+    return GenerationDeliveryResult(
+        /*code=*/proto::GENERATION_DELIVERY_CODE_REQUEST_CLOSED,
+        /*message=*/"Request output stream is closed");
   }
   if (sequence_result.status != OutputEventSequenceStatus::kReady) {
     LOG(ERROR) << "Reject invalid V2 output sequence, request_uid="
@@ -1398,7 +1691,9 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
     fail_output_dispatch_locked(request,
                                 llm::StatusCode::INVALID_ARGUMENT,
                                 "Invalid V2 output sequence");
-    return false;
+    return GenerationDeliveryResult(
+        /*code=*/proto::GENERATION_DELIVERY_CODE_INVALID_SEQUENCE,
+        /*message=*/"Invalid output event sequence");
   }
   if (request->output_event_sequencer != nullptr &&
       request->output_event_sequencer->buffered_events() == 0) {
@@ -1416,14 +1711,18 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
         !confirm_generation_commit(request)) {
       fail_output_dispatch_locked(
           request, llm::StatusCode::UNKNOWN, "Invalid generation commit proof");
-      return false;
+      return GenerationDeliveryResult(
+          /*code=*/proto::GENERATION_DELIVERY_CODE_COMMIT_UNPROVEN,
+          /*message=*/"Generation commit is not proven");
     }
     if (!status_error && !finished_on_prefill_instance &&
         ready_output.finished && !resolve_terminal_execution_hold(request)) {
       fail_output_dispatch_locked(request,
                                   llm::StatusCode::UNKNOWN,
                                   "Invalid terminal execution proof");
-      return false;
+      return GenerationDeliveryResult(
+          /*code=*/proto::GENERATION_DELIVERY_CODE_TERMINAL_UNPROVEN,
+          /*message=*/"Terminal execution is not proven");
     }
     if (!status_error) {
       update_request_metrics(request, finished_on_prefill_instance);
@@ -1447,7 +1746,9 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
                << service_request_id;
     fail_output_dispatch_locked(
         request, llm::StatusCode::UNKNOWN, "Output affinity thread is missing");
-    return false;
+    return GenerationDeliveryResult(
+        /*code=*/proto::GENERATION_DELIVERY_CODE_AFFINITY_MISSING,
+        /*message=*/"Output affinity thread is missing");
   }
 
   const bool terminal_output =
@@ -1466,6 +1767,7 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
 
   output_threadpools_[req_thread_idx].schedule(
       [this,
+       request,
        service_request_id,
        cb,
        ready_outputs = std::move(sequence_result.ready_outputs)]() mutable {
@@ -1473,9 +1775,14 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
           const bool status_error =
               ready_output.status.has_value() && !ready_output.status->ok();
           const bool finished = ready_output.finished;
+          const bool crosses_response_boundary =
+              request->stream || !ready_output.finished_on_prefill_instance;
           if (!cb(std::move(ready_output)) || status_error) {
             finish_request(service_request_id, true);
             return;
+          }
+          if (crosses_response_boundary) {
+            request->first_token_emitted.store(true, std::memory_order_release);
           }
           if (finished) {
             finish_request(service_request_id);
@@ -1484,7 +1791,9 @@ bool Scheduler::handle_generation(const llm::RequestOutput& request_output) {
         }
       });
 
-  return true;
+  return GenerationDeliveryResult(
+      /*code=*/proto::GENERATION_DELIVERY_CODE_ACCEPTED,
+      /*message=*/"");
 }
 
 void Scheduler::update_request_metrics(std::shared_ptr<Request> request,

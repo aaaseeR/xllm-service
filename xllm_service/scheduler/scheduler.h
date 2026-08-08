@@ -21,6 +21,7 @@ limitations under the License.
 #include "chat_template/chat_template.h"
 #include "chat_template/jinja_chat_template.h"
 #include "common/call_data.h"
+#include "common/generation_delivery_status.h"
 #include "common/options.h"
 #include "common/threadpool.h"
 #include "common/xllm/output.h"
@@ -28,6 +29,7 @@ limitations under the License.
 #include "loadbalance_policy/loadbalance_policy.h"
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
+#include "request/client_disconnect_monitor.h"
 #include "request/request.h"
 #include "request/request_deadline_queue.h"
 #include "response_handler.h"
@@ -79,6 +81,14 @@ class Scheduler final {
 
   // handle generations from prefill/decode instance
   bool handle_generation(const llm::RequestOutput& request_output);
+  GenerationDeliveryResult handle_generation_detailed(
+      const llm::RequestOutput& request_output);
+
+  // Async native submission completion is attempt-scoped: a late failure
+  // from an old P must never terminate a replacement attempt.
+  void handle_attempt_dispatch_failure(const std::string& request_uid,
+                                       uint64_t attempt_seq,
+                                       std::string message);
 
   // update request metrics for prefill finished request
   void update_request_metrics(std::shared_ptr<Request> request,
@@ -104,8 +114,18 @@ class Scheduler final {
   Tokenizer* get_tls_tokenizer();
 
   bool install_execution_hold_locked(const std::shared_ptr<Request>& request);
+  bool install_request_safety_guards_locked(
+      const std::shared_ptr<Request>& request);
+  void rollback_request_safety_guards_locked(
+      const std::shared_ptr<Request>& request);
   bool confirm_generation_commit(const std::shared_ptr<Request>& request);
   bool resolve_terminal_execution_hold(const std::shared_ptr<Request>& request);
+  bool converge_execution_hold_for_retry_locked(
+      const std::shared_ptr<Request>& request);
+  bool retry_first_output_attempt_locked(
+      const std::shared_ptr<Request>& request,
+      std::string* failure_message);
+  bool select_retry_instances(const std::shared_ptr<Request>& request);
   void cancel_or_detach_execution_hold_locked(
       const std::shared_ptr<Request>& request);
   void fail_output_dispatch_locked(const std::shared_ptr<Request>& request,
@@ -120,6 +140,8 @@ class Scheduler final {
       bool fail_if_unavailable);
   void run_execution_hold_cleanup();
   void run_request_watchdog();
+  void arm_client_disconnect_notification(
+      const std::shared_ptr<Request>& request);
 
  private:
   Options options_;
@@ -129,6 +151,7 @@ class Scheduler final {
   std::unique_ptr<provider::ExecutionHoldCleanupTable>
       execution_hold_cleanup_table_;
   std::unique_ptr<RequestDeadlineQueue> request_deadline_queue_;
+  std::shared_ptr<ClientDisconnectMonitor> client_disconnect_monitor_;
 
   // Serializes the transition between request-owned and detached holds with
   // exact process-termination evidence. Lock order is this mutex, then

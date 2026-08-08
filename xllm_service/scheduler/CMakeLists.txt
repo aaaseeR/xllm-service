@@ -57,8 +57,9 @@ cc_library(
     :anthropic_stream_encoder
     :usage_proto_adapter
     :chat_template
+    :client_disconnect_monitor
     :deepseek_v4_cpp_chat_template
-    :disagg_generation_adapter
+    :first_event_recovery_client
     :model_type
     :common
     :etcd_client

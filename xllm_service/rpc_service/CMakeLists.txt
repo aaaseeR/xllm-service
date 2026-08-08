@@ -15,6 +15,20 @@ cc_library(
 
 cc_library(
   NAME
+  first_event_recovery_client
+  HDRS
+    first_event_recovery_client.h
+  SRCS
+    first_event_recovery_client.cpp
+  DEPS
+    :common
+    :disagg_generation_adapter
+    proto::proto_rpc_service
+)
+target_link_libraries(first_event_recovery_client PRIVATE brpc-static)
+
+cc_library(
+  NAME
   xllm_rpc_service
   HDRS
     service.h
