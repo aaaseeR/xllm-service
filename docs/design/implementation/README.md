@@ -19,6 +19,12 @@ limitations under the License.
 `<feature>_STATUS.md`，并遵循
 [V2 代码开发与交付规范](../00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md)第 5 节。
 
+## 状态索引
+
+| 功能 | 状态 | 文档 |
+| --- | --- | --- |
+| 双仓 CPU 开发基线 | CPU_VERIFIED | [V2_BASELINE_STATUS.md](./V2_BASELINE_STATUS.md) |
+
 状态文档使用以下模板：
 
 ```markdown

@@ -32,20 +32,26 @@ TokenizerArgs make_v4_args() {
   return args;
 }
 
+nlohmann::ordered_json thinking_kwargs(bool enabled) {
+  nlohmann::ordered_json kwargs = nlohmann::ordered_json::object();
+  kwargs["thinking"] = enabled;
+  return kwargs;
+}
+
 TEST(DeepseekV4CppChatTemplate, EncodeDoesNotAddSpecialTokens) {
   std::unique_ptr<ChatTemplate> tmpl =
       std::make_unique<DeepseekV4CppChatTemplate>(make_v4_args());
   EXPECT_FALSE(tmpl->encode_add_special_tokens());
 }
 
-TEST(DeepseekV4CppChatTemplate, PlainTextMatchesUpstreamGolden) {
+TEST(DeepseekV4CppChatTemplate, PlainTextChatModeMatchesUpstreamGolden) {
   DeepseekV4CppChatTemplate tmpl(make_v4_args());
 
   ChatMessages messages;
   messages.emplace_back("system", "You are a helpful assistant.");
   messages.emplace_back("user", "Hello");
 
-  auto prompt = tmpl.apply(messages, {}, nlohmann::ordered_json::object());
+  auto prompt = tmpl.apply(messages, {}, thinking_kwargs(false));
   ASSERT_TRUE(prompt.has_value());
   EXPECT_EQ(*prompt,
             "<｜begin▁of▁sentence｜>You are a helpful assistant."
@@ -61,7 +67,7 @@ TEST(DeepseekV4CppChatTemplate, MMContentVecIsFlattened) {
                                Message::MMContent("text", "second")};
   ChatMessages messages{Message("user", blocks)};
 
-  auto prompt = tmpl.apply(messages, {}, nlohmann::ordered_json::object());
+  auto prompt = tmpl.apply(messages, {}, thinking_kwargs(false));
   ASSERT_TRUE(prompt.has_value());
   EXPECT_EQ(*prompt,
             "<｜begin▁of▁sentence｜><｜User｜>first\nsecond"
@@ -113,7 +119,7 @@ TEST(DeepseekV4CppChatTemplate, ToolResultMergesViaToolCallId) {
   tool_msg.tool_call_id = "call_001";
   messages.push_back(tool_msg);
 
-  auto prompt = tmpl.apply(messages, {}, nlohmann::ordered_json::object());
+  auto prompt = tmpl.apply(messages, {}, thinking_kwargs(false));
   ASSERT_TRUE(prompt.has_value());
 
   EXPECT_NE(prompt->find("<｜User｜><tool_result>{\"temperature\":22}"
@@ -143,24 +149,32 @@ TEST(DeepseekV4CppChatTemplate, ToolsInjectionRendersV4Schema) {
   EXPECT_NE(prompt->find("get_weather"), std::string::npos);
 }
 
-TEST(DeepseekV4CppChatTemplate, ThinkingKwargTogglesThinkBlock) {
+TEST(DeepseekV4CppChatTemplate, ThinkingKwargOverridesDefaultThinkingMode) {
   DeepseekV4CppChatTemplate tmpl(make_v4_args());
 
   ChatMessages messages{Message("user", "Hello")};
 
-  nlohmann::ordered_json kwargs = nlohmann::ordered_json::object();
-  kwargs["thinking"] = true;
+  nlohmann::ordered_json kwargs = thinking_kwargs(true);
+  kwargs["reasoning_effort"] = "low";
   auto thinking_on = tmpl.apply(messages, {}, kwargs);
   ASSERT_TRUE(thinking_on.has_value());
   EXPECT_EQ(*thinking_on,
             "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>");
 
-  // Default (no kwarg) closes thinking immediately.
-  auto thinking_off =
-      tmpl.apply(messages, {}, nlohmann::ordered_json::object());
+  auto thinking_off = tmpl.apply(messages, {}, thinking_kwargs(false));
   ASSERT_TRUE(thinking_off.has_value());
   EXPECT_EQ(*thinking_off,
             "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>");
+
+  // DeepSeek V4 defaults to thinking with high reasoning effort when the
+  // request does not explicitly select a mode.
+  auto default_thinking =
+      tmpl.apply(messages, {}, nlohmann::ordered_json::object());
+  ASSERT_TRUE(default_thinking.has_value());
+  EXPECT_NE(default_thinking->find("Reasoning Effort: Absolute maximum"),
+            std::string::npos);
+  EXPECT_NE(default_thinking->find("<｜Assistant｜><think>"),
+            std::string::npos);
 }
 
 }  // namespace
