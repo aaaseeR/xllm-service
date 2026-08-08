@@ -252,3 +252,14 @@ Descriptor 的子集。任一证据缺失或不相等都 fail closed。这样 Se
 校验器检查 presence 而不是 `value != 0`，避免把首个执行误判为非法，也避免把
 旧发送方缺字段静默解释成首个 attempt。后续事件、资源键和输出 fencing 统一遵循
 同一语义。
+
+## D59：观测 producer 使用固定容量、非阻塞的本地事件 ring
+
+请求执行线程在事件 schema 校验后只尝试一次获取 recorder 写锁；锁竞争立即丢弃并
+计入 `dropped_contention`，容量耗尽立即丢弃并计入 `dropped_capacity`。ring 在构造时
+按硬上限预分配，drain/exporter 可以等待锁，但 producer 不能等待 exporter，也不能
+用动态队列把观测压力转成无界内存压力。身份字符串和 measurement boundary 在入队前
+做固定长度门禁。丢事件只降低观测完整性，不改变执行结果；关联覆盖率和丢弃率不满足
+门禁时，相关数据禁止训练 M1/M2。Admission RAII guard 对每次本地调用只生成一个终态
+尝试，未显式结束时生成 `FAILED/MISSING_TERMINAL`；终态本身若因 ring 压力丢弃，仍由
+上述丢弃计数显式暴露，不能阻塞或回滚请求执行。

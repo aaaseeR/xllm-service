@@ -711,6 +711,8 @@ V1 的 Gateway、Service、P、D 使用同一 `global_request_id + request_uid +
 
 每个阶段由拥有该阶段的进程用本地 monotonic clock 记录 duration：P 记录 dispatch RPC 与 Prefill，D 记录 admission/Decode，Service 记录 server TTFT/E2E。禁止相减两个起点不同的 duration。事件至少携带 `event_type`、owner/role/incarnation、profile、阶段 duration、token/KV/batch 规模、result、`error_stage/error_reason` 和 schema version；异步缓冲必须有界，丢弃量单独计数并报警，观测故障不阻塞请求。
 
+结构化事件的唯一 wire 真相是 xLLM `xllm/proto/observability.proto`。`attempt_seq` 和 `event_seq` 必须保留 proto presence，值 0 分别表示首个 attempt 和首个事件，字段缺失才表示协议不完整。Service 侧 producer 只允许写入预分配的固定容量 ring；写锁竞争时立即返回并累计 `dropped_contention`，ring 满时累计 `dropped_capacity`，不得等待 exporter、扩张无界队列或反压执行路径。所有身份字段和 measurement boundary 在进入 ring 前执行长度上限校验。
+
 报表按 `pool/model_revision/runtime_profile/workload_class/prompt_bin/output_bin/max_tokens/finish_reason` 分组。原始 Prompt、输出和 token 序列默认不记录。计时公式、关联覆盖率或事件缺失率未通过第 12 节门禁的数据，不得训练 M1/M2。
 
 ## 9. 容错矩阵

@@ -27,6 +27,7 @@ proto_library(
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/text_generation.proto
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/rec.proto
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/provider.proto
+    ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/observability.proto
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/disagg_pd.proto
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/xllm_service.proto
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/embedding.proto

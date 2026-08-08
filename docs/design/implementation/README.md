@@ -25,6 +25,7 @@ limitations under the License.
 | --- | --- | --- |
 | 双仓 CPU 开发基线 | CPU_VERIFIED | [V2_BASELINE_STATUS.md](./V2_BASELINE_STATUS.md) |
 | Provider Contract 与能力门禁核心 | CPU_VERIFIED | [PROVIDER_CONTRACT_STATUS.md](./PROVIDER_CONTRACT_STATUS.md) |
+| G0 请求事件协议与观测 CPU 核心 | PARTIAL | [OBSERVABILITY_STATUS.md](./OBSERVABILITY_STATUS.md) |
 
 状态文档使用以下模板：
 
