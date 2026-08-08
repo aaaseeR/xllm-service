@@ -61,6 +61,11 @@ limitations under the License.
   仅为旧部署参数兼容保留且不参与运行时决策。Round-robin、CAR、SLO 指标入口、
   静态 peer 列表和 Engine Link/Unlink 均按 Provider 隔离。Native `P+D` 与 vLLM
   `AGGREGATED` route shape 由同一个纯 CPU selector 决定，禁止跨 Provider 拼接。
+- STRICT Native P/D 使用显式兼容矩阵，不要求两端 `profile_digest` 相等，但要求
+  runtime/protocol、model revision/quantization、KV layout/dtype/block/cache group、
+  Connector/version、layerwise transfer 和可证明 topology 一致，并生成确定性的
+  compatibility proof。STRICT 与 BEST_EFFORT legacy 不能单边混配；矩阵同时用于
+  route、readiness、静态 peer 与 Link/Unlink 候选。
 - 明确不支持范围：本批次尚未让生产 Scheduler 只消费
   `CanonicalRequest/ExecutionPlan`，也没有实现
   Submit、Stream、Cancel、Reserve 和 State Stream；不声称任何真实 NPU
@@ -79,9 +84,10 @@ limitations under the License.
 | Adapter registry | ownership、lookup、重复 key 与非法 Descriptor | N/A | N/A | PASS |
 | 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
 | Provider route 隔离 | Native P/D、vLLM SINGLE、跨 Provider、无完整 plan、suspect、未知 Provider、RR cursor 正负测试 | N/A，无 tensor 逻辑 | 待真实混合池 | PASS，8/8 |
+| STRICT P/D 兼容 | 不同 profile 正向；model、KV/Connector、topology、runtime 与 strict/legacy 单边混配负向测试 | N/A，无 tensor 逻辑 | 待真实 P/D handshake | PASS |
 
-Service 的 `ProviderContractTest` 当前为 23 项，`InstanceMetaInfoTest` 为 13 项；
-当前全量 service CPU 回归为 223/223，vLLM sidecar CPU 回归为 29/29（其中
+Service 的 `ProviderContractTest` 当前为 26 项，`InstanceMetaInfoTest` 为 13 项；
+当前全量 service CPU 回归为 226/226，vLLM sidecar CPU 回归为 29/29（其中
 metadata 11/11），xLLM CPU 公共路径基线为 96/96。
 
 ## 完善情况
@@ -90,12 +96,12 @@ metadata 11/11），xLLM CPU 公共路径基线为 96/96。
   Provider/open-mode 门禁；Descriptor、Canonical/Encoded Request、EngineState、
   ExecutionPlan 校验；`attempt_seq=0` 与缺失字段可区分；线程安全、只增不删的
   Adapter registry；两个首发 Provider 的 RequestCodec 与 dispatch identity；CPU
-  conformance；生产 Scheduler 的 per-request Provider dispatch 与跨 Provider route
-  隔离。
-- 已知缺口/风险：当前生产 route 只完成 Provider 级隔离；严格 P/D profile 不能
-  直接要求 `profile_digest` 相等，仍需按 model、KV layout、Connector/version、
-  transfer mode 与 topology transform 建立显式兼容矩阵。CanonicalRequest、
-  ExecutionPlan 与 Adapter codec 的端到端接入仍属于后续 B1 批次；G3 的
+  conformance；生产 Scheduler 的 per-request Provider dispatch、跨 Provider route
+  隔离与 STRICT P/D 显式兼容矩阵。
+- 已知缺口/风险：当前 schema 尚无可校验的 topology-transform proof，因此非相同
+  topology 保守拒绝；per-pair `LinkState=READY`、失败隔离和周期对账属于 G3。
+  CanonicalRequest、ExecutionPlan 与 Adapter codec 的端到端接入仍属于后续 B1
+  批次；G3 的
   `(provider_id, profile_digest, incarnation_id)` Engine Registry 尚未实现；当前
   不证明硬件 Runtime 行为。
 - 回滚与兼容：协议为全新 additive schema；旧二进制不会读取这些消息。V2

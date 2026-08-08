@@ -28,6 +28,9 @@ struct ProviderRouteCandidate {
   xllm::proto::ProviderId provider_id = xllm::proto::PROVIDER_ID_UNSPECIFIED;
   xllm::proto::EngineRole role = xllm::proto::ENGINE_ROLE_UNSPECIFIED;
   bool schedulable = false;
+  // Non-owning immutable view valid for the duration of select(). nullptr is
+  // the explicit BEST_EFFORT legacy registration path.
+  const xllm::proto::ProviderDescriptor* descriptor = nullptr;
 };
 
 struct ProviderRouteSelection {

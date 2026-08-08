@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "provider/provider_registry.h"
+#include "provider/provider_route_selector.h"
 
 namespace xllm_service::provider {
 namespace {
@@ -148,6 +149,20 @@ ProviderDescriptor make_descriptor(const ModeCase& mode_case) {
   }
   descriptor.set_profile_digest("profile-sha256");
   return descriptor;
+}
+
+std::pair<ProviderDescriptor, ProviderDescriptor> make_remote_pd_descriptors() {
+  ProviderDescriptor prefill = make_descriptor(kOpenModeCases[0]);
+  prefill.mutable_identity()->set_engine_uid("engine-p");
+  prefill.mutable_identity()->set_incarnation_id("incarnation-p");
+  prefill.set_profile_digest("profile-p");
+
+  ProviderDescriptor decode = prefill;
+  decode.mutable_identity()->set_engine_uid("engine-d");
+  decode.mutable_identity()->set_incarnation_id("incarnation-d");
+  decode.mutable_serving()->set_role(xllm::proto::ENGINE_ROLE_DECODE);
+  decode.set_profile_digest("profile-d");
+  return std::make_pair(std::move(prefill), std::move(decode));
 }
 
 xllm::proto::CanonicalRequest make_request() {
@@ -711,6 +726,88 @@ TEST(ProviderContractTest, DispatchKindResolvesOnlyKnownProviders) {
   EXPECT_FALSE(
       resolve_provider_dispatch_kind(xllm::proto::PROVIDER_ID_UNSPECIFIED)
           .has_value());
+}
+
+TEST(ProviderContractTest, RemotePdCompatibilityAcceptsDistinctProfiles) {
+  auto [prefill, decode] = make_remote_pd_descriptors();
+  std::string proof;
+
+  const ContractResult result =
+      validate_remote_pd_compatibility(prefill, decode, &proof);
+  ASSERT_TRUE(result.ok()) << result.message();
+  EXPECT_NE(proof.find("profile-p"), std::string::npos);
+  EXPECT_NE(proof.find("profile-d"), std::string::npos);
+}
+
+TEST(ProviderContractTest, RemotePdCompatibilityRejectsHardMismatches) {
+  auto [prefill, baseline_decode] = make_remote_pd_descriptors();
+  std::string proof;
+
+  ProviderDescriptor decode = baseline_decode;
+  decode.mutable_model()->set_model_revision("other-model");
+  EXPECT_EQ(validate_remote_pd_compatibility(prefill, decode, &proof).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  decode = baseline_decode;
+  decode.mutable_kv()->set_connector_version("other-connector-version");
+  EXPECT_EQ(validate_remote_pd_compatibility(prefill, decode, &proof).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  decode = baseline_decode;
+  decode.mutable_topology()->set_tp(2);
+  EXPECT_EQ(validate_remote_pd_compatibility(prefill, decode, &proof).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  decode = baseline_decode;
+  decode.mutable_identity()->set_runtime_version("other-runtime");
+  EXPECT_EQ(validate_remote_pd_compatibility(prefill, decode, &proof).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+}
+
+TEST(ProviderContractTest, StrictRouteSelectorUsesCompatibilityMatrix) {
+  auto [prefill_descriptor, decode_descriptor] = make_remote_pd_descriptors();
+  ProviderRouteCandidate prefill{
+      .engine_uid = "engine-p",
+      .provider_id = xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+      .role = xllm::proto::ENGINE_ROLE_PREFILL,
+      .schedulable = true,
+      .descriptor = &prefill_descriptor,
+  };
+  ProviderRouteCandidate decode{
+      .engine_uid = "engine-d",
+      .provider_id = xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+      .role = xllm::proto::ENGINE_ROLE_DECODE,
+      .schedulable = true,
+      .descriptor = &decode_descriptor,
+  };
+  ProviderRouteSelection selection;
+
+  ASSERT_TRUE(
+      ProviderRouteSelector::select({prefill},
+                                    {decode},
+                                    xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                                    0,
+                                    0,
+                                    &selection));
+
+  decode_descriptor.mutable_kv()->set_kv_layout_digest("other-layout");
+  EXPECT_FALSE(
+      ProviderRouteSelector::select({prefill},
+                                    {decode},
+                                    xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                                    0,
+                                    0,
+                                    &selection));
+
+  decode_descriptor = make_remote_pd_descriptors().second;
+  decode.descriptor = nullptr;
+  EXPECT_FALSE(
+      ProviderRouteSelector::select({prefill},
+                                    {decode},
+                                    xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                                    0,
+                                    0,
+                                    &selection));
 }
 
 }  // namespace

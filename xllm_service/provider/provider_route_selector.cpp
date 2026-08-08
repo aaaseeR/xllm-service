@@ -20,6 +20,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "provider/provider_contract.h"
+
 namespace xllm_service::provider {
 namespace {
 
@@ -32,6 +34,34 @@ bool provider_matches(xllm::proto::ProviderId candidate_provider_id,
                       xllm::proto::ProviderId required_provider_id) {
   return required_provider_id == xllm::proto::PROVIDER_ID_UNSPECIFIED ||
          candidate_provider_id == required_provider_id;
+}
+
+bool descriptor_matches_candidate(const ProviderRouteCandidate& candidate) {
+  if (candidate.descriptor == nullptr) {
+    return true;
+  }
+  const ContractResult validation =
+      validate_provider_descriptor(*candidate.descriptor);
+  return validation.ok() &&
+         candidate.descriptor->identity().provider_id() ==
+             candidate.provider_id &&
+         candidate.descriptor->identity().engine_uid() ==
+             candidate.engine_uid &&
+         candidate.descriptor->serving().role() == candidate.role;
+}
+
+bool remote_pd_compatible(const ProviderRouteCandidate& prefill,
+                          const ProviderRouteCandidate& decode) {
+  if (prefill.descriptor == nullptr && decode.descriptor == nullptr) {
+    return true;
+  }
+  if (prefill.descriptor == nullptr || decode.descriptor == nullptr) {
+    return false;
+  }
+  std::string compatibility_proof;
+  return validate_remote_pd_compatibility(
+             *prefill.descriptor, *decode.descriptor, &compatibility_proof)
+      .ok();
 }
 
 }  // namespace
@@ -57,7 +87,8 @@ bool ProviderRouteSelector::select(
     const ProviderRouteCandidate& prefill = prefill_candidates[prefill_index];
     if (!prefill.schedulable || prefill.engine_uid.empty() ||
         !is_supported_provider(prefill.provider_id) ||
-        !provider_matches(prefill.provider_id, required_provider_id)) {
+        !provider_matches(prefill.provider_id, required_provider_id) ||
+        !descriptor_matches_candidate(prefill)) {
       continue;
     }
 
@@ -86,7 +117,9 @@ bool ProviderRouteSelector::select(
       const ProviderRouteCandidate& decode = decode_candidates[decode_index];
       if (!decode.schedulable || decode.engine_uid.empty() ||
           decode.role != xllm::proto::ENGINE_ROLE_DECODE ||
-          decode.provider_id != prefill.provider_id) {
+          decode.provider_id != prefill.provider_id ||
+          !descriptor_matches_candidate(decode) ||
+          !remote_pd_compatible(prefill, decode)) {
         continue;
       }
 

@@ -59,6 +59,10 @@ ContractResult validate_v2_open_mode(xllm::proto::ProviderId provider_id,
 
 ContractResult validate_provider_descriptor(
     const xllm::proto::ProviderDescriptor& descriptor);
+ContractResult validate_remote_pd_compatibility(
+    const xllm::proto::ProviderDescriptor& prefill,
+    const xllm::proto::ProviderDescriptor& decode,
+    std::string* compatibility_proof);
 ContractResult validate_canonical_request(
     const xllm::proto::CanonicalRequest& request);
 ContractResult validate_encoded_request(

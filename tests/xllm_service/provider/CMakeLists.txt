@@ -8,6 +8,7 @@ cc_test(
   DEPS
     :provider_contract
     :provider_registry
+    :provider_route_selector
     GTest::gtest_main
     proto_xllm
 )

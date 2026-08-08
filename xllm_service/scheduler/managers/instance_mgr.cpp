@@ -125,6 +125,9 @@ make_route_candidates(
       candidate.provider_id = instance_it->second.provider_id;
       candidate.role = get_engine_role(instance_it->second);
       candidate.schedulable = is_instance_schedulable(instance_it->second);
+      if (instance_it->second.provider_descriptor.has_value()) {
+        candidate.descriptor = &instance_it->second.provider_descriptor.value();
+      }
     }
     candidates.emplace_back(std::move(candidate));
   }
@@ -139,7 +142,22 @@ xllm_service::provider::ProviderRouteCandidate make_route_candidate(
       .provider_id = info.provider_id,
       .role = get_engine_role(info),
       .schedulable = is_instance_schedulable(info),
+      .descriptor = info.provider_descriptor.has_value()
+                        ? &info.provider_descriptor.value()
+                        : nullptr,
   };
+}
+
+bool are_remote_pd_peers_compatible(
+    const xllm_service::InstanceMetaInfo& prefill,
+    const xllm_service::InstanceMetaInfo& decode) {
+  const std::vector<xllm_service::provider::ProviderRouteCandidate> prefills = {
+      make_route_candidate(prefill.name, prefill)};
+  const std::vector<xllm_service::provider::ProviderRouteCandidate> decodes = {
+      make_route_candidate(decode.name, decode)};
+  xllm_service::provider::ProviderRouteSelection selection;
+  return xllm_service::provider::ProviderRouteSelector::select(
+      prefills, decodes, prefill.provider_id, 0, 0, &selection);
 }
 }  // namespace
 
@@ -296,8 +314,8 @@ std::vector<std::string> InstanceMgr::get_static_decode_list(
   }
   for (const auto& inst : instances_) {
     if (get_engine_role(inst.second) == xllm::proto::ENGINE_ROLE_DECODE &&
-        inst.second.provider_id == source_it->second.provider_id &&
-        is_instance_schedulable(inst.second)) {
+        is_instance_schedulable(inst.second) &&
+        are_remote_pd_peers_compatible(source_it->second, inst.second)) {
       decode_list.emplace_back(inst.second.name);
     }
   }
@@ -316,8 +334,8 @@ std::vector<std::string> InstanceMgr::get_static_prefill_list(
   }
   for (const auto& inst : instances_) {
     if (get_engine_role(inst.second) == xllm::proto::ENGINE_ROLE_PREFILL &&
-        inst.second.provider_id == source_it->second.provider_id &&
-        is_instance_schedulable(inst.second)) {
+        is_instance_schedulable(inst.second) &&
+        are_remote_pd_peers_compatible(inst.second, source_it->second)) {
       prefill_list.emplace_back(inst.second.name);
     }
   }
@@ -1298,6 +1316,12 @@ bool InstanceMgr::register_instance(const std::string& name,
   }
 
   if (info.provider_descriptor.has_value()) {
+    if (info.type == InstanceType::MIX) {
+      LOG(ERROR) << "Reject mutable MIX role with immutable Provider "
+                    "Descriptor: "
+                 << name;
+      return false;
+    }
     const provider::ContractResult validation =
         provider::validate_provider_descriptor(*info.provider_descriptor);
     if (!validation.ok()) {
@@ -1457,8 +1481,8 @@ bool InstanceMgr::gather_link_operations(
     case InstanceType::PREFILL: {
       for (const std::string& decode_name : decode_index_) {
         const InstanceMetaInfo& peer_info = instances_[decode_name];
-        if (peer_info.provider_id == info.provider_id &&
-            get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_DECODE) {
+        if (get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_DECODE &&
+            are_remote_pd_peers_compatible(info, peer_info)) {
           out_ops->emplace_back(peer_info.rpc_address, info);
         }
       }
@@ -1467,8 +1491,8 @@ bool InstanceMgr::gather_link_operations(
     case InstanceType::DECODE: {
       for (const std::string& prefill_name : prefill_index_) {
         const InstanceMetaInfo& peer_info = instances_[prefill_name];
-        if (peer_info.provider_id == info.provider_id &&
-            get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_PREFILL) {
+        if (get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_PREFILL &&
+            are_remote_pd_peers_compatible(peer_info, info)) {
           out_ops->emplace_back(info.rpc_address, peer_info);
         }
       }
@@ -1477,8 +1501,14 @@ bool InstanceMgr::gather_link_operations(
     case InstanceType::MIX: {
       for (const auto& [peer_name, peer_info] : instances_) {
         if (peer_name == info.name ||
-            peer_info.provider_id != info.provider_id ||
             get_engine_role(peer_info) == get_engine_role(info)) {
+          continue;
+        }
+        const bool compatible =
+            get_engine_role(info) == xllm::proto::ENGINE_ROLE_PREFILL
+                ? are_remote_pd_peers_compatible(info, peer_info)
+                : are_remote_pd_peers_compatible(peer_info, info);
+        if (!compatible) {
           continue;
         }
         out_ops->emplace_back(info.rpc_address, peer_info);
@@ -1514,23 +1544,30 @@ void InstanceMgr::gather_unlink_operations(
   if (info.type == InstanceType::PREFILL) {
     for (const std::string& decode_name : decode_index_) {
       const InstanceMetaInfo& peer_info = instances_[decode_name];
-      if (peer_info.provider_id == info.provider_id &&
-          get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_DECODE) {
+      if (get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_DECODE &&
+          are_remote_pd_peers_compatible(info, peer_info)) {
         out_ops->emplace_back(peer_info.rpc_address, info);
       }
     }
   } else if (info.type == InstanceType::DECODE) {
     for (const std::string& prefill_name : prefill_index_) {
       const InstanceMetaInfo& peer_info = instances_[prefill_name];
-      if (peer_info.provider_id == info.provider_id &&
-          get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_PREFILL) {
+      if (get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_PREFILL &&
+          are_remote_pd_peers_compatible(peer_info, info)) {
         out_ops->emplace_back(peer_info.rpc_address, info);
       }
     }
   } else if (info.type == InstanceType::MIX) {
     for (const auto& [peer_name, peer_info] : instances_) {
-      if (peer_name == name || peer_info.provider_id != info.provider_id ||
+      if (peer_name == name ||
           get_engine_role(peer_info) == get_engine_role(info)) {
+        continue;
+      }
+      const bool compatible =
+          get_engine_role(info) == xllm::proto::ENGINE_ROLE_PREFILL
+              ? are_remote_pd_peers_compatible(info, peer_info)
+              : are_remote_pd_peers_compatible(peer_info, info);
+      if (!compatible) {
         continue;
       }
       out_ops->emplace_back(peer_info.rpc_address, info);
@@ -1607,46 +1644,18 @@ void InstanceMgr::remove_instance_from_index(const std::string& name,
 
 bool InstanceMgr::has_available_instances() const {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
-
-  bool has_default = false;
-  bool has_prefill = false;
-  bool has_decode = false;
-  bool has_mix_as_prefill = false;
-  bool has_mix_as_decode = false;
-
-  for (const auto& [name, info] : instances_) {
-    if (!is_instance_schedulable(info)) continue;
-
-    switch (info.type) {
-      case InstanceType::DEFAULT:
-        has_default = true;
-        break;
-      case InstanceType::PREFILL:
-        has_prefill = true;
-        break;
-      case InstanceType::DECODE:
-        has_decode = true;
-        break;
-      case InstanceType::MIX:
-        if (info.current_type == InstanceType::PREFILL) {
-          has_mix_as_prefill = true;
-        } else if (info.current_type == InstanceType::DECODE) {
-          has_mix_as_decode = true;
-        }
-        break;
-      default:
-        break;
-    }
-
-    // Early exit: any satisfied condition is enough
-    if (has_default || (has_prefill && has_decode) ||
-        (has_mix_as_prefill && has_mix_as_decode)) {
-      return true;
-    }
-  }
-
-  return has_default || (has_prefill && has_decode) ||
-         (has_mix_as_prefill && has_mix_as_decode);
+  const std::vector<provider::ProviderRouteCandidate> prefill_candidates =
+      make_route_candidates(instances_, prefill_index_);
+  const std::vector<provider::ProviderRouteCandidate> decode_candidates =
+      make_route_candidates(instances_, decode_index_);
+  provider::ProviderRouteSelection selection;
+  return provider::ProviderRouteSelector::select(
+      prefill_candidates,
+      decode_candidates,
+      xllm::proto::PROVIDER_ID_UNSPECIFIED,
+      0,
+      0,
+      &selection);
 }
 
 }  // namespace xllm_service

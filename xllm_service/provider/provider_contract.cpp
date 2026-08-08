@@ -15,11 +15,13 @@ limitations under the License.
 
 #include "provider/provider_contract.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace xllm_service::provider {
 namespace {
@@ -100,6 +102,27 @@ bool has_transfer_mode(const ProviderDescriptor& descriptor,
     }
   }
   return false;
+}
+
+bool has_remote_pd_mode(const ProviderDescriptor& descriptor) {
+  for (const xllm::proto::ExecutionModeSpec& spec :
+       descriptor.serving().execution_modes()) {
+    if (spec.mode() == xllm::proto::EXECUTION_MODE_REMOTE_PD &&
+        spec.transfer_mode() == xllm::proto::TRANSFER_MODE_LAYERWISE_PUSH &&
+        spec.selection_order() == xllm::proto::SELECTION_ORDER_P_FIRST &&
+        spec.binding_stage() == xllm::proto::BINDING_STAGE_BEFORE_PREFILL &&
+        !spec.p_selection_delegated()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+template <typename Repeated>
+std::vector<std::string> sorted_strings(const Repeated& values) {
+  std::vector<std::string> result(values.begin(), values.end());
+  std::sort(result.begin(), result.end());
+  return result;
 }
 
 ContractResult validate_contract_version(uint32_t version,
@@ -478,6 +501,95 @@ ContractResult validate_provider_descriptor(
   if (descriptor.profile_digest().empty()) {
     return missing("descriptor.profile_digest");
   }
+  return ContractResult::success();
+}
+
+ContractResult validate_remote_pd_compatibility(
+    const ProviderDescriptor& prefill,
+    const ProviderDescriptor& decode,
+    std::string* compatibility_proof) {
+  if (compatibility_proof == nullptr) {
+    return missing("remote P/D compatibility proof output");
+  }
+  compatibility_proof->clear();
+
+  ContractResult prefill_validation = validate_provider_descriptor(prefill);
+  if (!prefill_validation.ok()) {
+    return prefill_validation;
+  }
+  ContractResult decode_validation = validate_provider_descriptor(decode);
+  if (!decode_validation.ok()) {
+    return decode_validation;
+  }
+  const xllm::proto::ProviderIdentity& prefill_identity = prefill.identity();
+  const xllm::proto::ProviderIdentity& decode_identity = decode.identity();
+  const bool identity_compatible =
+      prefill_identity.provider_id() == xllm::proto::PROVIDER_ID_XLLM_NATIVE &&
+      decode_identity.provider_id() == prefill_identity.provider_id() &&
+      prefill_identity.runtime_family() == decode_identity.runtime_family() &&
+      prefill_identity.runtime_version() == decode_identity.runtime_version() &&
+      prefill_identity.plugin_version() == decode_identity.plugin_version() &&
+      prefill_identity.hardware_runtime_version() ==
+          decode_identity.hardware_runtime_version() &&
+      prefill_identity.protocol_version() == decode_identity.protocol_version();
+  if (!identity_compatible ||
+      prefill.serving().role() != xllm::proto::ENGINE_ROLE_PREFILL ||
+      decode.serving().role() != xllm::proto::ENGINE_ROLE_DECODE ||
+      !has_remote_pd_mode(prefill) || !has_remote_pd_mode(decode)) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+                "remote P/D Provider identity, role, or mode is incompatible");
+  }
+
+  const xllm::proto::ModelDescriptor& prefill_model = prefill.model();
+  const xllm::proto::ModelDescriptor& decode_model = decode.model();
+  if (prefill_model.model_revision() != decode_model.model_revision() ||
+      prefill_model.quantization() != decode_model.quantization()) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+                "remote P/D model revision or quantization is incompatible");
+  }
+
+  const xllm::proto::KVDescriptor& prefill_kv = prefill.kv();
+  const xllm::proto::KVDescriptor& decode_kv = decode.kv();
+  const bool kv_compatible =
+      prefill_kv.kv_layout_digest() == decode_kv.kv_layout_digest() &&
+      prefill_kv.cache_dtype() == decode_kv.cache_dtype() &&
+      prefill_kv.block_size() == decode_kv.block_size() &&
+      sorted_strings(prefill_kv.cache_groups()) ==
+          sorted_strings(decode_kv.cache_groups()) &&
+      prefill_kv.head_shard_mapping_digest() ==
+          decode_kv.head_shard_mapping_digest() &&
+      prefill_kv.connector() == decode_kv.connector() &&
+      prefill_kv.connector_version() == decode_kv.connector_version() &&
+      has_transfer_mode(prefill, xllm::proto::TRANSFER_MODE_LAYERWISE_PUSH) &&
+      has_transfer_mode(decode, xllm::proto::TRANSFER_MODE_LAYERWISE_PUSH);
+  if (!kv_compatible) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+                "remote P/D KV or Connector contract is incompatible");
+  }
+
+  const xllm::proto::TopologyDescriptor& prefill_topology = prefill.topology();
+  const xllm::proto::TopologyDescriptor& decode_topology = decode.topology();
+  const bool topology_compatible =
+      prefill_topology.soc() == decode_topology.soc() &&
+      prefill_topology.device_count() == decode_topology.device_count() &&
+      prefill_topology.tp() == decode_topology.tp() &&
+      prefill_topology.dp() == decode_topology.dp() &&
+      prefill_topology.pp() == decode_topology.pp() &&
+      prefill_topology.ep() == decode_topology.ep() &&
+      prefill_topology.cp() == decode_topology.cp();
+  if (!topology_compatible) {
+    return fail(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+        "remote P/D topology requires an unavailable topology transform");
+  }
+
+  *compatibility_proof = "remote-pd-v1|p=" + prefill.profile_digest() +
+                         "|d=" + decode.profile_digest() +
+                         "|model=" + prefill_model.model_revision() +
+                         "|kv=" + prefill_kv.kv_layout_digest() +
+                         "|connector=" + prefill_kv.connector() + "/" +
+                         prefill_kv.connector_version() +
+                         "|transfer=layerwise-push";
   return ContractResult::success();
 }
 

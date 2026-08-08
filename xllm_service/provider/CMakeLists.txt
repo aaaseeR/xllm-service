@@ -33,6 +33,7 @@ cc_library(
   SRCS
     provider_route_selector.cpp
   DEPS
+    :provider_contract
     proto_xllm
 )
 
