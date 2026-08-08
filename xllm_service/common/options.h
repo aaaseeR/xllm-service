@@ -90,6 +90,12 @@ class Options {
 
   PROPERTY(size_t, execution_hold_max_identifier_bytes) = 256;
 
+  PROPERTY(int32_t, execution_hold_cleanup_retry_interval_ms) = 1000;
+
+  PROPERTY(size_t, execution_hold_cleanup_retry_batch_size) = 8;
+
+  PROPERTY(int32_t, execution_hold_cleanup_rpc_timeout_ms) = 100;
+
   // tokenizer options
   PROPERTY(std::string, tokenizer_path);
 

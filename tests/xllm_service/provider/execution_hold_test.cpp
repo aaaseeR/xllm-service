@@ -406,6 +406,60 @@ TEST(ExecutionHoldTest, ExactProcessTerminationResolvesDetachedRecords) {
   EXPECT_EQ(table.stats().reserved_records, 1);
 }
 
+TEST(ExecutionHoldTest, CleanupRetryBatchesAreBoundedFairAndRemoveResolved) {
+  ExecutionHoldCleanupTable table(make_config());
+  std::vector<std::unique_ptr<RequestExecutionHold>> request_holds;
+  for (uint64_t attempt_seq = 0; attempt_seq < 3; ++attempt_seq) {
+    auto request_hold = std::make_unique<RequestExecutionHold>();
+    auto reservation = table.try_reserve();
+    ASSERT_TRUE(reservation.has_value());
+    ASSERT_EQ(request_hold->install(std::move(*reservation),
+                                    make_hold(attempt_seq, 1)),
+              ExecutionHoldStatus::kOk);
+    ASSERT_EQ(table.adopt(request_hold.get()), ExecutionHoldStatus::kOk);
+    request_holds.emplace_back(std::move(request_hold));
+  }
+
+  auto first = table.next_retry_batch(2);
+  ASSERT_EQ(first.size(), 2);
+  EXPECT_EQ(first[0].attempt().attempt_seq(), 0);
+  EXPECT_EQ(first[1].attempt().attempt_seq(), 1);
+  auto second = table.next_retry_batch(2);
+  ASSERT_EQ(second.size(), 2);
+  EXPECT_EQ(second[0].attempt().attempt_seq(), 2);
+  EXPECT_EQ(second[1].attempt().attempt_seq(), 0);
+
+  ASSERT_EQ(table.apply_convergence_proof(
+                make_attempt(1),
+                make_holder("0"),
+                xllm::proto::HOLDER_CONVERGENCE_PROOF_CANCEL_FENCE_ACK),
+            ExecutionHoldStatus::kResolved);
+  auto remaining = table.next_retry_batch(4);
+  ASSERT_EQ(remaining.size(), 2);
+  EXPECT_NE(remaining[0].attempt().attempt_seq(), 1);
+  EXPECT_NE(remaining[1].attempt().attempt_seq(), 1);
+}
+
+TEST(ExecutionHoldTest, CleanupRetryBatchOmitsConvergedHolders) {
+  ExecutionHoldCleanupTable table(make_config());
+  RequestExecutionHold request_hold;
+  auto reservation = table.try_reserve();
+  ASSERT_TRUE(reservation.has_value());
+  ASSERT_EQ(request_hold.install(std::move(*reservation), make_hold()),
+            ExecutionHoldStatus::kOk);
+  ASSERT_EQ(table.adopt(&request_hold), ExecutionHoldStatus::kOk);
+  ASSERT_EQ(table.apply_convergence_proof(
+                make_attempt(),
+                make_holder("0"),
+                xllm::proto::HOLDER_CONVERGENCE_PROOF_CANCEL_FENCE_ACK),
+            ExecutionHoldStatus::kOk);
+
+  auto batch = table.next_retry_batch(1);
+  ASSERT_EQ(batch.size(), 1);
+  ASSERT_EQ(batch[0].potential_holders_size(), 1);
+  EXPECT_EQ(batch[0].potential_holders(0).engine_uid(), "engine-1");
+}
+
 TEST(ExecutionHoldTest, ConfirmedHolderNarrowsCleanupFanout) {
   ExecutionHoldCleanupTable table(make_config());
   RequestExecutionHold request_hold;

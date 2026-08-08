@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <brpc/controller.h>
 
+#include <chrono>
+
 #include "chat_template/deepseek_v4_cpp_chat_template.h"
 #include "chat_template/model_type.h"
 #include "common/metrics.h"
@@ -96,6 +98,11 @@ Scheduler::Scheduler(const Options& options)
       execution_hold_cleanup_table_(
           std::make_unique<provider::ExecutionHoldCleanupTable>(
               execution_hold_config(options))) {
+  if (options_.execution_hold_cleanup_retry_interval_ms() <= 0 ||
+      options_.execution_hold_cleanup_retry_batch_size() == 0 ||
+      options_.execution_hold_cleanup_rpc_timeout_ms() <= 0) {
+    LOG(FATAL) << "Invalid execution hold cleanup retry configuration.";
+  }
   // vLLM-backend clusters forward the raw client JSON to vLLM, which does its
   // own tokenization / chat templating. Skip building the local tokenizer and
   // chat template so the master does not require a tokenizer.model / template.
@@ -183,9 +190,23 @@ Scheduler::Scheduler(const Options& options)
                                    std::placeholders::_2);
     etcd_client_->add_watch(ETCD_MASTER_SERVICE_KEY, handle_master);
   }
+
+  execution_hold_cleanup_thread_ = std::make_unique<std::thread>(
+      &Scheduler::run_execution_hold_cleanup, this);
 }
 
-Scheduler::~Scheduler() { etcd_client_->stop_watch(); }
+Scheduler::~Scheduler() {
+  {
+    std::lock_guard<std::mutex> lock(execution_hold_cleanup_wait_mutex_);
+    execution_hold_cleanup_stopped_ = true;
+  }
+  execution_hold_cleanup_cv_.notify_all();
+  if (execution_hold_cleanup_thread_ != nullptr &&
+      execution_hold_cleanup_thread_->joinable()) {
+    execution_hold_cleanup_thread_->join();
+  }
+  etcd_client_->stop_watch();
+}
 
 bool Scheduler::schedule(std::shared_ptr<Request> request) {
   // For vLLM backend clusters we forward the client's raw OpenAI JSON straight
@@ -470,30 +491,10 @@ void Scheduler::cancel_or_detach_execution_hold_locked(
   }
 
   for (const xllm::proto::ExecutionHolder& holder : hold->potential_holders()) {
-    const std::shared_ptr<brpc::Channel> channel =
-        instance_mgr_->get_channel(holder.engine_uid());
-    if (channel == nullptr) {
-      continue;
-    }
-
-    xllm::proto::AttemptControlRequest cancel_request;
-    xllm::proto::RequestAttemptKey* key = cancel_request.mutable_key();
-    key->set_request_uid(hold->attempt().request_uid());
-    if (hold->attempt().has_attempt_seq()) {
-      key->set_attempt_seq(hold->attempt().attempt_seq());
-    }
-    key->set_incarnation_id(holder.incarnation_id());
-    xllm::proto::AttemptControlResponse cancel_response;
-    brpc::Controller controller;
-    if (options_.instance_delete_probe_timeout_ms() > 0) {
-      controller.set_timeout_ms(options_.instance_delete_probe_timeout_ms());
-    }
-    xllm::proto::DisaggPDService_Stub stub(channel.get());
-    stub.CancelRequest(&controller, &cancel_request, &cancel_response, nullptr);
-    if (controller.Failed() || !cancel_response.ok() ||
-        !same_attempt_key(
-            cancel_response.status().key(), hold->attempt(), holder) ||
-        !terminal_attempt_state(cancel_response.status().state())) {
+    if (!call_attempt_control(*hold,
+                              holder,
+                              /*query=*/false,
+                              options_.instance_delete_probe_timeout_ms())) {
       continue;
     }
     request->execution_hold.apply_convergence_proof(
@@ -511,6 +512,86 @@ void Scheduler::cancel_or_detach_execution_hold_locked(
     LOG(ERROR) << "Failed to detach unresolved execution hold, request_uid="
                << request->correlation.request_uid()
                << ", status=" << static_cast<int>(status);
+  }
+}
+
+bool Scheduler::call_attempt_control(
+    const xllm::proto::ExecutionResourceHold& hold,
+    const xllm::proto::ExecutionHolder& holder,
+    bool query,
+    int32_t timeout_ms) {
+  const std::shared_ptr<brpc::Channel> channel =
+      instance_mgr_->get_channel(holder.engine_uid());
+  if (channel == nullptr) {
+    return false;
+  }
+
+  xllm::proto::AttemptControlRequest request;
+  xllm::proto::RequestAttemptKey* key = request.mutable_key();
+  key->set_request_uid(hold.attempt().request_uid());
+  if (hold.attempt().has_attempt_seq()) {
+    key->set_attempt_seq(hold.attempt().attempt_seq());
+  }
+  key->set_incarnation_id(holder.incarnation_id());
+
+  xllm::proto::AttemptControlResponse response;
+  brpc::Controller controller;
+  if (timeout_ms > 0) {
+    controller.set_timeout_ms(timeout_ms);
+  }
+  xllm::proto::DisaggPDService_Stub stub(channel.get());
+  if (query) {
+    stub.QueryRequest(&controller, &request, &response, nullptr);
+  } else {
+    stub.CancelRequest(&controller, &request, &response, nullptr);
+  }
+  return !controller.Failed() && response.ok() &&
+         same_attempt_key(response.status().key(), hold.attempt(), holder) &&
+         terminal_attempt_state(response.status().state());
+}
+
+void Scheduler::run_execution_hold_cleanup() {
+  std::unique_lock<std::mutex> wait_lock(execution_hold_cleanup_wait_mutex_);
+  while (!execution_hold_cleanup_stopped_) {
+    const bool stopped = execution_hold_cleanup_cv_.wait_for(
+        wait_lock,
+        std::chrono::milliseconds(
+            options_.execution_hold_cleanup_retry_interval_ms()),
+        [this] { return execution_hold_cleanup_stopped_; });
+    if (stopped) {
+      break;
+    }
+    wait_lock.unlock();
+
+    const std::vector<xllm::proto::ExecutionResourceHold> batch =
+        execution_hold_cleanup_table_->next_retry_batch(
+            options_.execution_hold_cleanup_retry_batch_size());
+    for (const xllm::proto::ExecutionResourceHold& hold : batch) {
+      for (const xllm::proto::ExecutionHolder& holder :
+           hold.potential_holders()) {
+        xllm::proto::HolderConvergenceProof proof =
+            xllm::proto::HOLDER_CONVERGENCE_PROOF_UNSPECIFIED;
+        if (call_attempt_control(
+                hold,
+                holder,
+                /*query=*/true,
+                options_.execution_hold_cleanup_rpc_timeout_ms())) {
+          proof = xllm::proto::HOLDER_CONVERGENCE_PROOF_TERMINAL_OUTCOME;
+        } else if (call_attempt_control(
+                       hold,
+                       holder,
+                       /*query=*/false,
+                       options_.execution_hold_cleanup_rpc_timeout_ms())) {
+          proof = xllm::proto::HOLDER_CONVERGENCE_PROOF_CANCEL_FENCE_ACK;
+        }
+        if (proof != xllm::proto::HOLDER_CONVERGENCE_PROOF_UNSPECIFIED) {
+          execution_hold_cleanup_table_->apply_convergence_proof(
+              hold.attempt(), holder, proof);
+        }
+      }
+    }
+
+    wait_lock.lock();
   }
 }
 

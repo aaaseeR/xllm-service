@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstddef>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -128,6 +129,11 @@ class ExecutionHoldCleanupTable final {
   size_t mark_holder_process_terminated(
       const xllm::proto::ExecutionHolder& holder);
 
+  // Returns a bounded, round-robin snapshot for cleanup retry. Records remain
+  // owned by the table and are removed only by a convergence proof.
+  std::vector<xllm::proto::ExecutionResourceHold> next_retry_batch(
+      size_t max_records);
+
   bool contains(const xllm::proto::ExecutionAttemptId& attempt) const;
   std::optional<xllm::proto::ExecutionResourceHold> query(
       const xllm::proto::ExecutionAttemptId& attempt) const;
@@ -148,16 +154,20 @@ class ExecutionHoldCleanupTable final {
     size_t operator()(const AttemptKey& key) const;
   };
 
+  using RetryOrder = std::list<AttemptKey>;
+
   struct CleanupRecord {
     xllm::proto::ExecutionResourceHold hold;
     std::vector<bool> converged_holders;
     Reservation reservation;
+    RetryOrder::iterator retry_order_it;
   };
 
   static AttemptKey to_key(const xllm::proto::ExecutionAttemptId& attempt);
 
   std::shared_ptr<Reservation::CapacityState> capacity_;
   mutable std::mutex mutex_;
+  RetryOrder retry_order_;
   std::unordered_map<AttemptKey, CleanupRecord, AttemptKeyHash> records_;
 };
 

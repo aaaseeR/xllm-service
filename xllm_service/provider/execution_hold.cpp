@@ -19,6 +19,7 @@ limitations under the License.
 #include <cctype>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -306,6 +307,8 @@ ExecutionHoldStatus ExecutionHoldCleanupTable::adopt(
   record.hold = std::move(*request_hold->hold_);
   record.converged_holders = std::move(request_hold->converged_holders_);
   record.reservation = std::move(request_hold->reservation_);
+  retry_order_.push_back(key);
+  record.retry_order_it = std::prev(retry_order_.end());
   records_.emplace(key, std::move(record));
   request_hold->hold_.reset();
   request_hold->detached_ = true;
@@ -339,6 +342,7 @@ ExecutionHoldStatus ExecutionHoldCleanupTable::apply_convergence_proof(
     return ExecutionHoldStatus::kOk;
   }
   it->second.hold.set_proof(xllm::proto::EXECUTION_HOLD_PROOF_TERMINAL);
+  retry_order_.erase(it->second.retry_order_it);
   records_.erase(it);
   return ExecutionHoldStatus::kResolved;
 }
@@ -366,10 +370,47 @@ size_t ExecutionHoldCleanupTable::mark_holder_process_terminated(
       continue;
     }
     it->second.hold.set_proof(xllm::proto::EXECUTION_HOLD_PROOF_TERMINAL);
+    retry_order_.erase(it->second.retry_order_it);
     it = records_.erase(it);
     ++resolved;
   }
   return resolved;
+}
+
+std::vector<ExecutionResourceHold> ExecutionHoldCleanupTable::next_retry_batch(
+    size_t max_records) {
+  std::vector<ExecutionResourceHold> result;
+  if (max_records == 0) {
+    return result;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  const size_t records_to_visit = retry_order_.size();
+  result.reserve(std::min(max_records, records_to_visit));
+  size_t records_visited = 0;
+  while (result.size() < max_records && records_visited < records_to_visit &&
+         !retry_order_.empty()) {
+    ++records_visited;
+    const auto order_it = retry_order_.begin();
+    const auto record_it = records_.find(*order_it);
+    if (record_it == records_.end()) {
+      retry_order_.erase(order_it);
+      continue;
+    }
+    ExecutionResourceHold pending = record_it->second.hold;
+    pending.clear_potential_holders();
+    for (int holder_index = 0;
+         holder_index < record_it->second.hold.potential_holders_size();
+         ++holder_index) {
+      if (!record_it->second.converged_holders[holder_index]) {
+        *pending.add_potential_holders() =
+            record_it->second.hold.potential_holders(holder_index);
+      }
+    }
+    result.emplace_back(std::move(pending));
+    retry_order_.splice(retry_order_.end(), retry_order_, order_it);
+  }
+  return result;
 }
 
 bool ExecutionHoldCleanupTable::contains(

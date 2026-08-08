@@ -15,6 +15,9 @@ limitations under the License.
 
 #pragma once
 
+#include <condition_variable>
+#include <thread>
+
 #include "chat_template/chat_template.h"
 #include "chat_template/jinja_chat_template.h"
 #include "common/call_data.h"
@@ -104,6 +107,11 @@ class Scheduler final {
   bool resolve_terminal_execution_hold(const std::shared_ptr<Request>& request);
   void cancel_or_detach_execution_hold_locked(
       const std::shared_ptr<Request>& request);
+  bool call_attempt_control(const xllm::proto::ExecutionResourceHold& hold,
+                            const xllm::proto::ExecutionHolder& holder,
+                            bool query,
+                            int32_t timeout_ms);
+  void run_execution_hold_cleanup();
 
  private:
   Options options_;
@@ -117,6 +125,11 @@ class Scheduler final {
   // exact process-termination evidence. Lock order is this mutex, then
   // request_mutex_, then InstanceMgr's internal cluster mutex.
   std::mutex execution_hold_cleanup_mutex_;
+
+  std::mutex execution_hold_cleanup_wait_mutex_;
+  std::condition_variable execution_hold_cleanup_cv_;
+  bool execution_hold_cleanup_stopped_ = false;
+  std::unique_ptr<std::thread> execution_hold_cleanup_thread_;
 
   bool exited_ = false;
 
