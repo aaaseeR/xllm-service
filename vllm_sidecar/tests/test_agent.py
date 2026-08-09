@@ -6,6 +6,7 @@ import json
 import threading
 import time
 
+import pytest
 import requests
 
 from vllm_sidecar.agent import AgentRuntime
@@ -71,9 +72,9 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
     base = "http://" + agent.listen_address
     try:
         assert requests.get(base + "/health", timeout=2.0).status_code == 200
-        models = requests.get(base + "/v1/models", timeout=2.0)
+        models = requests.get(base + "/v1/models?scope=all", timeout=2.0)
         assert models.status_code == 200
-        assert models.json()["path"] == "/v1/models"
+        assert models.json()["path"] == "/v1/models?scope=all"
         assert (
             requests.post(base + "/v1/models", json={}, timeout=2.0).status_code
             == 405
@@ -385,6 +386,60 @@ def test_agent_bounds_inflight_proxy_requests() -> None:
         upstream_thread.join(timeout=2.0)
 
 
+def test_agent_bounds_aggregate_inflight_body_bytes() -> None:
+    DelayedUpstreamHandler.received.clear()
+    DelayedUpstreamHandler.release.clear()
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), DelayedUpstreamHandler)
+    upstream.daemon_threads = True
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+
+    agent = AgentRuntime(
+        "127.0.0.1:0",
+        f"http://127.0.0.1:{upstream.server_address[1]}",
+        max_inflight_requests=2,
+        max_request_body_bytes=128,
+        inflight_body_capacity_bytes=128,
+    )
+    agent.start()
+    agent.activate("inc-1")
+    base = "http://" + agent.listen_address
+    headers = {
+        "X-Attempt-Seq": "0",
+        "X-Incarnation-ID": "inc-1",
+        "X-Remaining-Deadline-Ms": "2000",
+    }
+    payload = {"model": "m", "prompt": "x" * 80}
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(
+                requests.post,
+                base + "/v1/completions",
+                json=payload,
+                headers={**headers, "X-Request-UID": "bytes-1"},
+                timeout=2.0,
+            )
+            assert DelayedUpstreamHandler.received.wait(timeout=1.0)
+            rejected = requests.post(
+                base + "/v1/completions",
+                json=payload,
+                headers={**headers, "X-Request-UID": "bytes-2"},
+                timeout=2.0,
+            )
+            assert rejected.status_code == 503
+            assert agent.ledger.query("bytes-2", 0, "inc-1").state == (
+                "ATTEMPT_LIFECYCLE_STATE_ABSENT"
+            )
+            DelayedUpstreamHandler.release.set()
+            assert first.result(timeout=2.0).status_code == 200
+    finally:
+        DelayedUpstreamHandler.release.set()
+        agent.stop()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=2.0)
+
+
 def test_cancel_fence_capacity_never_returns_false_ack() -> None:
     agent = AgentRuntime(
         "127.0.0.1:0",
@@ -420,5 +475,69 @@ def test_cancel_fence_capacity_never_returns_false_ack() -> None:
         assert _post_attempt(
             base, "/v1/internal/attempt/cancel", "fence-2", 0
         ).status_code == 200
+    finally:
+        agent.stop()
+
+
+def test_agent_configuration_fails_closed_and_unstarted_stop_is_safe() -> None:
+    with pytest.raises(ValueError):
+        AgentRuntime(
+            "127.0.0.1:0",
+            "http://127.0.0.1:1",
+            max_inflight_requests=0,
+        )
+    with pytest.raises(ValueError):
+        AgentRuntime(
+            "127.0.0.1:0",
+            "http://user:password@127.0.0.1:1",
+        )
+    with pytest.raises(ValueError):
+        AgentRuntime("127.0.0.1:not-a-port", "http://127.0.0.1:1")
+    with pytest.raises(ValueError):
+        AgentRuntime(
+            "127.0.0.1:0",
+            "http://127.0.0.1:1",
+            internal_token="bad\ntoken",
+        )
+    with pytest.raises(ValueError):
+        AgentRuntime("[::1]:0", "http://127.0.0.1:1")
+
+    agent = AgentRuntime("127.0.0.1:0", "http://127.0.0.1:1")
+    agent.stop()
+
+
+def test_agent_requires_constant_time_internal_authentication() -> None:
+    agent = AgentRuntime(
+        "127.0.0.1:0",
+        "http://127.0.0.1:1",
+        internal_token="secret-token",
+    )
+    agent.start()
+    agent.activate("inc-1")
+    base = "http://" + agent.listen_address
+    body = {
+        "request_uid": "auth-query",
+        "attempt_seq": 0,
+        "incarnation_id": "inc-1",
+    }
+    try:
+        assert requests.post(
+            base + "/v1/internal/attempt/query", json=body, timeout=2.0
+        ).status_code == 401
+        assert requests.post(
+            base + "/v1/internal/attempt/query",
+            json=body,
+            headers={"X-Internal-Token": "wrong-token"},
+            timeout=2.0,
+        ).status_code == 401
+        authorized = requests.post(
+            base + "/v1/internal/attempt/query",
+            json=body,
+            headers={"X-Internal-Token": "secret-token"},
+            timeout=2.0,
+        )
+        assert authorized.status_code == 200
+        assert authorized.json()["state"] == "ATTEMPT_LIFECYCLE_STATE_ABSENT"
+        assert requests.get(base + "/livez", timeout=2.0).status_code == 200
     finally:
         agent.stop()

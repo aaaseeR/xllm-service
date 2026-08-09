@@ -1320,6 +1320,7 @@ bool Scheduler::call_attempt_control(
           holder,
           query ? provider::AttemptControlOperation::QUERY
                 : provider::AttemptControlOperation::CANCEL,
+          options_.internal_api_token(),
           timeout_ms);
   record_direct_engine_evidence(
       holder.engine_uid(), holder.incarnation_id(), result.direct_success);

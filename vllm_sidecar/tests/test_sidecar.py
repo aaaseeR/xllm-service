@@ -146,7 +146,7 @@ def _args(**kwargs):
         health_timeout=1.0,
         health_fail_threshold=3,
         xllm_service_url="http://127.0.0.1:9998",
-        internal_token="",
+        internal_token="test-token",
         heartbeat_interval=3.0,
         metrics_url="http://127.0.0.1:18000/metrics",
         log_level="INFO",
@@ -322,6 +322,33 @@ def test_send_heartbeat_posts_metrics_with_token(monkeypatch):
     assert captured["json"]["load_metrics"]["waiting_requests_num"] == 2
 
 
+def test_heartbeat_auth_failure_deregisters_and_stops(monkeypatch):
+    etcd = _install_fakes(monkeypatch)
+    sc = sidecar_mod.Sidecar(_args(internal_token="wrong-token"))
+    assert sc._register()
+
+    class _Scraper:
+        def scrape(self):
+            return {
+                "load_metrics": {},
+                "latency_metrics": {},
+            }
+
+    class _Response:
+        status_code = 401
+        text = "unauthorized"
+
+    sc._metrics = _Scraper()
+    monkeypatch.setattr(
+        sc._hb_session, "post", lambda *args, **kwargs: _Response()
+    )
+    sc._send_heartbeat()
+
+    assert sc._stop.is_set()
+    assert not sc._registered
+    assert etcd.revoked == ["lease-1"]
+
+
 def test_sidecar_registration_keepalive_and_deregister(monkeypatch):
     etcd = _install_fakes(monkeypatch)
     sc = sidecar_mod.Sidecar(_args())
@@ -421,6 +448,63 @@ def test_strict_agent_registers_descriptor_and_publishes_engine_state(
     finally:
         sc._deregister()
         sc._agent.stop()
+
+
+def test_strict_agent_separates_bind_and_advertised_hosts(monkeypatch, tmp_path):
+    config_path = tmp_path / "provider.json"
+    config_path.write_text(json.dumps(_provider_config()), encoding="utf-8")
+    _install_fakes(monkeypatch)
+    sc = sidecar_mod.Sidecar(
+        _args(
+            provider_config=str(config_path),
+            agent_listen="0.0.0.0:0",
+            register_addr="127.0.0.1:0",
+        )
+    )
+    try:
+        assert sc._agent.listen_address.startswith("0.0.0.0:")
+        assert sc._args.register_addr.startswith("127.0.0.1:")
+        assert not sc._args.register_addr.endswith(":0")
+    finally:
+        sc._agent.stop()
+
+
+@pytest.mark.parametrize(
+    ("agent_listen", "register_addr", "instance_type", "error"),
+    [
+        ("0.0.0.0:0", "0.0.0.0:0", "DEFAULT", "routable"),
+        ("127.0.0.1:18001", "127.0.0.1:18002", "DEFAULT", "ports"),
+        ("127.0.0.1:0", "127.0.0.1:0", "PREFILL", "DEFAULT"),
+    ],
+)
+def test_strict_agent_rejects_unroutable_or_mismatched_registration(
+    tmp_path, agent_listen, register_addr, instance_type, error
+):
+    config_path = tmp_path / "provider.json"
+    config_path.write_text(json.dumps(_provider_config()), encoding="utf-8")
+    with pytest.raises(ValueError, match=error):
+        sidecar_mod.Sidecar(
+            _args(
+                provider_config=str(config_path),
+                agent_listen=agent_listen,
+                register_addr=register_addr,
+                instance_type=instance_type,
+            )
+        )
+
+
+def test_strict_agent_rejects_missing_internal_token(tmp_path):
+    config_path = tmp_path / "provider.json"
+    config_path.write_text(json.dumps(_provider_config()), encoding="utf-8")
+    with pytest.raises(ValueError, match="internal-token"):
+        sidecar_mod.Sidecar(
+            _args(
+                provider_config=str(config_path),
+                agent_listen="127.0.0.1:0",
+                register_addr="127.0.0.1:0",
+                internal_token="",
+            )
+        )
 
 
 def test_strict_agent_reopens_only_after_successful_keepalive(
@@ -524,6 +608,11 @@ def test_sidecar_parser_and_main(monkeypatch):
         == 0
     )
     assert ran == [("host:18000", "DEBUG")]
+    assert sidecar_mod._derive_addr("https://secure.example/v1") == (
+        "secure.example:443"
+    )
+    with pytest.raises(ValueError):
+        sidecar_mod._derive_addr("not-a-url")
 
     args = sidecar_mod.build_parser().parse_args(["--instance-type", "DEFAULT"])
     assert args.instance_type == InstanceType.DEFAULT.name

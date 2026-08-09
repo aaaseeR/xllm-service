@@ -45,6 +45,7 @@ limitations under the License.
 #include "http_service/request_execution_context.h"
 #include "http_service/sse_terminal_marker.h"
 #include "observability/request_identity.h"
+#include "provider/attempt_control_client.h"
 #include "provider/canonical_request_builder.h"
 #include "scheduler/scheduler.h"
 #include "xllm_rpc_service.pb.h"
@@ -464,6 +465,7 @@ void handle_vllm_non_stream_done(brpc::Controller* redirect_cntl,
 template <typename T>
 void handle_vllm(std::shared_ptr<T> call_data,
                  Scheduler* scheduler,
+                 const std::string& internal_api_token,
                  const std::string& target_name,
                  const std::string& target_incarnation_id,
                  const std::string& path,
@@ -486,6 +488,16 @@ void handle_vllm(std::shared_ptr<T> call_data,
   redirect_cntl->http_request().uri() = "http://" + target_name + path;
   redirect_cntl->http_request().set_method(is_post ? brpc::HTTP_METHOD_POST
                                                    : brpc::HTTP_METHOD_GET);
+  if (!provider::set_vllm_agent_internal_token(redirect_cntl,
+                                               internal_api_token)) {
+    call_data->finish_with_error(
+        "Provider Agent authentication is unavailable.");
+    if (request != nullptr) {
+      scheduler->finish_request(request->correlation.request_uid(), true);
+    }
+    delete redirect_cntl;
+    return;
+  }
   if (!correlation.request_uid().empty()) {
     redirect_cntl->http_request().SetHeader("X-Global-Request-ID",
                                             correlation.global_request_id());
@@ -767,6 +779,7 @@ void XllmHttpServiceImpl::get_serving_models(
   if (service_request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     handle_vllm(call_data,
                 scheduler_,
+                options_.internal_api_token(),
                 service_request->routing.prefill_name,
                 service_request->prefill_incarnation_id,
                 "/v1/models",
@@ -860,6 +873,7 @@ void XllmHttpServiceImpl::Completions(
     }
     handle_vllm(call_data,
                 scheduler_,
+                options_.internal_api_token(),
                 service_request->routing.prefill_name,
                 service_request->prefill_incarnation_id,
                 "/v1/completions",
@@ -1014,6 +1028,7 @@ void XllmHttpServiceImpl::ChatCompletions(
     }
     handle_vllm(call_data,
                 scheduler_,
+                options_.internal_api_token(),
                 service_request->routing.prefill_name,
                 service_request->prefill_incarnation_id,
                 "/v1/chat/completions",

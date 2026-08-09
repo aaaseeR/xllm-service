@@ -21,11 +21,9 @@ vLLM (with the sidecar still running) does not leave a phantom instance routable
 
 from __future__ import annotations
 
-import logging
-
 import requests
 
-logger = logging.getLogger("vllm_sidecar.health")
+from scripts.logger import logger
 
 
 class VllmHealthProbe:
@@ -39,17 +37,21 @@ class VllmHealthProbe:
     def is_healthy(self) -> bool:
         """True iff vLLM `/health` returns 2xx within the timeout."""
         try:
-            r = self._session.get(self._base + "/health", timeout=self._timeout)
-            return 200 <= r.status_code < 300
-        except requests.RequestException as e:
-            logger.debug("vLLM health probe failed: %s", e)
+            response = self._session.get(
+                self._base + "/health", timeout=self._timeout
+            )
+            return 200 <= response.status_code < 300
+        except requests.RequestException as error:
+            logger.debug("vLLM health probe failed: %s", error)
             return False
 
     def served_model(self) -> str | None:
         """Best-effort first model id from `/v1/models`, for logging only."""
         try:
-            r = self._session.get(self._base + "/v1/models", timeout=self._timeout)
-            data = r.json().get("data", [])
+            response = self._session.get(
+                self._base + "/v1/models", timeout=self._timeout
+            )
+            data = response.json().get("data", [])
             return data[0]["id"] if data else None
         except (requests.RequestException, ValueError, KeyError, IndexError):
             return None

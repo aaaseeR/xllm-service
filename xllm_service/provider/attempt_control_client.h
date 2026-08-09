@@ -38,6 +38,9 @@ struct AttemptControlResult {
       xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED;
 };
 
+bool set_vllm_agent_internal_token(brpc::Controller* controller,
+                                   const std::string& internal_api_token);
+
 bool set_vllm_agent_attempt_headers(brpc::Controller* controller,
                                     const std::string& request_uid,
                                     uint64_t attempt_seq,
@@ -50,6 +53,7 @@ AttemptControlResult call_provider_attempt_control(
     const xllm::proto::ExecutionResourceHold& hold,
     const xllm::proto::ExecutionHolder& holder,
     AttemptControlOperation operation,
+    const std::string& internal_api_token,
     int32_t timeout_ms);
 
 AttemptControlResult parse_vllm_agent_attempt_response(

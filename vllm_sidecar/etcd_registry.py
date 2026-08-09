@@ -32,11 +32,10 @@ DELETE (on lease expiry/revoke). Only `requests` is required.
 from __future__ import annotations
 
 import base64
-import logging
 
 import requests
 
-logger = logging.getLogger("vllm_sidecar.etcd")
+from scripts.logger import logger
 
 
 class EtcdError(RuntimeError):
@@ -59,13 +58,21 @@ class EtcdGatewayClient:
     ) -> None:
         # `endpoints` may be a comma-separated string or a list of host:port.
         if isinstance(endpoints, str):
-            endpoints = [e.strip() for e in endpoints.split(",") if e.strip()]
+            endpoints = [
+                endpoint.strip()
+                for endpoint in endpoints.split(",")
+                if endpoint.strip()
+            ]
         # Keep an explicit scheme if present; only default to http:// otherwise,
         # so endpoints like "https://host:2379" are not turned into
         # "http://https://host:2379".
         self._bases = [
-            e if e.startswith(("http://", "https://")) else "http://" + e
-            for e in (endpoint.rstrip("/") for endpoint in endpoints)
+            endpoint
+            if endpoint.startswith(("http://", "https://"))
+            else "http://" + endpoint
+            for endpoint in (
+                raw_endpoint.rstrip("/") for raw_endpoint in endpoints
+            )
         ]
         if not self._bases:
             raise ValueError("at least one etcd endpoint is required")
@@ -88,19 +95,26 @@ class EtcdGatewayClient:
         last_err = None
         for base in self._bases:
             try:
-                r = self._session.post(base + path, json=body, timeout=self._timeout)
-                if r.status_code == 200:
+                response = self._session.post(
+                    base + path, json=body, timeout=self._timeout
+                )
+                if response.status_code == 200:
                     try:
-                        data = r.json()
-                    except ValueError as e:
-                        last_err = EtcdError(f"invalid JSON response from {path}: {e}")
+                        data = response.json()
+                    except ValueError as error:
+                        last_err = EtcdError(
+                            f"invalid JSON response from {path}: {error}"
+                        )
                         continue
                     # Every v3 gateway endpoint returns a JSON object; coerce any
                     # other shape (null/list) to {} so callers can rely on .get().
                     return data if isinstance(data, dict) else {}
-                last_err = EtcdError(f"{path} -> HTTP {r.status_code}: {r.text[:200]}")
-            except requests.RequestException as e:  # connection/timeout
-                last_err = e
+                last_err = EtcdError(
+                    f"{path} -> HTTP {response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+            except requests.RequestException as error:  # connection/timeout
+                last_err = error
         raise EtcdError(f"all etcd endpoints failed for {path}: {last_err}")
 
     # --- lease lifecycle ---------------------------------------------------

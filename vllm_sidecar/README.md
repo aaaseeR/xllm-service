@@ -72,15 +72,19 @@ python -m vllm_sidecar.sidecar \
   --provider-config vllm_sidecar/provider_config.json \
   --vllm-url http://127.0.0.1:18000 \
   --agent-listen 0.0.0.0:18100 \
-  --register-addr 0.0.0.0:18100 \
+  --register-addr 127.0.0.1:18100 \
   --etcd-endpoints 127.0.0.1:2379 \
-  --xllm-service-url http://127.0.0.1:9998
+  --xllm-service-url http://127.0.0.1:9998 \
+  --internal-token "${XLLM_INTERNAL_TOKEN}"
 ```
 
-`--agent-listen` and `--register-addr` must be identical. The latter is a bare
-`host:port`, not a URL. For a real deployment, advertise a routable address
-instead of `0.0.0.0`; the strict equality requirement prevents accidentally
-registering the raw vLLM port.
+`--agent-listen` is the local bind address; `--register-addr` is the Agent
+address advertised to xllm-service. Their ports must match, while their hosts
+may differ so `0.0.0.0` can bind locally and a routable node address can be
+advertised. A wildcard `--register-addr` is rejected. The example uses loopback
+for one host; replace it with the node address for a multi-host deployment.
+Strict mode requires a nonempty printable-ASCII internal token of at most 4096
+bytes, and xllm-service must use the same value through `--internal_api_token`.
 
 `--max-attempt-records` and `--max-cancel-fences` are independent capacities.
 `--negative-fence-ttl` must cover the complete hard lifetime of an old Submit;
@@ -88,6 +92,9 @@ when the fence pool reaches capacity, the Agent publishes `DRAINING` and stops
 new inference admission until it falls to the low watermark. Configure
 `--agent-max-inflight-requests` to bound concurrent upstream proxies and
 `--agent-ingress-timeout` to bound incomplete request-body reads.
+`--agent-max-request-body-bytes` defaults to 8 MiB and
+`--agent-inflight-body-capacity-bytes` defaults to 64 MiB, bounding aggregate
+JSON bodies independently of request count.
 
 ### Strict inference contract
 

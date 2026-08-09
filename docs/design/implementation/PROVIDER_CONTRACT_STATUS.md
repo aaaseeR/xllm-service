@@ -112,7 +112,7 @@ limitations under the License.
 
 Service 的 Provider/Registry 纯 CPU 测试已覆盖 Adapter、route、EngineState 和
 LinkState；当前全量 service CPU 回归为 293/293，vLLM Agent/sidecar CPU 回归为
-47/47，xLLM CPU 公共路径基线为 96/96。新增 xLLM Engine plan
+60/60，xLLM CPU 公共路径基线为 97/97。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
 生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
 仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。

@@ -18,22 +18,23 @@ from __future__ import annotations
 
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hmac
 import json
-import logging
 import math
 import socket
 import threading
 from urllib.parse import urlsplit
 
-from .attempts import AttemptKey, AttemptLedger, AttemptResult
+from scripts.logger import logger
 
-logger = logging.getLogger("vllm_sidecar.agent")
+from .attempts import AttemptKey, AttemptLedger, AttemptResult
 
 _INFERENCE_PATHS = {
     "/v1/chat/completions",
     "/v1/completions",
 }
 _READ_ONLY_PATHS = {"/v1/models"}
+_MAX_CONTROL_BODY_BYTES = 64 * 1024
 _HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -44,6 +45,31 @@ _HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+_AGENT_ONLY_HEADERS = {
+    "x-attempt-seq",
+    "x-incarnation-id",
+    "x-internal-token",
+    "x-remaining-deadline-ms",
+    "x-request-uid",
+}
+
+
+def _positive_finite(value: object) -> bool:
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def valid_internal_token(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 4096
+        and value.isascii()
+        and all("!" <= character <= "~" for character in value)
+    )
 
 
 class _CancelableHttpConnection:
@@ -77,6 +103,24 @@ class _CancelableHttpConnection:
             self._connection.close()
 
 
+class _ByteCapacity:
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def try_reserve(self, size: int) -> bool:
+        with self._lock:
+            if size > self._capacity - self._used:
+                return False
+            self._used += size
+            return True
+
+    def release(self, size: int) -> None:
+        with self._lock:
+            self._used -= size
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -87,17 +131,24 @@ class AgentRuntime:
         terminal_ttl_seconds: float = 60.0,
         negative_fence_ttl_seconds: float = 60.0,
         max_inflight_requests: int = 256,
+        max_request_body_bytes: int = 8 * 1024 * 1024,
+        inflight_body_capacity_bytes: int = 64 * 1024 * 1024,
         connect_timeout_seconds: float = 1.0,
         ingress_timeout_seconds: float = 5.0,
+        internal_token: str = "",
     ) -> None:
-        host, port = _split_address(listen_address)
+        host, port = split_address(listen_address)
         if (
             type(max_inflight_requests) is not int
             or max_inflight_requests <= 0
-            or not math.isfinite(connect_timeout_seconds)
-            or connect_timeout_seconds <= 0
-            or not math.isfinite(ingress_timeout_seconds)
-            or ingress_timeout_seconds <= 0
+            or type(max_request_body_bytes) is not int
+            or max_request_body_bytes <= 0
+            or type(inflight_body_capacity_bytes) is not int
+            or inflight_body_capacity_bytes < max_request_body_bytes
+            or not _positive_finite(connect_timeout_seconds)
+            or not _positive_finite(ingress_timeout_seconds)
+            or not isinstance(internal_token, str)
+            or (internal_token and not valid_internal_token(internal_token))
         ):
             raise ValueError("Agent concurrency and timeouts must be positive")
         self._listen_address = listen_address
@@ -119,7 +170,10 @@ class AgentRuntime:
         self._upstream_path = upstream.path.rstrip("/")
         self._connect_timeout = connect_timeout_seconds
         self._ingress_timeout = ingress_timeout_seconds
+        self._internal_token = internal_token
         self._inflight = threading.BoundedSemaphore(max_inflight_requests)
+        self._max_request_body_bytes = max_request_body_bytes
+        self._body_capacity = _ByteCapacity(inflight_body_capacity_bytes)
         self._ledger = AttemptLedger(
             max_attempt_records,
             terminal_ttl_seconds,
@@ -160,7 +214,8 @@ class AgentRuntime:
     def stop(self) -> None:
         self._ledger.fence()
         self._reaper_stop.set()
-        self._server.shutdown()
+        if self._thread is not None:
+            self._server.shutdown()
         self._server.server_close()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
@@ -179,7 +234,7 @@ class AgentRuntime:
         while not self._reaper_stop.wait(0.05):
             self._ledger.reap_expired()
 
-    def _handler_type(self):
+    def _handler_type(self) -> type[BaseHTTPRequestHandler]:
         runtime = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -198,8 +253,8 @@ class AgentRuntime:
             def do_DELETE(self) -> None:
                 runtime._handle(self)
 
-            def log_message(self, message: str, *args) -> None:
-                logger.debug("agent ingress: " + message, *args)
+            def log_message(self, message: str, *arguments: object) -> None:
+                logger.debug("agent ingress: " + message, *arguments)
 
         return Handler
 
@@ -213,6 +268,11 @@ class AgentRuntime:
                 self._write_json(handler, 200, {"status": "ready"})
             else:
                 self._write_json(handler, 503, {"status": "fenced"})
+            return
+        if self._internal_token and not hmac.compare_digest(
+            handler.headers.get("X-Internal-Token", ""), self._internal_token
+        ):
+            self._write_json(handler, 401, {"error": "unauthorized"})
             return
         if path == "/v1/internal/attempt/query":
             if handler.command != "POST":
@@ -242,7 +302,7 @@ class AgentRuntime:
             self._write_json(handler, 503, {"error": "Agent concurrency limit"})
             return
         try:
-            self._proxy(handler, path, None, None, None)
+            self._proxy(handler, path, None, None, None, 0)
         finally:
             self._inflight.release()
 
@@ -316,31 +376,51 @@ class AgentRuntime:
                     handler, 400, {"error": "invalid V2 attempt headers"}
                 )
                 return
-            result = self._ledger.begin(
-                request_uid, attempt_seq, incarnation_id, remaining_ms
+            body_length = self._body_length(
+                handler, self._max_request_body_bytes
             )
-            if not result.accepted:
-                if result.reason == "ADMISSION_REASON_INVALID_REQUEST":
-                    status = 400
-                elif (
-                    result.replayed
-                    or result.reason == "ADMISSION_REASON_STALE_INCARNATION"
-                ):
-                    status = 409
-                else:
-                    status = 503
+            if body_length is None:
+                return
+            if not self._body_capacity.try_reserve(body_length):
                 self._write_json(
-                    handler,
-                    status,
-                    _attempt_json(
-                        result,
-                        AttemptKey(request_uid, attempt_seq),
-                        incarnation_id,
-                    ),
+                    handler, 503, {"error": "Agent body capacity limit"}
                 )
                 return
-            key = AttemptKey(request_uid, attempt_seq)
-            self._proxy(handler, path, key, incarnation_id, remaining_ms)
+            try:
+                result = self._ledger.begin(
+                    request_uid, attempt_seq, incarnation_id, remaining_ms
+                )
+                if not result.accepted:
+                    if result.reason == "ADMISSION_REASON_INVALID_REQUEST":
+                        status = 400
+                    elif (
+                        result.replayed
+                        or result.reason == "ADMISSION_REASON_STALE_INCARNATION"
+                    ):
+                        status = 409
+                    else:
+                        status = 503
+                    self._write_json(
+                        handler,
+                        status,
+                        _attempt_json(
+                            result,
+                            AttemptKey(request_uid, attempt_seq),
+                            incarnation_id,
+                        ),
+                    )
+                    return
+                key = AttemptKey(request_uid, attempt_seq)
+                self._proxy(
+                    handler,
+                    path,
+                    key,
+                    incarnation_id,
+                    remaining_ms,
+                    self._max_request_body_bytes,
+                )
+            finally:
+                self._body_capacity.release(body_length)
         finally:
             self._inflight.release()
 
@@ -351,8 +431,9 @@ class AgentRuntime:
         key: AttemptKey | None,
         incarnation_id: str | None,
         remaining_ms: int | None,
+        max_body_bytes: int,
     ) -> None:
-        raw_body = self._read_body(handler)
+        raw_body = self._read_body(handler, max_body_bytes)
         if raw_body is None:
             if key is not None:
                 self._ledger.finish(
@@ -377,6 +458,7 @@ class AgentRuntime:
             name: value
             for name, value in handler.headers.items()
             if name.lower() not in _HOP_HEADERS
+            and name.lower() not in _AGENT_ONLY_HEADERS
             and name.lower() not in ("host", "content-length")
         }
         if body:
@@ -407,7 +489,7 @@ class AgentRuntime:
                 return
             if not upstream.request(
                 handler.command,
-                self._upstream_path + handler.path,
+                self._upstream_request_target(handler.path),
                 body if body else None,
                 headers,
             ):
@@ -493,15 +575,34 @@ class AgentRuntime:
                 upstream.close()
             handler.close_connection = True
 
+    def _upstream_request_target(self, request_target: str) -> str:
+        parsed = urlsplit(request_target)
+        path = parsed.path or "/"
+        result = self._upstream_path + path
+        if parsed.query:
+            result += "?" + parsed.query
+        return result
+
     @staticmethod
-    def _read_body(handler: BaseHTTPRequestHandler) -> bytes | None:
+    def _body_length(
+        handler: BaseHTTPRequestHandler, max_body_bytes: int
+    ) -> int | None:
         try:
             length = int(handler.headers.get("Content-Length", "0"))
         except ValueError:
             AgentRuntime._write_json(handler, 400, {"error": "invalid content length"})
             return None
-        if length < 0 or length > 64 * 1024 * 1024:
+        if length < 0 or length > max_body_bytes:
             AgentRuntime._write_json(handler, 413, {"error": "request body too large"})
+            return None
+        return length
+
+    @staticmethod
+    def _read_body(
+        handler: BaseHTTPRequestHandler, max_body_bytes: int
+    ) -> bytes | None:
+        length = AgentRuntime._body_length(handler, max_body_bytes)
+        if length is None:
             return None
         if not length:
             return b""
@@ -522,7 +623,7 @@ class AgentRuntime:
 
     @staticmethod
     def _read_json(handler: BaseHTTPRequestHandler) -> dict | None:
-        raw = AgentRuntime._read_body(handler)
+        raw = AgentRuntime._read_body(handler, _MAX_CONTROL_BODY_BYTES)
         if raw is None:
             return None
         try:
@@ -549,9 +650,20 @@ class AgentRuntime:
         handler.close_connection = True
 
 
-def _split_address(address: str) -> tuple[str, int]:
+def split_address(address: str) -> tuple[str, int]:
     host, separator, port_text = address.rpartition(":")
-    if not separator or not host:
+    if (
+        not separator
+        or not host
+        or host != host.strip()
+        or any(character.isspace() for character in host)
+        or "/" in host
+        or ":" in host
+        or "[" in host
+        or "]" in host
+        or not port_text.isascii()
+        or not port_text.isdigit()
+    ):
         raise ValueError("agent listen address must be host:port")
     port = int(port_text)
     if port < 0 or port > 65535:
@@ -593,4 +705,6 @@ def _inject_request_id(
     if not isinstance(payload, dict):
         return None
     payload["request_id"] = f"xllm-{key.request_uid}-{key.attempt_seq}"
-    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return json.dumps(
+        payload, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")

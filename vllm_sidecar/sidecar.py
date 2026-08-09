@@ -28,38 +28,63 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
+import math
 import os
 import signal
 import threading
 import time
 import uuid
 from types import FrameType
+from urllib.parse import urlsplit
 
 import requests
 
-from .agent import AgentRuntime
+from scripts.logger import configure_logging, logger
+
+from .agent import AgentRuntime, split_address, valid_internal_token
 from .descriptor import build_provider_descriptor, load_provider_config
 from .etcd_registry import EtcdGatewayClient, EtcdError
 from .health import VllmHealthProbe
 from .meta import InstanceType, build_instance_key, build_instance_meta
 from .metrics import VllmMetricsScraper
 
-logger = logging.getLogger("vllm_sidecar")
-
 
 class Sidecar:
     def __init__(self, args: argparse.Namespace) -> None:
         self._args = args
+        _validate_runtime_args(args)
+        self._instance_type = InstanceType[args.instance_type]
         provider_config_path = getattr(args, "provider_config", "")
         self._provider_config = (
             load_provider_config(provider_config_path) if provider_config_path else None
         )
+        if self._provider_config is not None and (
+            not valid_internal_token(args.internal_token)
+        ):
+            raise ValueError(
+                "strict Agent requires a bounded printable-ASCII --internal-token"
+            )
         self._agent = None
         if self._provider_config is not None:
+            if self._instance_type != InstanceType.DEFAULT:
+                raise ValueError("strict aggregated Agent must use DEFAULT type")
             agent_listen = getattr(args, "agent_listen", "")
             if not agent_listen:
                 raise ValueError("--agent-listen is required with --provider-config")
+            _, listen_port = split_address(agent_listen)
+            register_host, register_port = split_address(args.register_addr)
+            if register_host == "0.0.0.0":
+                raise ValueError("strict --register-addr must be routable")
+            if listen_port != register_port:
+                raise ValueError(
+                    "strict Agent listen and registered ports must match"
+                )
+            build_provider_descriptor(
+                self._provider_config,
+                args.register_addr,
+                "configuration-validation",
+                args.register_addr,
+            )
             self._agent = AgentRuntime(
                 listen_address=agent_listen,
                 upstream_url=args.vllm_url,
@@ -72,15 +97,19 @@ class Sidecar:
                 max_inflight_requests=getattr(
                     args, "agent_max_inflight_requests", 256
                 ),
+                max_request_body_bytes=getattr(
+                    args, "agent_max_request_body_bytes", 8 * 1024 * 1024
+                ),
+                inflight_body_capacity_bytes=getattr(
+                    args, "agent_inflight_body_capacity_bytes", 64 * 1024 * 1024
+                ),
                 connect_timeout_seconds=getattr(args, "agent_connect_timeout", 1.0),
                 ingress_timeout_seconds=getattr(args, "agent_ingress_timeout", 5.0),
+                internal_token=args.internal_token,
             )
-            if agent_listen.endswith(":0") and args.register_addr == agent_listen:
-                args.register_addr = self._agent.listen_address
-            if args.register_addr != self._agent.listen_address:
-                raise ValueError(
-                    "strict Agent --register-addr must equal --agent-listen"
-                )
+            if register_port == 0:
+                _, bound_port = split_address(self._agent.listen_address)
+                args.register_addr = f"{register_host}:{bound_port}"
         self._etcd = EtcdGatewayClient(
             args.etcd_endpoints,
             username=args.etcd_username,
@@ -88,7 +117,6 @@ class Sidecar:
             timeout=args.etcd_timeout,
         )
         self._health = VllmHealthProbe(args.vllm_url, timeout=args.health_timeout)
-        self._instance_type = InstanceType[args.instance_type]
         self._key = build_instance_key(
             args.register_addr, self._instance_type, args.etcd_namespace
         )
@@ -156,8 +184,8 @@ class Sidecar:
                 self._args.lease_ttl,
             )
             return True
-        except EtcdError as e:
-            logger.warning("register failed, will retry: %s", e)
+        except EtcdError as error:
+            logger.warning("register failed, will retry: %s", error)
             self._lease_id = None
             if self._agent is not None:
                 self._agent.fence("ADMISSION_REASON_ENGINE_DRAINING")
@@ -172,10 +200,12 @@ class Sidecar:
         try:
             self._etcd.lease_revoke(self._lease_id)
             logger.info("deregistered %s (lease=%s revoked)", self._key, self._lease_id)
-        except EtcdError as e:
+        except EtcdError as error:
             # On failure the lease still expires within ttl; not fatal.
             logger.warning(
-                "revoke failed (lease expires in <=%ds): %s", self._args.lease_ttl, e
+                "revoke failed (lease expires in <=%ds): %s",
+                self._args.lease_ttl,
+                error,
             )
         finally:
             self._lease_id = None
@@ -252,8 +282,8 @@ class Sidecar:
                 # a successful ownership renewal may reopen the same
                 # incarnation after health recovers.
                 self._agent.activate(self._incarnation_id)
-        except EtcdError as e:
-            logger.warning("keepalive failed, re-registering: %s", e)
+        except EtcdError as error:
+            logger.warning("keepalive failed, re-registering: %s", error)
             if self._agent is not None:
                 self._agent.fence("ADMISSION_REASON_STALE_INCARNATION")
             self._lease_id = None
@@ -319,141 +349,198 @@ class Sidecar:
         if self._args.internal_token:
             headers["X-Internal-Token"] = self._args.internal_token
         try:
-            r = self._hb_session.post(
+            response = self._hb_session.post(
                 self._hb_url,
                 json=body,
                 headers=headers,
                 timeout=self._args.health_timeout,
             )
-        except requests.RequestException as e:
-            logger.debug("heartbeat POST failed: %s", e)
+        except requests.RequestException as error:
+            logger.debug("heartbeat POST failed: %s", error)
             return
-        if r.status_code == 409:
+        if response.status_code == 409:
             # master doesn't know this incarnation -> re-register and resync id
             logger.warning("heartbeat 409 (stale/unknown), re-registering")
             self._deregister()
             self._register()
-        elif r.status_code == 401:
-            logger.error("heartbeat 401: invalid --internal-token")
-        elif r.status_code != 200:
-            logger.warning("heartbeat -> HTTP %d: %s", r.status_code, r.text[:120])
+        elif response.status_code == 401:
+            logger.error("heartbeat 401: invalid --internal-token; stopping")
+            self._deregister()
+            self._stop.set()
+        elif response.status_code != 200:
+            logger.warning(
+                "heartbeat -> HTTP %d: %s",
+                response.status_code,
+                response.text[:120],
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         prog="vllm_sidecar",
         description="Auto-register a vLLM instance into xllm-service via etcd.",
     )
-    p.add_argument(
+    parser.add_argument(
         "--etcd-endpoints",
         default=os.environ.get("ETCD_ENDPOINTS", "127.0.0.1:2379"),
         help="comma-separated host:port list (default 127.0.0.1:2379)",
     )
-    p.add_argument(
+    parser.add_argument(
         "--etcd-namespace",
         default=os.environ.get("ETCD_NAMESPACE", ""),
         help="must match master's --etcd_namespace (default empty)",
     )
-    p.add_argument("--etcd-username", default=os.environ.get("ETCD_USERNAME", ""))
-    p.add_argument("--etcd-password", default=os.environ.get("ETCD_PASSWORD", ""))
-    p.add_argument("--etcd-timeout", type=float, default=3.0)
-    p.add_argument(
+    parser.add_argument(
+        "--etcd-username", default=os.environ.get("ETCD_USERNAME", "")
+    )
+    parser.add_argument(
+        "--etcd-password", default=os.environ.get("ETCD_PASSWORD", "")
+    )
+    parser.add_argument("--etcd-timeout", type=float, default=3.0)
+    parser.add_argument(
         "--vllm-url",
         default="http://127.0.0.1:18000",
         help="base URL of the local vLLM server",
     )
-    p.add_argument(
+    parser.add_argument(
         "--register-addr",
         default=None,
         help="host:port the master uses to reach vLLM, NO scheme "
         "(default: derived from --vllm-url)",
     )
-    p.add_argument(
+    parser.add_argument(
         "--provider-config",
         default="",
         help="verified V2 Provider profile JSON; enables strict Agent mode",
     )
-    p.add_argument(
+    parser.add_argument(
         "--agent-listen",
         default="",
-        help="strict Agent host:port; must equal --register-addr",
+        help="strict Agent bind host:port; port must match --register-addr",
     )
-    p.add_argument("--max-attempt-records", type=int, default=8192)
-    p.add_argument("--max-cancel-fences", type=int, default=8192)
-    p.add_argument("--attempt-terminal-ttl", type=float, default=60.0)
-    p.add_argument("--negative-fence-ttl", type=float, default=60.0)
-    p.add_argument("--agent-max-inflight-requests", type=int, default=256)
-    p.add_argument("--agent-connect-timeout", type=float, default=1.0)
-    p.add_argument("--agent-ingress-timeout", type=float, default=5.0)
-    p.add_argument("--backend-type", default="vllm")
-    p.add_argument(
+    parser.add_argument("--max-attempt-records", type=int, default=8192)
+    parser.add_argument("--max-cancel-fences", type=int, default=8192)
+    parser.add_argument("--attempt-terminal-ttl", type=float, default=60.0)
+    parser.add_argument("--negative-fence-ttl", type=float, default=60.0)
+    parser.add_argument("--agent-max-inflight-requests", type=int, default=256)
+    parser.add_argument(
+        "--agent-max-request-body-bytes", type=int, default=8 * 1024 * 1024
+    )
+    parser.add_argument(
+        "--agent-inflight-body-capacity-bytes",
+        type=int,
+        default=64 * 1024 * 1024,
+    )
+    parser.add_argument("--agent-connect-timeout", type=float, default=1.0)
+    parser.add_argument("--agent-ingress-timeout", type=float, default=5.0)
+    parser.add_argument("--backend-type", default="vllm")
+    parser.add_argument(
         "--instance-type",
         default="DEFAULT",
-        choices=[t.name for t in InstanceType],
+        choices=[instance_type.name for instance_type in InstanceType],
         help="single vLLM instance must be DEFAULT to be routable",
     )
-    p.add_argument(
+    parser.add_argument(
         "--instance-name",
         default="vllm",
         help="human-readable prefix for the incarnation id / logs",
     )
-    p.add_argument(
+    parser.add_argument(
         "--lease-ttl",
         type=int,
         default=6,
         help="etcd lease TTL in seconds (~2x keepalive interval)",
     )
-    p.add_argument(
+    parser.add_argument(
         "--keepalive-interval",
         type=float,
         default=2.0,
         help="seconds between health probe + lease refresh",
     )
-    p.add_argument("--health-timeout", type=float, default=3.0)
-    p.add_argument(
+    parser.add_argument("--health-timeout", type=float, default=3.0)
+    parser.add_argument(
         "--health-fail-threshold",
         type=int,
         default=3,
         help="consecutive failed probes before deregistering",
     )
     # heartbeat (LoadMetrics/LatencyMetrics reporting)
-    p.add_argument(
+    parser.add_argument(
         "--xllm-service-url",
         default="http://127.0.0.1:9998",
         help="master HTTP base URL for /v1/internal/heartbeat",
     )
-    p.add_argument(
+    parser.add_argument(
         "--internal-token",
         default=os.environ.get("XLLM_INTERNAL_TOKEN", ""),
         help="X-Internal-Token; must match master --internal_api_token",
     )
-    p.add_argument(
+    parser.add_argument(
         "--heartbeat-interval",
         type=float,
         default=3.0,
         help="seconds between metrics heartbeats",
     )
-    p.add_argument(
+    parser.add_argument(
         "--metrics-url",
         default=None,
         help="vLLM Prometheus endpoint (default: <vllm-url>/metrics)",
     )
-    p.add_argument("--log-level", default="INFO")
-    return p
+    parser.add_argument("--log-level", default="INFO")
+    return parser
 
 
 def _derive_addr(vllm_url: str) -> str:
-    # strip scheme and any trailing path -> host:port
-    no_scheme = vllm_url.split("://", 1)[-1]
-    return no_scheme.split("/", 1)[0]
+    parsed = urlsplit(vllm_url)
+    if (
+        parsed.scheme not in ("http", "https")
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or ":" in parsed.hostname
+    ):
+        raise ValueError("--vllm-url must be an HTTP(S) IPv4/DNS base URL")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return f"{parsed.hostname}:{port}"
+
+
+def _positive_finite(value: object) -> bool:
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _validate_runtime_args(args: argparse.Namespace) -> None:
+    if args.backend_type != "vllm":
+        raise ValueError("vLLM sidecar --backend-type must be vllm")
+    if not isinstance(args.register_addr, str) or not args.register_addr:
+        raise ValueError("--register-addr must be a nonempty host:port")
+    split_address(args.register_addr)
+    if (
+        type(args.lease_ttl) is not int
+        or args.lease_ttl <= 0
+        or not _positive_finite(args.etcd_timeout)
+        or not _positive_finite(args.keepalive_interval)
+        or args.keepalive_interval >= args.lease_ttl
+        or not _positive_finite(args.health_timeout)
+        or type(args.health_fail_threshold) is not int
+        or args.health_fail_threshold <= 0
+        or not _positive_finite(args.heartbeat_interval)
+    ):
+        raise ValueError("sidecar limits and intervals must be positive and bounded")
+    if (
+        not isinstance(args.instance_name, str)
+        or len(args.instance_name.encode("utf-8")) > 240
+    ):
+        raise ValueError("--instance-name is too long")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_logging(args.log_level)
     if not args.register_addr:
         args.register_addr = (
             args.agent_listen if args.provider_config else _derive_addr(args.vllm_url)

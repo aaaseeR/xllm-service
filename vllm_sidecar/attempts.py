@@ -39,6 +39,15 @@ def _valid_attempt_seq(value: int) -> bool:
     return type(value) is int and 0 <= value <= _MAX_UINT64
 
 
+def _positive_finite(value: object) -> bool:
+    if type(value) not in (int, float) or value <= 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 class Closable(Protocol):
     def close(self) -> None: ...
 
@@ -85,10 +94,8 @@ class AttemptLedger:
             or max_records <= 0
             or type(max_cancel_fences) is not int
             or max_cancel_fences <= 0
-            or not math.isfinite(terminal_ttl_seconds)
-            or terminal_ttl_seconds <= 0
-            or not math.isfinite(negative_fence_ttl_seconds)
-            or negative_fence_ttl_seconds <= 0
+            or not _positive_finite(terminal_ttl_seconds)
+            or not _positive_finite(negative_fence_ttl_seconds)
         ):
             raise ValueError("attempt ledger limits must be positive")
         self._max_records = max_records

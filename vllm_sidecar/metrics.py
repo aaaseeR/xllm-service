@@ -18,13 +18,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import logging
 import math
 import re
 
 import requests
 
-logger = logging.getLogger("vllm_sidecar.metrics")
+from scripts.logger import logger
 
 _SAMPLE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][\w:]*)(?:\{(?P<labels>[^}]*)\})?\s+"

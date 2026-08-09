@@ -41,6 +41,8 @@ limitations under the License.
   `X-Remaining-Deadline-Ms`，并向 vLLM 注入稳定 request ID。Submit、Attach、Finish、
   Query 和 Cancel 均在同一个 ledger 临界区校验 incarnation，旧进程请求不能修改新
   incarnation 复用的 attempt key。健康、lease 或 incarnation 失效会立即 fence 新 ingress。
+  推理、模型和 attempt control 统一校验与 Service heartbeat 相同的内部 token，并在转发
+  原始 vLLM 前剥离 token/attempt headers。
 - `vllm_sidecar/attempts.py` 使用 incarnation-scoped ledger。普通 attempt/tombstone
   与 `CANCELLED_BEFORE_CREATE` 否定 fence 使用独立容量和 TTL；fence 池压停止新准入，
   降到 low watermark 后才恢复。Query `ABSENT` 与 `accepted=false` 都不构成终态证明。
@@ -52,6 +54,9 @@ limitations under the License.
 - `vllm_sidecar/sidecar.py` 把 Descriptor 写入唯一 etcd Registry，heartbeat 生成单调
   `state_seq` 和 incarnation/profile/model 对齐的 EngineState。lease 重建使用新
   incarnation，并先 fence 旧 Agent 状态。
+  Agent bind host 与 Registry advertised host 解耦但端口必须相同，wildcard advertised
+  host、非 DEFAULT strict role、非可见 ASCII/空/超长 token 和非法 interval 均在接触
+  etcd 前 fail fast。
 - Service 的 `attempt_control_client.*` 按 Provider 选择 Native brpc 或 Agent HTTP
   Query/Cancel。vLLM 响应只有 `request_uid/attempt_seq/incarnation_id` 精确匹配且状态
   已知为 terminal 时才形成 terminal proof；错误 HTTP、身份错配、malformed JSON、
@@ -68,9 +73,9 @@ limitations under the License.
 | Submit exactly-once | 64 路同 key 并发仅一个成功；duplicate/tombstone/capacity | 真实高并发 vLLM | PASS / PENDING |
 | Query/Cancel/fence | lifecycle、Cancel-before-create、独立 fence 容量/TTL/low watermark、false ACK 防御、stale incarnation、旧 incarnation 与复用 key 的 ABA、Cancel 与未知 Submit 竞态 | SIGKILL、lease 分区 | PASS / PENDING |
 | local deadline | fake clock ledger 与延迟 upstream loopback；超时返回 terminal `EXPIRED` | NPU abort 到资源释放时延 | PASS / PENDING |
-| HTTP proxy | Chat/Completion payload/request ID、未知推理路径防旁路、inflight 上限、body timeout、Cancel/deadline 在响应头前 shutdown socket、成功/重复/错误 | 真实 SSE/客户端断流；Anthropic 尚未开放 | PASS / PENDING |
+| HTTP proxy | Chat/Completion payload/request ID、内部 token、未知推理路径防旁路、请求数/单 body/聚合 body 上限、body timeout、Cancel/deadline 在响应头前 shutdown socket、成功/重复/错误 | 真实 SSE/客户端断流；Anthropic 尚未开放 | PASS / PENDING |
 | EngineState | per-DP label、缺 rank `PARTIAL`、ratio 聚合、state sequence/identity、fence pressure 发布 `DRAINING` | 真实 vLLM-Ascend metrics | PASS / PENDING |
-| Service hold | aggregated commit/terminal invariant；Agent 精确身份/accepted terminal parser；Submit header 绑定目标 incarnation；SSE `[DONE]` 跨分片门禁；全量 293/293 | Submit ACK 丢失一万次 | PASS / PENDING |
+| Service hold | aggregated commit/terminal invariant；Agent 精确身份/accepted terminal parser；Submit header 绑定目标 incarnation 与内部 token；SSE `[DONE]` 跨分片门禁；全量 293/293、Agent 60/60 | Submit ACK 丢失一万次 | PASS / PENDING |
 
 ## 完善情况
 

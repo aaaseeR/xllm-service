@@ -1828,3 +1828,23 @@ low watermark 后才恢复。
 不再靠测试释放上游。Service 流式路径增加常量内存 SSE terminal 识别，只有跨任意分片
 观察到行级 `data: [DONE]` 才把干净 HTTP EOF 当作成功终态。CPU 门禁结果为 service
 293/293、Agent/sidecar 47/47。
+
+### 34.3 第三轮：部署集成、代码规范与配置门禁（2026-08-09）
+
+本轮发现严格 Agent 的部署地址契约不可用：实现要求 bind address 与 Registry address
+字符串完全相等，README 又示例发布 `0.0.0.0`，多机 Service 无法路由。现在只要求端口
+一致，允许 `0.0.0.0:<port>` 监听并发布真实 node host；wildcard advertised host、端口
+错配和 vLLM aggregated 使用非 DEFAULT role 均在创建 etcd client 前拒绝，动态端口会
+保留 advertised host 并回填实际端口。
+
+数据面和控制面补齐与 heartbeat 共用的 `X-Internal-Token`：严格 Sidecar 拒绝空 token，
+Service Submit/Models/Query/Cancel 全部注入同一 token，Agent 使用 constant-time compare
+校验并在转发 raw vLLM 前剥离认证与 attempt headers。并发门禁进一步增加 8 MiB 单请求
+和 64 MiB 聚合 body 默认上限，绝对请求 target 被规范化到固定 upstream，非法 URL、
+interval、数值 NaN/Inf/bool 及未启动 Agent 的 stop 路径均 fail closed。Python 日志统一
+到 `scripts/logger.py` 的进程级 xLLM logger，不再创建模块私有 logger。
+生产目标审计还发现 HTTP Service 对 Agent helper 只有间接声明依赖，已补直接 include，
+确保测试库与三个独立生产二进制都能编译链接。最终 CPU 门禁为 xLLM 默认六目标
+heartbeat 鉴权 401 也会立即 fence、撤销 lease 并退出，避免 Registry 持续发布不可用
+实例。最终 CPU 门禁为 xLLM 默认六目标 97/97、Service 293/293、Agent/sidecar
+60/60，三个 Service ARM64 Debug ELF 验证通过。

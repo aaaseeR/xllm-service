@@ -2,6 +2,8 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from vllm_sidecar.attempts import AttemptKey, AttemptLedger
 
 
@@ -154,3 +156,17 @@ def test_old_incarnation_cannot_mutate_reused_attempt_key() -> None:
     assert ledger.cancel("same", 1, "inc-1").reason == (
         "ADMISSION_REASON_STALE_INCARNATION"
     )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_records": True},
+        {"max_cancel_fences": 0},
+        {"terminal_ttl_seconds": float("nan")},
+        {"negative_fence_ttl_seconds": float("inf")},
+    ],
+)
+def test_attempt_ledger_rejects_invalid_limits(kwargs: dict) -> None:
+    with pytest.raises(ValueError):
+        AttemptLedger(**kwargs)

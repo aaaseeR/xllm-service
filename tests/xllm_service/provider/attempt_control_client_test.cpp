@@ -39,6 +39,9 @@ class FakeAgentService final : public proto::XllmHttpService {
     auto* brpc_controller = static_cast<brpc::Controller*>(controller);
     last_path_ = brpc_controller->http_request().uri().path();
     last_body_ = brpc_controller->request_attachment().to_string();
+    const std::string* token =
+        brpc_controller->http_request().GetHeader("X-Internal-Token");
+    last_token_ = token == nullptr ? "" : *token;
     brpc_controller->http_response().set_status_code(200);
     if (last_path_.find("/query") != std::string::npos) {
       brpc_controller->response_attachment().append(
@@ -51,10 +54,12 @@ class FakeAgentService final : public proto::XllmHttpService {
 
   const std::string& last_path() const { return last_path_; }
   const std::string& last_body() const { return last_body_; }
+  const std::string& last_token() const { return last_token_; }
 
  private:
   std::string last_path_;
   std::string last_body_;
+  std::string last_token_;
 };
 
 std::string agent_response(const std::string& state,
@@ -199,6 +204,10 @@ TEST(AttemptControlClientTest, RejectedCancelCannotProveFenceInstallation) {
 
 TEST(AttemptControlClientTest, BindsSubmitHeadersToExactIncarnation) {
   brpc::Controller controller;
+  ASSERT_TRUE(set_vllm_agent_internal_token(&controller, "test-token"));
+  ASSERT_NE(controller.http_request().GetHeader("X-Internal-Token"), nullptr);
+  EXPECT_EQ(*controller.http_request().GetHeader("X-Internal-Token"),
+            "test-token");
   ASSERT_TRUE(set_vllm_agent_attempt_headers(
       &controller, "request-1", 7, "incarnation-1", 1234));
   ASSERT_NE(controller.http_request().GetHeader("X-Request-UID"), nullptr);
@@ -221,6 +230,9 @@ TEST(AttemptControlClientTest, BindsSubmitHeadersToExactIncarnation) {
       set_vllm_agent_attempt_headers(&controller, "request-1", 7, "", 1234));
   EXPECT_FALSE(set_vllm_agent_attempt_headers(
       &controller, "request-1", 7, "incarnation-1", 0));
+  EXPECT_FALSE(set_vllm_agent_internal_token(nullptr, "test-token"));
+  EXPECT_FALSE(set_vllm_agent_internal_token(&controller, ""));
+  EXPECT_FALSE(set_vllm_agent_internal_token(&controller, "bad\ntoken"));
 }
 
 TEST_F(AttemptControlClientLoopbackTest, CallsAgentQueryAndCancelEndpoints) {
@@ -230,6 +242,7 @@ TEST_F(AttemptControlClientLoopbackTest, CallsAgentQueryAndCancelEndpoints) {
                                     hold_,
                                     holder_,
                                     AttemptControlOperation::QUERY,
+                                    "test-token",
                                     200);
   EXPECT_TRUE(query.direct_success);
   EXPECT_TRUE(query.terminal_proof);
@@ -240,6 +253,7 @@ TEST_F(AttemptControlClientLoopbackTest, CallsAgentQueryAndCancelEndpoints) {
   EXPECT_NE(service_.last_body().find(R"("attempt_seq":7)"), std::string::npos);
   EXPECT_NE(service_.last_body().find(R"("incarnation_id":"incarnation-1")"),
             std::string::npos);
+  EXPECT_EQ(service_.last_token(), "test-token");
 
   const AttemptControlResult cancel =
       call_provider_attempt_control(xllm::proto::PROVIDER_ID_VLLM_ASCEND,
@@ -247,6 +261,7 @@ TEST_F(AttemptControlClientLoopbackTest, CallsAgentQueryAndCancelEndpoints) {
                                     hold_,
                                     holder_,
                                     AttemptControlOperation::CANCEL,
+                                    "test-token",
                                     200);
   EXPECT_TRUE(cancel.direct_success);
   EXPECT_TRUE(cancel.terminal_proof);

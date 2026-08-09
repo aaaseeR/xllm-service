@@ -28,6 +28,7 @@ namespace xllm_service::provider {
 namespace {
 
 constexpr size_t kMaxIdentityBytes = 256;
+constexpr size_t kMaxInternalTokenBytes = 4096;
 
 bool valid_identity(const std::string& value) {
   return !value.empty() && value.size() <= kMaxIdentityBytes;
@@ -76,6 +77,7 @@ AttemptControlResult call_vllm_agent(
     const xllm::proto::ExecutionResourceHold& hold,
     const xllm::proto::ExecutionHolder& holder,
     AttemptControlOperation operation,
+    const std::string& internal_api_token,
     int32_t timeout_ms) {
   nlohmann::json body = {
       {"request_uid", hold.attempt().request_uid()},
@@ -89,6 +91,9 @@ AttemptControlResult call_vllm_agent(
                                          : "/v1/internal/attempt/cancel");
   controller.http_request().set_method(brpc::HTTP_METHOD_POST);
   controller.http_request().SetHeader("Content-Type", "application/json");
+  if (!set_vllm_agent_internal_token(&controller, internal_api_token)) {
+    return AttemptControlResult{};
+  }
   controller.request_attachment().append(body.dump());
   if (timeout_ms > 0) {
     controller.set_timeout_ms(timeout_ms);
@@ -144,6 +149,21 @@ AttemptControlResult call_xllm_native(
 
 }  // namespace
 
+bool set_vllm_agent_internal_token(brpc::Controller* controller,
+                                   const std::string& internal_api_token) {
+  if (controller == nullptr || internal_api_token.empty() ||
+      internal_api_token.size() > kMaxInternalTokenBytes) {
+    return false;
+  }
+  for (const unsigned char character : internal_api_token) {
+    if (character < '!' || character > '~') {
+      return false;
+    }
+  }
+  controller->http_request().SetHeader("X-Internal-Token", internal_api_token);
+  return true;
+}
+
 bool set_vllm_agent_attempt_headers(brpc::Controller* controller,
                                     const std::string& request_uid,
                                     uint64_t attempt_seq,
@@ -168,6 +188,7 @@ AttemptControlResult call_provider_attempt_control(
     const xllm::proto::ExecutionResourceHold& hold,
     const xllm::proto::ExecutionHolder& holder,
     AttemptControlOperation operation,
+    const std::string& internal_api_token,
     int32_t timeout_ms) {
   if (channel == nullptr || !hold.has_attempt() ||
       !hold.attempt().has_attempt_seq() || holder.engine_uid().empty() ||
@@ -178,7 +199,8 @@ AttemptControlResult call_provider_attempt_control(
     case xllm::proto::PROVIDER_ID_XLLM_NATIVE:
       return call_xllm_native(channel, hold, holder, operation, timeout_ms);
     case xllm::proto::PROVIDER_ID_VLLM_ASCEND:
-      return call_vllm_agent(channel, hold, holder, operation, timeout_ms);
+      return call_vllm_agent(
+          channel, hold, holder, operation, internal_api_token, timeout_ms);
     case xllm::proto::PROVIDER_ID_UNSPECIFIED:
     default:
       return AttemptControlResult{};
