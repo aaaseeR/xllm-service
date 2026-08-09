@@ -74,6 +74,7 @@ cc_library(
   NAME
   xllm_http_service
   HDRS
+    request_execution_context.h
     service.h
     request_tracer.h
   SRCS

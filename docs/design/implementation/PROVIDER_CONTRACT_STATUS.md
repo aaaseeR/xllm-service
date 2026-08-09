@@ -20,7 +20,7 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：CPU_VERIFIED
 - 关联设计/Requirement ID：G-2、G-1、F66、F72、F73、F80-F82、D50、D52、D56
-- 最近验证基线：xLLM `0d9a3f29`、xllm-service 本状态文档所在提交
+- 最近验证基线：xLLM `b38c691a`、xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
@@ -72,14 +72,19 @@ limitations under the License.
   STRICT Native fail closed。vLLM relay 在 STRICT 路径实际发送
   `ExecutionPlan.provider_payload`，prompt token 未知时 KV block 估算保持未知值 0，
   并记录 `prompt-token-count-unknown`，不以低估值做容量承诺。
+- Native dispatch 已将 Scheduler 持有的 attempt-scoped `ExecutionPlan` 写入
+  Completion/Chat additive wire。每次初始派发或首输出前重试都会重新复制当前 attempt
+  的计划和剩余 deadline；HTTP 客户端写入的同名字段会先被清除，legacy route 在没有
+  Scheduler 计划时继续保持字段缺失。xLLM Engine 在实际接收点用本机 UID/incarnation
+  校验 request identity、attempt、P/D role 与 routing、deadline、capability、资源估算、
+  compatibility proof 和 provider payload，STRICT 计划不能投递到错误或已重启的 P。
 - STRICT Native P/D 使用显式兼容矩阵，不要求两端 `profile_digest` 相等，但要求
   runtime/protocol、model revision/quantization、KV layout/dtype/block/cache group、
   Connector/version、layerwise transfer 和可证明 topology 一致，并生成确定性的
   compatibility proof。STRICT 与 BEST_EFFORT legacy 不能单边混配；矩阵同时用于
   route、readiness、静态 peer 与 Link/Unlink 候选。
 - 明确不支持范围：Descriptor-less Engine 仍作为显式 BEST_EFFORT 兼容入口，不生成
-  V2 artifacts；Native `ExecutionPlan` 尚未写入 xLLM 请求 wire 并由 Engine 校验消费，
-  Adapter registry 尚未接管生产请求的 codec 生命周期。也没有实现
+  V2 artifacts；Adapter registry 尚未接管生产请求的 codec 生命周期。也没有实现
   Submit、Stream、Cancel、Reserve 和 State Stream；不声称任何真实 NPU
   Provider 已通过 conformance。
 
@@ -96,12 +101,16 @@ limitations under the License.
 | Adapter registry | ownership、lookup、重复 key 与非法 Descriptor | N/A | N/A | PASS |
 | 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
 | Canonical/Plan 生产接入 | ingress 语义保留、Native REMOTE_PD 与 vLLM AGGREGATED plan、renderer identity/digest、UNKNOWN KV estimate | N/A，无 tensor 逻辑 | 待真实 Provider wire | PASS，4 项新增测试 |
+| Native plan dispatch/Engine ingress | Completion/Chat wire presence/roundtrip/field number；严格计划复制、客户端计划清除、legacy 缺失兼容、缺 retry policy 拒绝；Engine identity/attempt/route/receiver/deadline/capability/resource 正负校验 | RequestParams 与两个 API handler 在 Torch CPU 头文件环境严格编译；逻辑不执行 tensor 数值计算 | 待真实 P/D 数据面 | PASS，Service 3/3，Engine validator 6/6 |
 | Provider route 隔离 | Native P/D、vLLM SINGLE、跨 Provider、无完整 plan、suspect、未知 Provider、RR cursor 正负测试 | N/A，无 tensor 逻辑 | 待真实混合池 | PASS，8/8 |
 | STRICT P/D 兼容 | 不同 profile 正向；model、KV/Connector、topology、runtime 与 strict/legacy 单边混配负向测试 | N/A，无 tensor 逻辑 | 待真实 P/D handshake | PASS |
 
 Service 的 `ProviderContractTest` 当前为 30 项，`InstanceMetaInfoTest` 为 13 项；
-当前全量 service CPU 回归为 230/230，vLLM sidecar CPU 回归为 29/29（其中
-metadata 11/11），xLLM CPU 公共路径基线为 96/96。
+当前全量 service CPU 回归为 233/233，vLLM sidecar CPU 回归为 29/29（其中
+metadata 11/11），xLLM CPU 公共路径基线为 96/96。新增 xLLM Engine plan
+validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
+生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
+仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。
 
 ## 完善情况
 
@@ -111,12 +120,12 @@ metadata 11/11），xLLM CPU 公共路径基线为 96/96。
   Adapter registry；两个首发 Provider 的 RequestCodec 与 dispatch identity；CPU
   conformance；生产 Scheduler 的 per-request Provider dispatch、跨 Provider route
   隔离、STRICT P/D 显式兼容矩阵，以及真实 ingress→CanonicalRequest→RequestCodec→
-  ExecutionPlan 构建；vLLM STRICT 数据面已消费 plan payload。
+  ExecutionPlan 构建；vLLM STRICT 数据面已消费 plan payload；Native Completion/Chat
+  已携带当前 attempt 计划，Engine 在实际入口 fail closed 校验计划与本机身份。
 - 已知缺口/风险：当前 schema 尚无可校验的 topology-transform proof，因此非相同
   topology 保守拒绝；per-pair `LinkState=READY`、失败隔离和周期对账属于 G3。
-  Native ExecutionPlan wire 与 Engine 侧消费校验、生产 Adapter cache 仍属于 B1
-  的下一批次；客户端 model alias 到权威 model revision 的映射也需由 catalog 明确，
-  当前 STRICT 路径按字符串完全一致 fail closed。G3 的
+  生产 Adapter cache 仍属于 B1 的下一批次；客户端 model alias 到权威 model revision
+  的映射也需由 catalog 明确，当前 STRICT 路径按字符串完全一致 fail closed。G3 的
   `(provider_id, profile_digest, incarnation_id)` Engine Registry 尚未实现；当前
   不证明硬件 Runtime 行为。
 - 回滚与兼容：协议为全新 additive schema；旧二进制不会读取这些消息。V2

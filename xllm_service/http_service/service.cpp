@@ -41,6 +41,7 @@ limitations under the License.
 #include "completion.pb.h"
 #include "http_service/anthropic_adapter.h"
 #include "http_service/chat_json_parser.h"
+#include "http_service/request_execution_context.h"
 #include "observability/request_identity.h"
 #include "provider/canonical_request_builder.h"
 #include "scheduler/scheduler.h"
@@ -72,27 +73,6 @@ observability::RequestCorrelationInput correlation_input(
   input.trace_id = first_header_value(controller, {"x-trace-id", "trace-id"});
   input.traceparent = first_header_value(controller, {"traceparent"});
   return input;
-}
-
-template <typename T>
-bool set_request_execution_context(T* request_pb, const Request& request) {
-  request_pb->set_service_request_id(request.correlation.request_uid());
-  *request_pb->mutable_correlation() = request.correlation;
-  if (request.request_deadline.has_value()) {
-    const uint64_t remaining_ms = request.request_deadline->remaining_ms();
-    if (remaining_ms == 0) {
-      return false;
-    }
-    request_pb->set_remaining_deadline_ms(remaining_ms);
-  }
-  if (!request.first_event_retry_policy.has_value()) {
-    return false;
-  }
-  request_pb->set_first_event_retry_budget_ms(
-      request.first_event_retry_policy->retry_budget_ms());
-  request_pb->set_first_event_dispatch_margin_ms(
-      request.first_event_retry_policy->dispatch_margin_ms());
-  return true;
 }
 
 std::string proto_json(const google::protobuf::Message& message) {

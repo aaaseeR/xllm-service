@@ -2,6 +2,19 @@ include(cc_test)
 
 cc_test(
   NAME
+    request_execution_context_test
+  SRCS
+    request_execution_context_test.cpp
+  DEPS
+    :chat_template
+    :request
+    GTest::gtest_main
+    brpc-static
+    proto_xllm
+)
+
+cc_test(
+  NAME
     usage_proto_adapter_test
   SRCS
     usage_proto_adapter_test.cpp
