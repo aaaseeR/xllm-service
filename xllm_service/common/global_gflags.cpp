@@ -92,6 +92,22 @@ DEFINE_string(load_balance_policy,
               "RR",
               "Disaggregated prefill-decode policy.");
 
+DEFINE_string(kv_route_mode,
+              "SHADOW",
+              "KV-aware route mode: DISABLED, SHADOW, or ENFORCED.");
+
+DEFINE_bool(kv_route_enforced_gate_open,
+            false,
+            "Operator approval gate for ENFORCED KV-aware routing.");
+
+DEFINE_uint32(kv_route_enforced_bucket_permyriad,
+              0,
+              "Stable ENFORCED traffic bucket in [0, 10000].");
+
+DEFINE_uint64(kv_route_bytes_per_token,
+              0,
+              "Logical KV bytes per prompt token for routing calibration.");
+
 DEFINE_int32(detect_disconnected_instance_interval,
              15,
              "Deprecated V1 compatibility flag; ignored by V2 membership "

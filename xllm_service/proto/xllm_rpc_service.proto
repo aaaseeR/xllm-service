@@ -121,6 +121,9 @@ message OutputUsage {
   int32 num_total_tokens = 3;
   // the number of prompt tokens served from prefix cache.
   int32 num_cached_tokens = 4;
+  // the number of prompt tokens already resident on the Decode instance.
+  // Presence distinguishes a valid zero from an unavailable observation.
+  optional int32 num_decode_cached_tokens = 5;
 }
 
 message LogProbData {

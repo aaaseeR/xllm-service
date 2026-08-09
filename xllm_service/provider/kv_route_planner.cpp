@@ -72,6 +72,22 @@ double candidate_load_cost(const KVRoutePlannerConfig& config,
 
 }  // namespace
 
+KVRouteMode select_kv_route_mode(KVRouteMode configured_mode,
+                                 bool enforced_gate_open,
+                                 uint32_t enforced_bucket_permyriad,
+                                 uint64_t request_hash) {
+  if (configured_mode != KVRouteMode::ENFORCED) {
+    return configured_mode;
+  }
+  if (!enforced_gate_open || enforced_bucket_permyriad == 0 ||
+      enforced_bucket_permyriad > 10000) {
+    return KVRouteMode::SHADOW;
+  }
+  return request_hash % 10000 < enforced_bucket_permyriad
+             ? KVRouteMode::ENFORCED
+             : KVRouteMode::SHADOW;
+}
+
 KVRoutePlanner::KVRoutePlanner(KVRoutePlannerConfig config)
     : config_(std::move(config)) {
   config_valid_ =

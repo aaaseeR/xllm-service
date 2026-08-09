@@ -51,6 +51,9 @@ struct Usage {
 
   // the number of prompt tokens served from prefix cache.
   size_t num_cached_tokens = 0;
+
+  // the number of prompt tokens already resident on the Decode instance.
+  std::optional<size_t> num_decode_cached_tokens;
 };
 
 struct LogProbData {

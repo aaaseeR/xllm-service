@@ -2801,6 +2801,7 @@ void Scheduler::record_kv_route_actual(const std::shared_ptr<Request>& request,
   provider::KVRouteActual actual;
   if (request->kv_route_observation->mode == provider::KVRouteMode::DISABLED) {
     actual.prefix_state = provider::PrefixMetricState::DISABLED;
+    actual.decode_prefix_state = provider::PrefixMetricState::DISABLED;
   } else if (output != nullptr && output->usage.has_value() &&
              output->usage->num_cached_tokens <=
                  output->usage->num_prompt_tokens) {
@@ -2811,9 +2812,18 @@ void Scheduler::record_kv_route_actual(const std::shared_ptr<Request>& request,
     actual.actual_hit_tokens = hit_tokens;
     actual.actual_prefill_tokens =
         output->usage->num_prompt_tokens - hit_tokens;
-    // The current Engine result does not expose D remote_shared_num as bytes.
-    // Preserve MISSING until that independent fact reaches the wire.
-    actual.skipped_transfer_bytes = std::nullopt;
+    if (output->usage->num_decode_cached_tokens.has_value() &&
+        *output->usage->num_decode_cached_tokens <=
+            output->usage->num_prompt_tokens) {
+      const uint64_t decode_hit_tokens =
+          *output->usage->num_decode_cached_tokens;
+      actual.decode_prefix_state =
+          decode_hit_tokens == 0 ? provider::PrefixMetricState::VALID_ZERO
+                                 : provider::PrefixMetricState::VALID_NONZERO;
+      actual.actual_decode_hit_tokens = decode_hit_tokens;
+      actual.skipped_transfer_bytes = provider::logical_skipped_transfer_bytes(
+          decode_hit_tokens, request->kv_route_observation->kv_bytes_per_token);
+    }
   }
   kv_route_metrics_.record_actual(*request->kv_route_observation, actual);
 }

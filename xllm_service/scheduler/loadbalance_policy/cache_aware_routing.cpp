@@ -191,8 +191,13 @@ bool CacheAwareRouting::select_instances_pair(
       .kv_bytes_per_token = options_.kv_route_bytes_per_token(),
       .request_hash = stable_request_hash(*request),
   };
+  const provider::KVRouteMode effective_mode = provider::select_kv_route_mode(
+      mode_,
+      options_.kv_route_enforced_gate_open(),
+      options_.kv_route_enforced_bucket_permyriad(),
+      route_request.request_hash);
   const provider::KVRouteDecision decision =
-      planner_.select(route_request, candidates, mode_, truncated);
+      planner_.select(route_request, candidates, effective_mode, truncated);
   if (!decision.valid || decision.selected_index >= candidates.size() ||
       decision.load_only_index >= candidates.size() ||
       decision.kv_preferred_index >= candidates.size()) {
@@ -211,7 +216,7 @@ bool CacheAwareRouting::select_instances_pair(
   const provider::KVRouteEvaluation& kv_evaluation =
       decision.evaluations[decision.kv_preferred_index];
   request->kv_route_observation = provider::KVRouteObservation{
-      .mode = mode_,
+      .mode = effective_mode,
       .fallback = decision.fallback,
       .selected_prefill = selected.prefill.engine_uid,
       .selected_decode = decode_name(selected),
@@ -225,6 +230,7 @@ bool CacheAwareRouting::select_instances_pair(
       .predicted_effective_prefill_tokens =
           kv_evaluation.effective_prefill_tokens,
       .predicted_transfer_bytes = kv_evaluation.effective_transfer_bytes,
+      .kv_bytes_per_token = route_request.kv_bytes_per_token,
       .load_only_cost_us =
           decision.evaluations[decision.load_only_index].load_only_cost_us,
       .kv_cost_us = kv_evaluation.kv_cost_us,

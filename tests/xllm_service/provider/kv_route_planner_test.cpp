@@ -72,6 +72,39 @@ KVRoutePlanCandidate plan(std::string uid,
   };
 }
 
+TEST(KVRoutePlannerTest, EnforcedModeRequiresOpenDeterministicBucketGate) {
+  EXPECT_EQ(select_kv_route_mode(KVRouteMode::ENFORCED,
+                                 /*enforced_gate_open=*/false,
+                                 /*enforced_bucket_permyriad=*/10000,
+                                 /*request_hash=*/0),
+            KVRouteMode::SHADOW);
+  EXPECT_EQ(select_kv_route_mode(KVRouteMode::ENFORCED,
+                                 /*enforced_gate_open=*/true,
+                                 /*enforced_bucket_permyriad=*/0,
+                                 /*request_hash=*/0),
+            KVRouteMode::SHADOW);
+  EXPECT_EQ(select_kv_route_mode(KVRouteMode::ENFORCED,
+                                 /*enforced_gate_open=*/true,
+                                 /*enforced_bucket_permyriad=*/100,
+                                 /*request_hash=*/99),
+            KVRouteMode::ENFORCED);
+  EXPECT_EQ(select_kv_route_mode(KVRouteMode::ENFORCED,
+                                 /*enforced_gate_open=*/true,
+                                 /*enforced_bucket_permyriad=*/100,
+                                 /*request_hash=*/100),
+            KVRouteMode::SHADOW);
+  EXPECT_EQ(select_kv_route_mode(KVRouteMode::ENFORCED,
+                                 /*enforced_gate_open=*/true,
+                                 /*enforced_bucket_permyriad=*/10001,
+                                 /*request_hash=*/0),
+            KVRouteMode::SHADOW);
+  EXPECT_EQ(select_kv_route_mode(KVRouteMode::DISABLED,
+                                 /*enforced_gate_open=*/true,
+                                 /*enforced_bucket_permyriad=*/10000,
+                                 /*request_hash=*/0),
+            KVRouteMode::DISABLED);
+}
+
 TEST(KVRoutePlannerTest, RejectsInvalidAndUnboundedInputs) {
   KVRoutePlannerConfig invalid = config();
   invalid.least_load_shortlist = 0;

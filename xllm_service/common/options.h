@@ -184,6 +184,13 @@ class Options {
   // bucket gate and still falls back to load-only for UNKNOWN/recovery/OOD.
   PROPERTY(std::string, kv_route_mode) = "SHADOW";
 
+  // Both controls must be set before ENFORCED affects traffic. Operators open
+  // the gate only after the shadow reconciliation thresholds are satisfied.
+  PROPERTY(bool, kv_route_enforced_gate_open) = false;
+
+  // Stable workload bucket in [0, 10000]. Zero keeps every request in SHADOW.
+  PROPERTY(uint32_t, kv_route_enforced_bucket_permyriad) = 0;
+
   PROPERTY(size_t, kv_route_max_candidate_plans) = 16384;
 
   PROPERTY(size_t, kv_route_least_load_shortlist) = 8;

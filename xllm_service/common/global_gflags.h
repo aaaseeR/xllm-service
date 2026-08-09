@@ -57,6 +57,11 @@ DECLARE_string(etcd_namespace);
 
 DECLARE_string(load_balance_policy);
 
+DECLARE_string(kv_route_mode);
+DECLARE_bool(kv_route_enforced_gate_open);
+DECLARE_uint32(kv_route_enforced_bucket_permyriad);
+DECLARE_uint64(kv_route_bytes_per_token);
+
 DECLARE_int32(detect_disconnected_instance_interval);
 
 DECLARE_int32(instance_delete_probe_timeout_ms);

@@ -34,7 +34,9 @@ enum class PrefixMetricState : int8_t {
 
 struct KVRouteActual {
   PrefixMetricState prefix_state = PrefixMetricState::MISSING;
+  PrefixMetricState decode_prefix_state = PrefixMetricState::MISSING;
   std::optional<uint64_t> actual_hit_tokens;
+  std::optional<uint64_t> actual_decode_hit_tokens;
   std::optional<uint64_t> actual_prefill_tokens;
   std::optional<uint64_t> skipped_transfer_bytes;
   bool admission_conflict = false;
@@ -49,16 +51,23 @@ struct KVRouteMetricsSnapshot {
   uint64_t predicted_effective_prefill_tokens = 0;
   uint64_t predicted_transfer_bytes = 0;
   uint64_t actual_hit_tokens = 0;
+  uint64_t actual_decode_hit_tokens = 0;
   uint64_t actual_prefill_tokens = 0;
   uint64_t skipped_transfer_bytes = 0;
   uint64_t disabled_prefix_observations = 0;
   uint64_t missing_prefix_observations = 0;
+  uint64_t missing_decode_prefix_observations = 0;
   uint64_t missing_prefill_observations = 0;
   uint64_t missing_transfer_observations = 0;
   uint64_t overpredicted_requests = 0;
+  uint64_t decode_overpredicted_requests = 0;
   uint64_t admission_conflicts = 0;
   std::array<uint64_t, 6> fallbacks{};
 };
+
+std::optional<uint64_t> logical_skipped_transfer_bytes(
+    uint64_t decode_hit_tokens,
+    uint64_t kv_bytes_per_token);
 
 // Fixed-size lock-free counters for the K1 shadow gate. No request identity,
 // prompt text or unbounded label is retained.
@@ -80,13 +89,16 @@ class KVRouteMetrics final {
   std::atomic<uint64_t> predicted_effective_prefill_tokens_ = 0;
   std::atomic<uint64_t> predicted_transfer_bytes_ = 0;
   std::atomic<uint64_t> actual_hit_tokens_ = 0;
+  std::atomic<uint64_t> actual_decode_hit_tokens_ = 0;
   std::atomic<uint64_t> actual_prefill_tokens_ = 0;
   std::atomic<uint64_t> skipped_transfer_bytes_ = 0;
   std::atomic<uint64_t> disabled_prefix_observations_ = 0;
   std::atomic<uint64_t> missing_prefix_observations_ = 0;
+  std::atomic<uint64_t> missing_decode_prefix_observations_ = 0;
   std::atomic<uint64_t> missing_prefill_observations_ = 0;
   std::atomic<uint64_t> missing_transfer_observations_ = 0;
   std::atomic<uint64_t> overpredicted_requests_ = 0;
+  std::atomic<uint64_t> decode_overpredicted_requests_ = 0;
   std::atomic<uint64_t> admission_conflicts_ = 0;
   std::array<std::atomic<uint64_t>, 6> fallbacks_{};
 };

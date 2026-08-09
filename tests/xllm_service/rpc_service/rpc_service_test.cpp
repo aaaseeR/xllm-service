@@ -90,6 +90,33 @@ TEST(DisaggGenerationAdapterTest, CachedTokensRemainWireCompatibleAtFieldFour) {
   EXPECT_EQ(receiver_usage.num_cached_tokens(), 6);
 }
 
+TEST(DisaggGenerationAdapterTest, DecodeCachedTokensUsePresenceAtFieldFive) {
+  const google::protobuf::FieldDescriptor* sender_field =
+      xllm::proto::OutputUsage::descriptor()->FindFieldByName(
+          "num_decode_cached_tokens");
+  const google::protobuf::FieldDescriptor* receiver_field =
+      proto::OutputUsage::descriptor()->FindFieldByName(
+          "num_decode_cached_tokens");
+
+  ASSERT_NE(sender_field, nullptr);
+  ASSERT_NE(receiver_field, nullptr);
+  EXPECT_EQ(sender_field->number(), 5);
+  EXPECT_EQ(receiver_field->number(), 5);
+  EXPECT_EQ(sender_field->type(), receiver_field->type());
+  EXPECT_TRUE(sender_field->has_presence());
+  EXPECT_TRUE(receiver_field->has_presence());
+
+  xllm::proto::OutputUsage sender_usage;
+  proto::OutputUsage receiver_usage;
+  ASSERT_TRUE(receiver_usage.ParseFromString(sender_usage.SerializeAsString()));
+  EXPECT_FALSE(receiver_usage.has_num_decode_cached_tokens());
+
+  sender_usage.set_num_decode_cached_tokens(0);
+  ASSERT_TRUE(receiver_usage.ParseFromString(sender_usage.SerializeAsString()));
+  EXPECT_TRUE(receiver_usage.has_num_decode_cached_tokens());
+  EXPECT_EQ(receiver_usage.num_decode_cached_tokens(), 0);
+}
+
 TEST(DisaggGenerationAdapterTest, OutputSequenceRemainsWireCompatible) {
   const google::protobuf::FieldDescriptor* sender_field =
       xllm::proto::DisaggStreamGeneration::descriptor()->FindFieldByName(
@@ -226,6 +253,24 @@ TEST(DisaggGenerationAdapterTest, RejectsInconsistentTotalTokens) {
   EXPECT_FALSE(result.output.has_value());
 }
 
+TEST(DisaggGenerationAdapterTest, RejectsInvalidDecodeCachedTokens) {
+  proto::DisaggStreamGeneration generation =
+      make_generation(/*num_prompt_tokens=*/8,
+                      /*num_generated_tokens=*/2,
+                      /*num_total_tokens=*/10,
+                      /*num_cache_hit_tokens=*/6);
+  generation.mutable_usage()->set_num_decode_cached_tokens(9);
+
+  RequestOutputConversionResult result =
+      request_output_from_disagg_generation(generation);
+
+  EXPECT_FALSE(result.status.ok());
+  EXPECT_EQ(result.status.code(), llm::StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(result.status.message().find("Decode prefix cache"),
+            std::string::npos);
+  EXPECT_FALSE(result.output.has_value());
+}
+
 TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   proto::DisaggStreamGeneration generation =
       make_generation(/*num_prompt_tokens=*/8,
@@ -242,6 +287,7 @@ TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   generation.set_attempt_seq(3);
   generation.set_sender_engine_uid("prefill-1");
   generation.set_sender_incarnation_id("prefill-incarnation-1");
+  generation.mutable_usage()->set_num_decode_cached_tokens(4);
 
   proto::SequenceOutput* sequence = generation.add_outputs();
   sequence->set_index(3);
@@ -284,6 +330,8 @@ TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   EXPECT_EQ(output.usage->num_generated_tokens, 2u);
   EXPECT_EQ(output.usage->num_total_tokens, 10u);
   EXPECT_EQ(output.usage->num_cached_tokens, 6u);
+  ASSERT_TRUE(output.usage->num_decode_cached_tokens.has_value());
+  EXPECT_EQ(*output.usage->num_decode_cached_tokens, 4u);
 
   ASSERT_EQ(output.outputs.size(), 1u);
   const llm::SequenceOutput& converted_sequence = output.outputs.front();

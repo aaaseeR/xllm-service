@@ -19,6 +19,17 @@ limitations under the License.
 
 namespace xllm_service::provider {
 
+std::optional<uint64_t> logical_skipped_transfer_bytes(
+    uint64_t decode_hit_tokens,
+    uint64_t kv_bytes_per_token) {
+  if (kv_bytes_per_token == 0 ||
+      decode_hit_tokens >
+          std::numeric_limits<uint64_t>::max() / kv_bytes_per_token) {
+    return std::nullopt;
+  }
+  return decode_hit_tokens * kv_bytes_per_token;
+}
+
 void KVRouteMetrics::saturated_add(std::atomic<uint64_t>* target,
                                    uint64_t value) {
   uint64_t current = target->load(std::memory_order_relaxed);
@@ -72,6 +83,16 @@ void KVRouteMetrics::record_actual(const KVRouteObservation& observation,
       saturated_add(&overpredicted_requests_, 1);
     }
   }
+  if (actual.decode_prefix_state == PrefixMetricState::MISSING ||
+      !actual.actual_decode_hit_tokens.has_value()) {
+    saturated_add(&missing_decode_prefix_observations_, 1);
+  } else {
+    saturated_add(&actual_decode_hit_tokens_, *actual.actual_decode_hit_tokens);
+    if (observation.predicted_decode_hit_tokens >
+        *actual.actual_decode_hit_tokens) {
+      saturated_add(&decode_overpredicted_requests_, 1);
+    }
+  }
   if (actual.actual_prefill_tokens.has_value()) {
     saturated_add(&actual_prefill_tokens_, *actual.actual_prefill_tokens);
   } else {
@@ -103,6 +124,8 @@ KVRouteMetricsSnapshot KVRouteMetrics::snapshot() const {
       predicted_transfer_bytes_.load(std::memory_order_relaxed);
   current.actual_hit_tokens =
       actual_hit_tokens_.load(std::memory_order_relaxed);
+  current.actual_decode_hit_tokens =
+      actual_decode_hit_tokens_.load(std::memory_order_relaxed);
   current.actual_prefill_tokens =
       actual_prefill_tokens_.load(std::memory_order_relaxed);
   current.skipped_transfer_bytes =
@@ -111,12 +134,16 @@ KVRouteMetricsSnapshot KVRouteMetrics::snapshot() const {
       disabled_prefix_observations_.load(std::memory_order_relaxed);
   current.missing_prefix_observations =
       missing_prefix_observations_.load(std::memory_order_relaxed);
+  current.missing_decode_prefix_observations =
+      missing_decode_prefix_observations_.load(std::memory_order_relaxed);
   current.missing_prefill_observations =
       missing_prefill_observations_.load(std::memory_order_relaxed);
   current.missing_transfer_observations =
       missing_transfer_observations_.load(std::memory_order_relaxed);
   current.overpredicted_requests =
       overpredicted_requests_.load(std::memory_order_relaxed);
+  current.decode_overpredicted_requests =
+      decode_overpredicted_requests_.load(std::memory_order_relaxed);
   current.admission_conflicts =
       admission_conflicts_.load(std::memory_order_relaxed);
   for (size_t index = 0; index < current.fallbacks.size(); ++index) {

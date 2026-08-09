@@ -44,23 +44,29 @@ TEST(KVRouteMetricsTest, SeparatesMissingFromValidZero) {
                         KVRouteActual{
                             .prefix_state = PrefixMetricState::MISSING,
                         });
-  metrics.record_actual(predicted,
-                        KVRouteActual{
-                            .prefix_state = PrefixMetricState::VALID_ZERO,
-                            .actual_hit_tokens = 0,
-                            .actual_prefill_tokens = 160,
-                            .skipped_transfer_bytes = 0,
-                        });
+  metrics.record_actual(
+      predicted,
+      KVRouteActual{
+          .prefix_state = PrefixMetricState::VALID_ZERO,
+          .decode_prefix_state = PrefixMetricState::VALID_ZERO,
+          .actual_hit_tokens = 0,
+          .actual_decode_hit_tokens = 0,
+          .actual_prefill_tokens = 160,
+          .skipped_transfer_bytes = 0,
+      });
 
   const KVRouteMetricsSnapshot snapshot = metrics.snapshot();
   EXPECT_EQ(snapshot.decisions, 1u);
   EXPECT_EQ(snapshot.shadow_decisions, 1u);
   EXPECT_EQ(snapshot.missing_prefix_observations, 1u);
+  EXPECT_EQ(snapshot.missing_decode_prefix_observations, 1u);
   EXPECT_EQ(snapshot.actual_hit_tokens, 0u);
+  EXPECT_EQ(snapshot.actual_decode_hit_tokens, 0u);
   EXPECT_EQ(snapshot.actual_prefill_tokens, 160u);
   EXPECT_EQ(snapshot.missing_prefill_observations, 1u);
   EXPECT_EQ(snapshot.missing_transfer_observations, 1u);
   EXPECT_EQ(snapshot.overpredicted_requests, 1u);
+  EXPECT_EQ(snapshot.decode_overpredicted_requests, 1u);
   EXPECT_EQ(
       snapshot.fallbacks[static_cast<size_t>(KVRouteFallback::KV_UNAVAILABLE)],
       1u);
@@ -70,20 +76,25 @@ TEST(KVRouteMetricsTest, RecordsActualHitAndAdmissionConflict) {
   KVRouteMetrics metrics;
   const KVRouteObservation predicted = observation();
   metrics.record_decision(predicted);
-  metrics.record_actual(predicted,
-                        KVRouteActual{
-                            .prefix_state = PrefixMetricState::VALID_NONZERO,
-                            .actual_hit_tokens = 64,
-                            .actual_prefill_tokens = 96,
-                            .skipped_transfer_bytes = 2048,
-                            .admission_conflict = true,
-                        });
+  metrics.record_actual(
+      predicted,
+      KVRouteActual{
+          .prefix_state = PrefixMetricState::VALID_NONZERO,
+          .decode_prefix_state = PrefixMetricState::VALID_NONZERO,
+          .actual_hit_tokens = 64,
+          .actual_decode_hit_tokens = 24,
+          .actual_prefill_tokens = 96,
+          .skipped_transfer_bytes = 2048,
+          .admission_conflict = true,
+      });
 
   const KVRouteMetricsSnapshot snapshot = metrics.snapshot();
   EXPECT_EQ(snapshot.actual_hit_tokens, 64u);
+  EXPECT_EQ(snapshot.actual_decode_hit_tokens, 24u);
   EXPECT_EQ(snapshot.actual_prefill_tokens, 96u);
   EXPECT_EQ(snapshot.skipped_transfer_bytes, 2048u);
   EXPECT_EQ(snapshot.overpredicted_requests, 1u);
+  EXPECT_EQ(snapshot.decode_overpredicted_requests, 1u);
   EXPECT_EQ(snapshot.admission_conflicts, 1u);
 }
 
@@ -95,11 +106,13 @@ TEST(KVRouteMetricsTest, DisabledObservationIsNotReportedAsMissing) {
   metrics.record_actual(predicted,
                         KVRouteActual{
                             .prefix_state = PrefixMetricState::DISABLED,
+                            .decode_prefix_state = PrefixMetricState::DISABLED,
                         });
 
   const KVRouteMetricsSnapshot snapshot = metrics.snapshot();
   EXPECT_EQ(snapshot.disabled_prefix_observations, 1u);
   EXPECT_EQ(snapshot.missing_prefix_observations, 0u);
+  EXPECT_EQ(snapshot.missing_decode_prefix_observations, 0u);
   EXPECT_EQ(snapshot.missing_prefill_observations, 0u);
   EXPECT_EQ(snapshot.missing_transfer_observations, 0u);
 }
@@ -134,6 +147,23 @@ TEST(KVRouteMetricsTest, CountersSaturateInsteadOfWrapping) {
 
   EXPECT_EQ(metrics.snapshot().predicted_transfer_bytes,
             std::numeric_limits<uint64_t>::max());
+}
+
+TEST(KVRouteMetricsTest, ComputesBoundedLogicalSkippedTransferBytes) {
+  EXPECT_EQ(logical_skipped_transfer_bytes(/*decode_hit_tokens=*/0,
+                                           /*kv_bytes_per_token=*/1024),
+            0u);
+  EXPECT_EQ(logical_skipped_transfer_bytes(/*decode_hit_tokens=*/32,
+                                           /*kv_bytes_per_token=*/1024),
+            32768u);
+  EXPECT_FALSE(logical_skipped_transfer_bytes(
+                   /*decode_hit_tokens=*/32,
+                   /*kv_bytes_per_token=*/0)
+                   .has_value());
+  EXPECT_FALSE(
+      logical_skipped_transfer_bytes(std::numeric_limits<uint64_t>::max(),
+                                     /*kv_bytes_per_token=*/2)
+          .has_value());
 }
 
 }  // namespace

@@ -37,6 +37,12 @@ RequestOutputConversionResult validate_usage(const proto::OutputUsage& usage) {
     return invalid_usage(
         "prefix cache hit tokens must not exceed prompt tokens");
   }
+  if (usage.has_num_decode_cached_tokens() &&
+      (usage.num_decode_cached_tokens() < 0 ||
+       usage.num_decode_cached_tokens() > usage.num_prompt_tokens())) {
+    return invalid_usage(
+        "Decode prefix cache hit tokens must not exceed prompt tokens");
+  }
   const int64_t expected_total =
       static_cast<int64_t>(usage.num_prompt_tokens()) +
       static_cast<int64_t>(usage.num_generated_tokens());
@@ -83,6 +89,10 @@ RequestOutputConversionResult request_output_from_disagg_generation(
         static_cast<size_t>(generation.usage().num_total_tokens());
     usage.num_cached_tokens =
         static_cast<size_t>(generation.usage().num_cached_tokens());
+    if (generation.usage().has_num_decode_cached_tokens()) {
+      usage.num_decode_cached_tokens =
+          static_cast<size_t>(generation.usage().num_decode_cached_tokens());
+    }
     request_output.usage = std::move(usage);
   }
   request_output.finished_on_prefill_instance =

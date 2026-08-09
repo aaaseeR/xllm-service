@@ -208,6 +208,23 @@ int main(int argc, char* argv[]) {
         << "Please specify a different port using --rpc_server_port flag.";
     return -1;
   }
+  if (FLAGS_kv_route_mode != "DISABLED" && FLAGS_kv_route_mode != "SHADOW" &&
+      FLAGS_kv_route_mode != "ENFORCED") {
+    LOG(ERROR) << "Invalid --kv_route_mode: " << FLAGS_kv_route_mode;
+    return -1;
+  }
+  if (FLAGS_kv_route_enforced_bucket_permyriad > 10000) {
+    LOG(ERROR) << "--kv_route_enforced_bucket_permyriad must be <= 10000";
+    return -1;
+  }
+  if (FLAGS_kv_route_enforced_gate_open &&
+      (FLAGS_load_balance_policy != "CAR" ||
+       FLAGS_kv_route_mode != "ENFORCED" ||
+       FLAGS_kv_route_enforced_bucket_permyriad == 0)) {
+    LOG(ERROR) << "KV route enforced gate requires --load_balance_policy=CAR, "
+                  "--kv_route_mode=ENFORCED, and a non-zero bucket";
+    return -1;
+  }
 
   xllm_service::Options options;
   options.server_host(FLAGS_server_host)
@@ -226,6 +243,11 @@ int main(int argc, char* argv[]) {
       .etcd_addr(FLAGS_etcd_addr)
       .etcd_namespace(FLAGS_etcd_namespace)
       .load_balance_policy(FLAGS_load_balance_policy)
+      .kv_route_mode(FLAGS_kv_route_mode)
+      .kv_route_enforced_gate_open(FLAGS_kv_route_enforced_gate_open)
+      .kv_route_enforced_bucket_permyriad(
+          FLAGS_kv_route_enforced_bucket_permyriad)
+      .kv_route_bytes_per_token(FLAGS_kv_route_bytes_per_token)
       .xxh3_128bits_seed(FLAGS_xxh3_128bits_seed)
       .service_name(xllm_service::utils::get_local_ip() + ":" +
                     std::to_string(FLAGS_rpc_server_port))

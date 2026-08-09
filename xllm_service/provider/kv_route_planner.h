@@ -41,6 +41,11 @@ enum class KVRouteFallback : int8_t {
   BELOW_MARGIN = 5,
 };
 
+KVRouteMode select_kv_route_mode(KVRouteMode configured_mode,
+                                 bool enforced_gate_open,
+                                 uint32_t enforced_bucket_permyriad,
+                                 uint64_t request_hash);
+
 struct KVRoutePlannerConfig {
   size_t max_candidate_plans = 16384;
   size_t least_load_shortlist = 8;
@@ -122,6 +127,7 @@ struct KVRouteObservation {
   uint64_t predicted_decode_hit_tokens = 0;
   uint64_t predicted_effective_prefill_tokens = 0;
   uint64_t predicted_transfer_bytes = 0;
+  uint64_t kv_bytes_per_token = 0;
   double load_only_cost_us = 0.0;
   double kv_cost_us = 0.0;
 };
