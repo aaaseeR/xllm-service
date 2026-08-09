@@ -66,6 +66,7 @@ lease，现有接口也没有 incarnation compare，盲删会删除重启后新 
 | N2 | FIXED（参数与部署约束） | fail-stop 安全语义不变；默认且最小 TTL 为 15 秒，heartbeat/reconcile 必须不大于 TTL 三分之一，非法配置在建立 etcd 客户端前拒绝。KeepAlive 失败回调记录 key、TTL 和异常。没有采用连续 N 次 authoritative missing，因为成员已被 Service 移除后继续保留旧 incarnation 会破坏 fencing 证明。更复杂的排空 ledger 后原地轮换仍不属于当前版本。 |
 | N3 | FIXED | 删除两个生产者都写常量 `READY` 的 Engine connector 字段并 reserved tag 12/name；Registry 不再使用伪信号。严格 Remote PD 仍要求真实 `LinkState=READY`，没有降低 connector handshake 门禁。 |
 | N4 | FIXED | `.github/workflows/v2_cpu.yml` 对 PR/push 执行 pinned proto/gitlink 守卫、Service CTest、三个生产服务构建、Agent pytest 和 pinned xLLM 七个 CPU contract 目标。 |
+| N5 | REPO FIXED / PLATFORM PENDING | pin/proto 守卫抽成 `scripts/verify_v2_pin.sh` 唯一入口，GitHub 镜像的 PR 触发已覆盖 `main` 与 `service_dev`。JD Coding 受保护分支仍须在平台侧把该脚本及完整 V2 CPU gate 配成合入前必需检查；仓库文件不能替代服务端 branch protection。 |
 
 ## CPU 验证证据
 

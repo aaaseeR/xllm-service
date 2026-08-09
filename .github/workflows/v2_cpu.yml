@@ -15,7 +15,7 @@ on:
       - 'xllm_service/**'
   pull_request:
     types: [opened, synchronize, reopened]
-    branches: [main]
+    branches: [main, service_dev]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -40,10 +40,7 @@ jobs:
           submodules: recursive
 
       - name: Verify pinned V2 protocol source
-        run: |
-          test -f third_party/xllm/xllm/proto/provider.proto
-          test -f third_party/xllm/xllm/proto/observability.proto
-          git submodule status third_party/xllm | grep -qv '^[-+]'
+        run: scripts/verify_v2_pin.sh
 
       - name: Install CPU build prerequisites
         run: |

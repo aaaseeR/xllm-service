@@ -64,4 +64,5 @@ V2 首个交付版本已经完成；V2 仍须继续完成多模型、精确 KV-a
   fail-closed 声明，仍须以 SIGKILL、restart-unit 和网络策略实测证明。
 - 尚无真实 vLLM-Ascend SSE、abort 后显存/KV/slot 释放时延、etcd 分区和一万次
   Submit 结果不明故障门禁；这些结论不得由 CPU loopback 外推。
-- B6 以后继续完成 V2 首个交付版本范围；B0-B5 不得单独发布为 V2。
+- B6-B10 的固定范围与逐门 DoD 见
+  [B6_B10_STATUS.md](./B6_B10_STATUS.md)；B0-B5 不得单独发布为 V2。
