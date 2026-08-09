@@ -54,7 +54,8 @@ limitations under the License.
   profile 的兼容与发布门禁，不作为硬件特例分支键。
 - 真实与 simulated HBM allocator 均位于 Engine/backend 或 fake Provider 边界。
   Service 通过相同 Provider Contract 验证 reservation、execution hold、transfer、
-  cancel/fencing 和回收，不在生产 Service 内复制 KV/HBM allocator。
+  cancel/fencing 和回收，不在生产 Service 内复制 KV/HBM allocator。B6 实现和 CPU
+  证据见 [SIMULATED_HBM_STATUS.md](./SIMULATED_HBM_STATUS.md)。
 - 跨仓协议与依赖：xLLM 是 `provider.proto` 的唯一源；xllm-service 通过
   `proto_xllm` 直接生成和链接同一文件。`renderer_digest` 覆盖 tokenizer +
   template 渲染契约，STRICT 编码结果必须与 Descriptor 相等。
@@ -122,7 +123,7 @@ limitations under the License.
 Service 的 Provider/Registry 纯 CPU 测试已覆盖 Adapter、route、EngineState 和
 LinkState；当前全量 service CPU 回归在 pinned 与外部 xLLM 两种构建下均为
 304/304，vLLM Agent/sidecar CPU 回归为 60/60，xLLM CPU 公共路径基线为
-103/103。新增 xLLM Engine plan
+113/113（含 simulated HBM 10/10）。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
 生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
 仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。

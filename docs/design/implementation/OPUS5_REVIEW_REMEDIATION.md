@@ -72,7 +72,7 @@ lease，现有接口也没有 incarnation compare，盲删会删除重启后新 
 
 | 范围 | 命令/目标 | 结果 |
 | --- | --- | --- |
-| xLLM 公共回归 | `xllm-dev xllm-test <xllm> native Debug` | 103/103 PASS |
+| xLLM 公共回归 | `xllm-dev xllm-test <xllm> native Debug` | 113/113 PASS，含 simulated HBM 10/10 |
 | xLLM Provider wire | `ProviderProtocolTest` | 8/8 PASS |
 | xLLM 地址归一化 | `util_test --gtest_filter=NetTest.*` | 5/5 PASS |
 | xllm-service pinned xLLM | `xllm-dev service-test <service> native Debug` | 304/304 PASS |
@@ -85,9 +85,9 @@ xLLM 本次变更涉及的 server、validator、native provider 和测试对象�
 `process_group.cpp` 的 `ProcessGroupImpl` 不完整类型限制；这不是本次整改回归，也不
 伪装成 CPU 推理验证。
 
-CPU 结果只证明控制链路、协议、状态机与 host/Torch CPU 所有权。本次变更不触碰 KV
-内容或 HBM 分配；后续任何 KV cache 功能必须先通过开发规范定义的 simulated HBM
-容量、block 所有权、内容/checksum、OOM/碎片和故障回收门禁，再进入 NPU 真机验证。
+CPU 结果只证明控制链路、协议、状态机与 host/Torch CPU 所有权。B6 已补齐
+simulated HBM 的固定容量、block 所有权、内容/checksum、OOM/碎片、transfer/fencing
+和故障回收门禁；它仍不能替代 NPU 真机 HBM 验证。
 
 ## 剩余门禁
 

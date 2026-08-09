@@ -27,7 +27,7 @@ limitations under the License.
 
 | Provider | Mode | Model/Profile | 支持状态 | 限制与证据 |
 | --- | --- | --- | --- | --- |
-| xLLM Native | CPU 公共路径 | 协议、Provider/Event wire、资源状态机、注册生命周期、流式语义、deadline、exact 首事件、JSON 解析、异步输出投递 | CPU_VERIFIED | 默认七目标 103/103；output queue 14/14；protocol 14/14；Torch CPU storage/ownership 覆盖；只证明链路，不代表 HBM |
+| xLLM Native | CPU 公共路径 | 协议、Provider/Event wire、资源状态机、注册生命周期、流式语义、deadline、exact 首事件、JSON 解析、异步输出投递、simulated HBM | CPU_VERIFIED | 默认八目标 113/113，含 simulated HBM 10/10；output queue 14/14；protocol 14/14；Torch CPU storage/ownership 覆盖；只证明链路和模拟容量，不代表真实 HBM |
 | xLLM Service + xLLM Native | 模板、Provider/Event Contract、请求身份、execution hold、output reorder、deadline、断连、seq=0 Query 恢复和首输出前 attempt 替换 | pinned 与当前外层 xLLM `service_dev` | CPU_VERIFIED | 两种构建均为 304/304 tests passed；三个生产二进制 build/link verify |
 | vLLM-Ascend | strict Agent/legacy sidecar 公共逻辑 | 无设备路径 | CPU_VERIFIED / NPU_PENDING | strict Descriptor、attempt/deadline/fencing/per-DP State 与 HTTP loopback 通过；真实 NPU/同命待验证 |
 
@@ -35,8 +35,8 @@ limitations under the License.
 
 - 代码入口与核心接口：`tests/xllm_service` 及 xLLM CPU 公共测试目标。
 - 状态、资源和错误码权威位置：本批次不增加生产状态或资源协议。
-- 跨仓协议与依赖：xllm-service 使用当前外层 xLLM 工作树构建，避免 pinned
-  submodule 掩盖跨仓语义差异。
+- 跨仓协议与依赖：xllm-service pin 到已推送的 xLLM `49916abc`，并同时使用当前
+  外层 xLLM 工作树 override 构建，避免两套协议真相漂移。
 - 明确不支持范围：本状态只证明可重复的双仓 CPU 开发基线，不代表任一 V2
   生产功能完成，也不证明 NPU kernel、CANN、RDMA 或真实推理路径。
 
@@ -45,7 +45,7 @@ limitations under the License.
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
 | DEV-STYLE | `git diff --check`；xLLM clang-format 规则人工核对 | N/A | N/A | PASS |
-| DEV-CPU-XLLM | `xllm-dev xllm-test <xllm> native Debug` 默认七目标；定向 output queue 和 protocol 目标 | queue 直接覆盖非连续 view retained storage、源 tensor 释放后所有权及空 tensor | 本批不修改 KV/HBM；后续 KV 功能必须独立通过 simulated HBM | PASS，103/103 + 14/14 + 14/14；queue 1400 次压力无失败 |
+| DEV-CPU-XLLM | `xllm-dev xllm-test <xllm> native Debug` 默认八目标；定向 output queue 和 protocol 目标 | queue 直接覆盖非连续 view retained storage、源 tensor 释放后所有权及空 tensor | simulated HBM 10/10；真实 NPU HBM 待验证 | PASS，113/113 + 14/14 + 14/14；simulated HBM 普通与 ASan+UBSan 各 100 轮通过 |
 | DEV-PRODUCTION-XLLM | 所有受影响生产 TU 使用 Clang C++20 `-Werror` 编译；`xllm-build`/`xllm-verify` | 无设备 `PlatformStream` 和 VMM host 类型可编译 | N/A | PASS |
 | DEV-CPU-SERVICE | pinned 与 `XLLM_SOURCE_DIR=<xllm>` 两种 `xllm-dev service-test <xllm-service> native Debug` | execution hold/output reorder/deadline/Query recovery/断连/attempt retry 不含 tensor 逻辑 | N/A | PASS，均为 304/304；22 个关键竞态用例各 100 轮无失败 |
 | DEV-CPU-VLLM-AGENT | 沙箱内 `python -m pytest -q vllm_sidecar/tests` | N/A，Python 控制面 | 待真实 vLLM-Ascend/NPU | PASS，60/60 |

@@ -123,11 +123,13 @@ jobs:
           cmake --build build/v2-cpu-xllm --target \
             xllm_proto partial_json_parser_test anthropic_protocol_test \
             anthropic_stream_utils_test attempt_lifecycle_table_test \
+            simulated_hbm_test \
             registration_lifecycle_test provider_protocol_test \
             request_event_protocol_test
           build/v2-cpu-xllm/tests/api_service/anthropic_protocol_test
           build/v2-cpu-xllm/tests/api_service/anthropic_stream_utils_test
           build/v2-cpu-xllm/tests/core/distributed_runtime/attempt_lifecycle_table_test
+          build/v2-cpu-xllm/tests/core/framework/kv_cache/simulated_hbm_test
           build/v2-cpu-xllm/tests/core/runtime/registration_lifecycle_test
           build/v2-cpu-xllm/tests/function_call/partial_json_parser/partial_json_parser_test
           build/v2-cpu-xllm/tests/proto/provider_protocol_test
