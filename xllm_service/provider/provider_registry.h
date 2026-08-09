@@ -30,6 +30,17 @@ class ProviderAdapterRegistry {
  public:
   ContractResult register_adapter(std::unique_ptr<ProviderAdapter> adapter);
 
+  // Atomically returns the immutable Adapter already stored for this key, or
+  // installs the supplied Adapter. A profile digest collision with a different
+  // Descriptor fails closed.
+  ContractResult find_or_register_adapter(
+      std::unique_ptr<ProviderAdapter> adapter,
+      const ProviderAdapter** registered_adapter);
+
+  ContractResult find_compatible_adapter(
+      const xllm::proto::ProviderDescriptor& descriptor,
+      const ProviderAdapter** adapter) const;
+
   const ProviderAdapter* find(xllm::proto::ProviderId provider_id,
                               const std::string& profile_digest) const;
   size_t size() const;

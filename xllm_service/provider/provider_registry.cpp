@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "provider/provider_registry.h"
 
+#include <google/protobuf/util/message_differencer.h>
+
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -22,9 +24,9 @@ limitations under the License.
 #include <utility>
 
 namespace xllm_service::provider {
+namespace {
 
-ContractResult ProviderAdapterRegistry::register_adapter(
-    std::unique_ptr<ProviderAdapter> adapter) {
+ContractResult validate_adapter(const ProviderAdapter* adapter) {
   if (adapter == nullptr) {
     return ContractResult::failure(
         xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
@@ -35,7 +37,7 @@ ContractResult ProviderAdapterRegistry::register_adapter(
     return validation;
   }
 
-  const auto& descriptor = adapter->describe();
+  const xllm::proto::ProviderDescriptor& descriptor = adapter->describe();
   const bool native_dispatch =
       adapter->dispatch_kind() == ProviderDispatchKind::XLLM_NATIVE_RPC;
   const bool native_descriptor = descriptor.identity().provider_id() ==
@@ -45,6 +47,26 @@ ContractResult ProviderAdapterRegistry::register_adapter(
         xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
         "provider descriptor does not match Adapter dispatch kind");
   }
+  return ContractResult::success();
+}
+
+bool same_adapter_contract(const ProviderAdapter& left,
+                           const ProviderAdapter& right) {
+  return left.dispatch_kind() == right.dispatch_kind() &&
+         google::protobuf::util::MessageDifferencer::Equivalent(
+             left.describe(), right.describe());
+}
+
+}  // namespace
+
+ContractResult ProviderAdapterRegistry::register_adapter(
+    std::unique_ptr<ProviderAdapter> adapter) {
+  ContractResult validation = validate_adapter(adapter.get());
+  if (!validation.ok()) {
+    return validation;
+  }
+
+  const auto& descriptor = adapter->describe();
   Key key{static_cast<int>(descriptor.identity().provider_id()),
           descriptor.profile_digest()};
   std::unique_lock lock(mutex_);
@@ -54,6 +76,77 @@ ContractResult ProviderAdapterRegistry::register_adapter(
         "provider adapter key is already registered");
   }
   adapters_.emplace(std::move(key), std::move(adapter));
+  return ContractResult::success();
+}
+
+ContractResult ProviderAdapterRegistry::find_or_register_adapter(
+    std::unique_ptr<ProviderAdapter> adapter,
+    const ProviderAdapter** registered_adapter) {
+  if (registered_adapter == nullptr) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+        "registered Adapter output must not be null");
+  }
+  *registered_adapter = nullptr;
+  ContractResult validation = validate_adapter(adapter.get());
+  if (!validation.ok()) {
+    return validation;
+  }
+
+  const xllm::proto::ProviderDescriptor& descriptor = adapter->describe();
+  Key key{static_cast<int>(descriptor.identity().provider_id()),
+          descriptor.profile_digest()};
+  std::unique_lock lock(mutex_);
+  const auto existing = adapters_.find(key);
+  if (existing != adapters_.end()) {
+    if (!same_adapter_contract(*existing->second, *adapter)) {
+      return ContractResult::failure(
+          xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+          "Provider Adapter key collides with a different Descriptor");
+    }
+    *registered_adapter = existing->second.get();
+    return ContractResult::success();
+  }
+
+  auto [inserted, did_insert] =
+      adapters_.emplace(std::move(key), std::move(adapter));
+  if (!did_insert) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_DUPLICATE_ADAPTER,
+        "Provider Adapter could not be installed");
+  }
+  *registered_adapter = inserted->second.get();
+  return ContractResult::success();
+}
+
+ContractResult ProviderAdapterRegistry::find_compatible_adapter(
+    const xllm::proto::ProviderDescriptor& descriptor,
+    const ProviderAdapter** adapter) const {
+  if (adapter == nullptr) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+        "compatible Adapter output must not be null");
+  }
+  *adapter = nullptr;
+  ContractResult validation = validate_provider_descriptor(descriptor);
+  if (!validation.ok()) {
+    return validation;
+  }
+
+  std::shared_lock lock(mutex_);
+  const auto existing =
+      adapters_.find(Key{static_cast<int>(descriptor.identity().provider_id()),
+                         descriptor.profile_digest()});
+  if (existing == adapters_.end()) {
+    return ContractResult::success();
+  }
+  if (!google::protobuf::util::MessageDifferencer::Equivalent(
+          existing->second->describe(), descriptor)) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+        "Provider Adapter key collides with a different Descriptor");
+  }
+  *adapter = existing->second.get();
   return ContractResult::success();
 }
 

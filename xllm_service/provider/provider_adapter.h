@@ -33,6 +33,15 @@ enum class ProviderDispatchKind : int8_t {
   OPENAI_HTTP = 1,
 };
 
+// Request-scoped inputs are passed to an immutable Provider Adapter for one
+// synchronous encode operation. They must never be retained by the Adapter.
+struct RequestEncodingContext {
+  const std::vector<int32_t>* native_token_ids = nullptr;
+  std::string request_uid;
+  std::optional<uint64_t> attempt_seq;
+  std::string native_renderer_digest;
+};
+
 std::optional<ProviderDispatchKind> resolve_provider_dispatch_kind(
     xllm::proto::ProviderId provider_id);
 
@@ -41,6 +50,7 @@ class RequestCodec {
   virtual ~RequestCodec() = default;
 
   virtual ContractResult encode(const xllm::proto::CanonicalRequest& request,
+                                const RequestEncodingContext& context,
                                 xllm::proto::EncodedRequest* encoded) const = 0;
 };
 
@@ -61,32 +71,22 @@ class XllmNativeRequestRenderer {
   virtual ~XllmNativeRequestRenderer() = default;
 
   virtual ContractResult render(const xllm::proto::CanonicalRequest& request,
+                                const RequestEncodingContext& context,
                                 std::string* provider_payload,
                                 uint64_t* prompt_tokens,
                                 std::string* renderer_digest) const = 0;
 };
 
 // Production Service bridge for a CanonicalRequest whose chat template and
-// tokenization were already performed once on the selected Native path. The
-// token vector is a non-owning view and must outlive the synchronous encode().
+// tokenization were already performed once on the selected Native path.
 class XllmNativePreparedRequestRenderer final
     : public XllmNativeRequestRenderer {
  public:
-  XllmNativePreparedRequestRenderer(const std::vector<int32_t>* token_ids,
-                                    std::string request_uid,
-                                    uint64_t attempt_seq,
-                                    std::string renderer_digest);
-
   ContractResult render(const xllm::proto::CanonicalRequest& request,
+                        const RequestEncodingContext& context,
                         std::string* provider_payload,
                         uint64_t* prompt_tokens,
                         std::string* renderer_digest) const override;
-
- private:
-  const std::vector<int32_t>* token_ids_;
-  std::string request_uid_;
-  uint64_t attempt_seq_;
-  std::string renderer_digest_;
 };
 
 class XllmNativeAdapter final : public ProviderAdapter {
@@ -119,5 +119,9 @@ class VllmAscendAdapter final : public ProviderAdapter {
   xllm::proto::ProviderDescriptor descriptor_;
   std::unique_ptr<RequestCodec> request_codec_;
 };
+
+ContractResult create_provider_adapter(
+    const xllm::proto::ProviderDescriptor& descriptor,
+    std::unique_ptr<ProviderAdapter>* adapter);
 
 }  // namespace xllm_service::provider

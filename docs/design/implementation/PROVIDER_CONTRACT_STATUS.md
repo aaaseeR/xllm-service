@@ -50,8 +50,12 @@ limitations under the License.
 - 跨仓协议与依赖：xLLM 是 `provider.proto` 的唯一源；xllm-service 通过
   `proto_xllm` 直接生成和链接同一文件。`renderer_digest` 覆盖 tokenizer +
   template 渲染契约，STRICT 编码结果必须与 Descriptor 相等。
-- Adapter registry 按 `(provider_id, profile_digest)` 保存不可变 Adapter；这是
-  Provider/profile 级 Adapter 注册表，不替代 G3 的 Engine incarnation Registry。
+- Scheduler 生产路径持有按 `(provider_id, profile_digest)` 索引的 append-only
+  Adapter registry。Adapter 对象不可变且可被并发请求复用；token ids、request UID、
+  attempt 和 renderer digest 只通过同步 `RequestEncodingContext` 传入，不被 Adapter
+  持有。同 key 并发懒注册会合并到同一对象；相同 profile digest 对应不同 Descriptor
+  时 fail closed。这是 Provider/profile 级 Adapter 缓存，不替代 G3 的 Engine
+  incarnation Registry。
 - `InstanceMetaInfo` 已携带 `provider_id`、contract version、profile digest 与可选
   完整 `ProviderDescriptor`。完整 Descriptor 在 JSON 入口执行摘要/incarnation
   交叉校验，并在实例进入生产索引前运行公共 Descriptor validator；旧
@@ -84,9 +88,8 @@ limitations under the License.
   compatibility proof。STRICT 与 BEST_EFFORT legacy 不能单边混配；矩阵同时用于
   route、readiness、静态 peer 与 Link/Unlink 候选。
 - 明确不支持范围：Descriptor-less Engine 仍作为显式 BEST_EFFORT 兼容入口，不生成
-  V2 artifacts；Adapter registry 尚未接管生产请求的 codec 生命周期。也没有实现
-  Submit、Stream、Cancel、Reserve 和 State Stream；不声称任何真实 NPU
-  Provider 已通过 conformance。
+  V2 artifacts。还没有实现 Submit、Stream、Cancel、Reserve 和 State Stream；
+  不声称任何真实 NPU Provider 已通过 conformance。
 
 ## 需求与测试追踪
 
@@ -98,15 +101,15 @@ limitations under the License.
 | G-2/F82 ExecutionPlan | 四种 role shape、capability、deadline、identity 门禁 | N/A | 待真实 Provider | PASS |
 | STRICT renderer | canonical/encoded/model/capability/renderer 一致性正负测试 | N/A | 待真实 tokenizer/runtime | PASS |
 | EngineState schema | UNKNOWN 与 0、per-DP、ratio、histogram 负向测试 | N/A | 待 State Stream | PASS |
-| Adapter registry | ownership、lookup、重复 key 与非法 Descriptor | N/A | N/A | PASS |
+| Adapter registry | ownership、lookup、重复 key、非法 Descriptor、生产 factory、同 key 并发懒注册合并、profile digest 碰撞拒绝、跨 attempt request context 复用；缓存关键三项重复 100 轮 | N/A | N/A | PASS |
 | 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
 | Canonical/Plan 生产接入 | ingress 语义保留、Native REMOTE_PD 与 vLLM AGGREGATED plan、renderer identity/digest、UNKNOWN KV estimate | N/A，无 tensor 逻辑 | 待真实 Provider wire | PASS，4 项新增测试 |
 | Native plan dispatch/Engine ingress | Completion/Chat wire presence/roundtrip/field number；严格计划复制、客户端计划清除、legacy 缺失兼容、缺 retry policy 拒绝；Engine identity/attempt/route/receiver/deadline/capability/resource 正负校验 | RequestParams 与两个 API handler 在 Torch CPU 头文件环境严格编译；逻辑不执行 tensor 数值计算 | 待真实 P/D 数据面 | PASS，Service 3/3，Engine validator 6/6 |
 | Provider route 隔离 | Native P/D、vLLM SINGLE、跨 Provider、无完整 plan、suspect、未知 Provider、RR cursor 正负测试 | N/A，无 tensor 逻辑 | 待真实混合池 | PASS，8/8 |
 | STRICT P/D 兼容 | 不同 profile 正向；model、KV/Connector、topology、runtime 与 strict/legacy 单边混配负向测试 | N/A，无 tensor 逻辑 | 待真实 P/D handshake | PASS |
 
-Service 的 `ProviderContractTest` 当前为 30 项，`InstanceMetaInfoTest` 为 13 项；
-当前全量 service CPU 回归为 233/233，vLLM sidecar CPU 回归为 29/29（其中
+Service 的 `ProviderContractTest` 当前为 34 项，`InstanceMetaInfoTest` 为 13 项；
+当前全量 service CPU 回归为 237/237，vLLM sidecar CPU 回归为 29/29（其中
 metadata 11/11），xLLM CPU 公共路径基线为 96/96。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
 生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
@@ -116,16 +119,17 @@ validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completio
 
 - 已完成：contract v1 单一 proto；稳定错误码；完整 V2 mode/capability Resolver；
   Provider/open-mode 门禁；Descriptor、Canonical/Encoded Request、EngineState、
-  ExecutionPlan 校验；`attempt_seq=0` 与缺失字段可区分；线程安全、只增不删的
-  Adapter registry；两个首发 Provider 的 RequestCodec 与 dispatch identity；CPU
+  ExecutionPlan 校验；`attempt_seq=0` 与缺失字段可区分；线程安全、只增不删且进入
+  Scheduler 生产路径的 Adapter registry；两个首发 Provider 的不可变 RequestCodec、
+  request-scoped encoding context 与 dispatch identity；CPU
   conformance；生产 Scheduler 的 per-request Provider dispatch、跨 Provider route
   隔离、STRICT P/D 显式兼容矩阵，以及真实 ingress→CanonicalRequest→RequestCodec→
   ExecutionPlan 构建；vLLM STRICT 数据面已消费 plan payload；Native Completion/Chat
   已携带当前 attempt 计划，Engine 在实际入口 fail closed 校验计划与本机身份。
 - 已知缺口/风险：当前 schema 尚无可校验的 topology-transform proof，因此非相同
   topology 保守拒绝；per-pair `LinkState=READY`、失败隔离和周期对账属于 G3。
-  生产 Adapter cache 仍属于 B1 的下一批次；客户端 model alias 到权威 model revision
-  的映射也需由 catalog 明确，当前 STRICT 路径按字符串完全一致 fail closed。G3 的
+  客户端 model alias 到权威 model revision 的映射需由 catalog 明确，当前 STRICT
+  路径按字符串完全一致 fail closed。G3 的
   `(provider_id, profile_digest, incarnation_id)` Engine Registry 尚未实现；当前
   不证明硬件 Runtime 行为。
 - 回滚与兼容：协议为全新 additive schema；旧二进制不会读取这些消息。V2

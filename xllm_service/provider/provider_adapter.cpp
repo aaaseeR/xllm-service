@@ -34,6 +34,7 @@ class XllmNativeRequestCodec final : public RequestCodec {
       : descriptor_(descriptor), request_renderer_(request_renderer) {}
 
   ContractResult encode(const xllm::proto::CanonicalRequest& request,
+                        const RequestEncodingContext& context,
                         xllm::proto::EncodedRequest* encoded) const override {
     ContractResult validation = validate_canonical_request(request);
     if (!validation.ok()) {
@@ -49,7 +50,7 @@ class XllmNativeRequestCodec final : public RequestCodec {
     std::string renderer_digest;
     uint64_t prompt_tokens = 0;
     ContractResult render_result = request_renderer_->render(
-        request, &provider_payload, &prompt_tokens, &renderer_digest);
+        request, context, &provider_payload, &prompt_tokens, &renderer_digest);
     if (!render_result.ok()) {
       return render_result;
     }
@@ -76,7 +77,9 @@ class VllmAscendRequestCodec final : public RequestCodec {
       : descriptor_(descriptor) {}
 
   ContractResult encode(const xllm::proto::CanonicalRequest& request,
+                        const RequestEncodingContext& context,
                         xllm::proto::EncodedRequest* encoded) const override {
+    static_cast<void>(context);
     ContractResult validation = validate_canonical_request(request);
     if (!validation.ok()) {
       return validation;
@@ -120,30 +123,22 @@ std::optional<ProviderDispatchKind> resolve_provider_dispatch_kind(
   }
 }
 
-XllmNativePreparedRequestRenderer::XllmNativePreparedRequestRenderer(
-    const std::vector<int32_t>* token_ids,
-    std::string request_uid,
-    uint64_t attempt_seq,
-    std::string renderer_digest)
-    : token_ids_(token_ids),
-      request_uid_(std::move(request_uid)),
-      attempt_seq_(attempt_seq),
-      renderer_digest_(std::move(renderer_digest)) {}
-
 ContractResult XllmNativePreparedRequestRenderer::render(
     const xllm::proto::CanonicalRequest& request,
+    const RequestEncodingContext& context,
     std::string* provider_payload,
     uint64_t* prompt_tokens,
     std::string* renderer_digest) const {
-  if (token_ids_ == nullptr || provider_payload == nullptr ||
+  if (context.native_token_ids == nullptr || provider_payload == nullptr ||
       prompt_tokens == nullptr || renderer_digest == nullptr ||
-      renderer_digest_.empty()) {
+      context.native_renderer_digest.empty()) {
     return ContractResult::failure(
         xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED,
         "Native prepared renderer dependencies are unavailable");
   }
-  if (request.request_uid() != request_uid_ || !request.has_attempt_seq() ||
-      request.attempt_seq() != attempt_seq_) {
+  if (request.request_uid() != context.request_uid ||
+      !request.has_attempt_seq() || !context.attempt_seq.has_value() ||
+      request.attempt_seq() != context.attempt_seq.value()) {
     return ContractResult::failure(
         xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
         "Native prepared renderer request identity changed");
@@ -159,10 +154,10 @@ ContractResult XllmNativePreparedRequestRenderer::render(
   nlohmann::json payload = nlohmann::json::object();
   payload["canonical_payload_schema"] = request.canonical_payload_schema();
   payload["canonical_request"] = std::move(canonical_payload);
-  payload["token_ids"] = *token_ids_;
+  payload["token_ids"] = *context.native_token_ids;
   *provider_payload = payload.dump();
-  *prompt_tokens = token_ids_->size();
-  *renderer_digest = renderer_digest_;
+  *prompt_tokens = context.native_token_ids->size();
+  *renderer_digest = context.native_renderer_digest;
   return ContractResult::success();
 }
 
@@ -205,6 +200,30 @@ const RequestCodec& VllmAscendAdapter::request_codec() const {
 
 ProviderDispatchKind VllmAscendAdapter::dispatch_kind() const {
   return ProviderDispatchKind::OPENAI_HTTP;
+}
+
+ContractResult create_provider_adapter(
+    const xllm::proto::ProviderDescriptor& descriptor,
+    std::unique_ptr<ProviderAdapter>* adapter) {
+  if (adapter == nullptr) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+        "Provider Adapter output must not be null");
+  }
+  adapter->reset();
+  switch (descriptor.identity().provider_id()) {
+    case xllm::proto::PROVIDER_ID_XLLM_NATIVE:
+      *adapter = std::make_unique<XllmNativeAdapter>(
+          descriptor, std::make_unique<XllmNativePreparedRequestRenderer>());
+      return ContractResult::success();
+    case xllm::proto::PROVIDER_ID_VLLM_ASCEND:
+      *adapter = std::make_unique<VllmAscendAdapter>(descriptor);
+      return ContractResult::success();
+    default:
+      return ContractResult::failure(
+          xllm::proto::PROVIDER_CONTRACT_ERROR_UNKNOWN_ENUM_VALUE,
+          "Provider has no production Adapter");
+  }
 }
 
 }  // namespace xllm_service::provider

@@ -404,28 +404,44 @@ bool Scheduler::prepare_v2_execution_plan(
     return false;
   }
 
-  std::unique_ptr<provider::ProviderAdapter> adapter;
-  switch (request->provider_id) {
-    case xllm::proto::PROVIDER_ID_XLLM_NATIVE:
-      adapter = std::make_unique<provider::XllmNativeAdapter>(
-          primary,
-          std::make_unique<provider::XllmNativePreparedRequestRenderer>(
-              &request->token_ids,
-              request->correlation.request_uid(),
-              request->correlation.attempt_seq(),
-              options_.native_renderer_digest()));
-      break;
-    case xllm::proto::PROVIDER_ID_VLLM_ASCEND:
-      adapter = std::make_unique<provider::VllmAscendAdapter>(primary);
-      break;
-    default:
-      LOG(ERROR) << "Selected Provider has no V2 RequestCodec.";
+  const provider::ProviderAdapter* adapter = nullptr;
+  const provider::ContractResult find_result =
+      provider_adapter_registry_.find_compatible_adapter(primary, &adapter);
+  if (!find_result.ok()) {
+    LOG(ERROR) << "V2 Provider Adapter lookup failed: "
+               << find_result.message();
+    return false;
+  }
+  if (adapter == nullptr) {
+    std::unique_ptr<provider::ProviderAdapter> candidate;
+    const provider::ContractResult create_result =
+        provider::create_provider_adapter(primary, &candidate);
+    if (!create_result.ok()) {
+      LOG(ERROR) << "V2 Provider Adapter creation failed: "
+                 << create_result.message();
       return false;
+    }
+    const provider::ContractResult register_result =
+        provider_adapter_registry_.find_or_register_adapter(
+            std::move(candidate), &adapter);
+    if (!register_result.ok()) {
+      LOG(ERROR) << "V2 Provider Adapter registration failed: "
+                 << register_result.message();
+      return false;
+    }
+  }
+
+  provider::RequestEncodingContext encoding_context;
+  if (request->provider_id == xllm::proto::PROVIDER_ID_XLLM_NATIVE) {
+    encoding_context.native_token_ids = &request->token_ids;
+    encoding_context.request_uid = request->correlation.request_uid();
+    encoding_context.attempt_seq = request->correlation.attempt_seq();
+    encoding_context.native_renderer_digest = options_.native_renderer_digest();
   }
 
   xllm::proto::EncodedRequest encoded;
   const provider::ContractResult encoded_result =
-      adapter->request_codec().encode(canonical, &encoded);
+      adapter->request_codec().encode(canonical, encoding_context, &encoded);
   if (!encoded_result.ok()) {
     LOG(ERROR) << "V2 Provider request encoding failed: "
                << encoded_result.message();

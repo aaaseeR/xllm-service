@@ -29,6 +29,7 @@ limitations under the License.
 #include "loadbalance_policy/loadbalance_policy.h"
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
+#include "provider/provider_registry.h"
 #include "request/client_disconnect_monitor.h"
 #include "request/request.h"
 #include "request/request_deadline_queue.h"
@@ -188,6 +189,10 @@ class Scheduler final {
   std::shared_ptr<GlobalKVCacheMgr> global_kvcache_mgr_;
 
   std::unique_ptr<LoadBalancePolicy> lb_policy_;
+
+  // Append-only cache of immutable Provider/profile Adapters. Request-scoped
+  // data is supplied separately to RequestCodec::encode().
+  provider::ProviderAdapterRegistry provider_adapter_registry_;
 
   std::unique_ptr<std::thread> heartbeat_thread_;
 
