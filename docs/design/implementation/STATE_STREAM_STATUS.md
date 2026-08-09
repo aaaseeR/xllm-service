@@ -134,7 +134,7 @@ NPU handshake 故障矩阵待最终环境验证。
 | xLLM Native 生产 | Descriptor 确定性/非法输入、P/D mode、per-DP 完整/空容量、缺失 capability、snapshot 序号不消耗、32 线程唯一序号；heartbeat field 7 | N/A，无 tensor 数值逻辑 | 待真实 CANN/SOC 版本、NPU block 账本与 P/D heartbeat | PASS；Native 6/6、协议 8/8，并发套件连续 100 轮 |
 
 本批验证：xllm-service Debug 三个生产服务目标编译、动态链接通过，全量 CPU 测试
-288/288；ObservationController 8/8；ReadinessController 6/6；HealthResponse 3/3；
+289/289；ObservationController 8/8；ReadinessController 6/6；HealthResponse 3/3；
 EngineRegistry 14/14；StateStreamOutbox 6/6；
 StateStreamClient BRPC loopback 4/4；
 LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 8/8。State Stream、

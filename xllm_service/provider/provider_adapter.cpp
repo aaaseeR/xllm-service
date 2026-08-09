@@ -36,14 +36,20 @@ class XllmNativeRequestCodec final : public RequestCodec {
   ContractResult encode(const xllm::proto::CanonicalRequest& request,
                         const RequestEncodingContext& context,
                         xllm::proto::EncodedRequest* encoded) const override {
-    ContractResult validation = validate_canonical_request(request);
-    if (!validation.ok()) {
-      return validation;
-    }
-    if (encoded == nullptr || request_renderer_ == nullptr) {
+    if (encoded == nullptr) {
       return ContractResult::failure(
           xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED,
           "xLLM Native encoder dependencies are unavailable");
+    }
+    encoded->Clear();
+    if (request_renderer_ == nullptr) {
+      return ContractResult::failure(
+          xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED,
+          "xLLM Native encoder dependencies are unavailable");
+    }
+    ContractResult validation = validate_canonical_request(request);
+    if (!validation.ok()) {
+      return validation;
     }
 
     std::string provider_payload;
@@ -55,7 +61,6 @@ class XllmNativeRequestCodec final : public RequestCodec {
       return render_result;
     }
 
-    encoded->Clear();
     encoded->set_provider_id(xllm::proto::PROVIDER_ID_XLLM_NATIVE);
     encoded->set_token_count_quality(xllm::proto::TOKEN_COUNT_QUALITY_EXACT);
     encoded->set_prompt_tokens(prompt_tokens);
@@ -80,14 +85,15 @@ class VllmAscendRequestCodec final : public RequestCodec {
                         const RequestEncodingContext& context,
                         xllm::proto::EncodedRequest* encoded) const override {
     static_cast<void>(context);
-    ContractResult validation = validate_canonical_request(request);
-    if (!validation.ok()) {
-      return validation;
-    }
     if (encoded == nullptr) {
       return ContractResult::failure(
           xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED,
           "vLLM-Ascend encoded output must not be null");
+    }
+    encoded->Clear();
+    ContractResult validation = validate_canonical_request(request);
+    if (!validation.ok()) {
+      return validation;
     }
     if (request.canonical_payload_schema() != kOpenAiHttpJsonSchema) {
       return ContractResult::failure(
@@ -95,7 +101,6 @@ class VllmAscendRequestCodec final : public RequestCodec {
           "vLLM-Ascend requires the OpenAI HTTP JSON canonical schema");
     }
 
-    encoded->Clear();
     encoded->set_provider_id(xllm::proto::PROVIDER_ID_VLLM_ASCEND);
     encoded->set_token_count_quality(xllm::proto::TOKEN_COUNT_QUALITY_UNKNOWN);
     encoded->set_prompt_tokens(0);

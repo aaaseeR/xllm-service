@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <utility>
 
 namespace xllm_service::provider {
 namespace {
@@ -110,6 +111,7 @@ ContractResult build_execution_plan(
         xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
         "execution plan output must not be null");
   }
+  plan->Clear();
   ContractResult encoded_validation =
       validate_encoded_request(primary, canonical, encoded);
   if (!encoded_validation.ok()) {
@@ -146,24 +148,24 @@ ContractResult build_execution_plan(
                           "|incarnation=" + primary.identity().incarnation_id();
   }
 
-  plan->Clear();
-  plan->set_contract_version(kProviderContractVersion);
-  plan->set_request_uid(canonical.request_uid());
-  plan->set_attempt_seq(canonical.attempt_seq());
-  plan->set_provider_id(primary.identity().provider_id());
-  plan->set_mode(spec->mode());
-  plan->set_transfer_mode(spec->transfer_mode());
-  plan->set_selection_order(spec->selection_order());
-  plan->set_p_selection_delegated(spec->p_selection_delegated());
-  plan->set_binding_stage(spec->binding_stage());
-  plan->set_compatibility_proof(std::move(compatibility_proof));
-  plan->set_provider_payload(encoded.provider_payload());
-  plan->set_score(0.0);
-  plan->add_reason_codes("v2-contract-hard-filter");
+  xllm::proto::ExecutionPlan candidate;
+  candidate.set_contract_version(kProviderContractVersion);
+  candidate.set_request_uid(canonical.request_uid());
+  candidate.set_attempt_seq(canonical.attempt_seq());
+  candidate.set_provider_id(primary.identity().provider_id());
+  candidate.set_mode(spec->mode());
+  candidate.set_transfer_mode(spec->transfer_mode());
+  candidate.set_selection_order(spec->selection_order());
+  candidate.set_p_selection_delegated(spec->p_selection_delegated());
+  candidate.set_binding_stage(spec->binding_stage());
+  candidate.set_compatibility_proof(std::move(compatibility_proof));
+  candidate.set_provider_payload(encoded.provider_payload());
+  candidate.set_score(0.0);
+  candidate.add_reason_codes("v2-contract-hard-filter");
 
-  add_selected_role(primary, 0, plan);
+  add_selected_role(primary, 0, &candidate);
   if (decode != nullptr) {
-    add_selected_role(*decode, 1, plan);
+    add_selected_role(*decode, 1, &candidate);
   }
 
   ModeRequirements requirements;
@@ -174,22 +176,27 @@ ContractResult build_execution_plan(
   }
   for (const xllm::proto::ProviderCapability capability :
        requirements.required_capabilities) {
-    plan->add_required_capabilities(capability);
+    candidate.add_required_capabilities(capability);
   }
 
-  xllm::proto::DeadlineBudget* budget = plan->mutable_deadline_budget();
+  xllm::proto::DeadlineBudget* budget = candidate.mutable_deadline_budget();
   budget->set_remaining_ms(canonical.remaining_deadline_ms());
   budget->set_submit_ms(0);
   budget->set_handoff_ms(0);
   budget->set_output_ms(canonical.remaining_deadline_ms());
-  plan->mutable_prediction()->set_uncertainty(1.0);
+  candidate.mutable_prediction()->set_uncertainty(1.0);
 
   ContractResult estimate =
-      set_resource_estimate(canonical, encoded, primary, plan);
+      set_resource_estimate(canonical, encoded, primary, &candidate);
   if (!estimate.ok()) {
     return estimate;
   }
-  return validate_execution_plan(primary, *plan);
+  ContractResult validation = validate_execution_plan(primary, candidate);
+  if (!validation.ok()) {
+    return validation;
+  }
+  *plan = std::move(candidate);
+  return ContractResult::success();
 }
 
 }  // namespace xllm_service::provider

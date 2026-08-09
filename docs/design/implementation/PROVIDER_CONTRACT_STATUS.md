@@ -111,8 +111,8 @@ limitations under the License.
 | STRICT P/D 兼容 | 不同 profile 正向；model、KV/Connector、topology、runtime 与 strict/legacy 单边混配负向测试 | N/A，无 tensor 逻辑 | 待真实 P/D handshake | PASS |
 
 Service 的 Provider/Registry 纯 CPU 测试已覆盖 Adapter、route、EngineState 和
-LinkState；当前全量 service CPU 回归为 288/288，vLLM Agent/sidecar CPU 回归为
-43/43，xLLM CPU 公共路径基线为 96/96。新增 xLLM Engine plan
+LinkState；当前全量 service CPU 回归为 289/289，vLLM Agent/sidecar CPU 回归为
+44/44，xLLM CPU 公共路径基线为 96/96。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
 生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
 仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。

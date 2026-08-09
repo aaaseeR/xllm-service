@@ -97,6 +97,16 @@ def test_config_validation_fails_closed(tmp_path) -> None:
         validate_provider_config(bad)
 
     bad = provider_config()
+    bad["topology"]["dp"] = True
+    with pytest.raises(ProviderConfigError, match="topology.dp"):
+        validate_provider_config(bad)
+
+    bad = provider_config()
+    bad["scheduler"]["max_num_seqs"] = 1 << 32
+    with pytest.raises(ProviderConfigError, match="max_num_seqs"):
+        validate_provider_config(bad)
+
+    bad = provider_config()
     bad["runtime"]["runtime_version"] = 21
     with pytest.raises(ProviderConfigError, match="runtime_version"):
         validate_provider_config(bad)

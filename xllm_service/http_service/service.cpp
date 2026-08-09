@@ -486,10 +486,6 @@ void handle_vllm(std::shared_ptr<T> call_data,
                                             correlation.global_request_id());
     redirect_cntl->http_request().SetHeader("X-Trace-ID",
                                             correlation.trace_id());
-    redirect_cntl->http_request().SetHeader("X-Request-UID",
-                                            correlation.request_uid());
-    redirect_cntl->http_request().SetHeader(
-        "X-Attempt-Seq", std::to_string(correlation.attempt_seq()));
     if (request == nullptr || !request->request_deadline.has_value()) {
       call_data->finish_with_error("Provider request deadline is unavailable.");
       if (request != nullptr) {
@@ -506,8 +502,16 @@ void handle_vllm(std::shared_ptr<T> call_data,
       delete redirect_cntl;
       return;
     }
-    redirect_cntl->http_request().SetHeader(
-        "X-Remaining-Deadline-Ms", std::to_string(remaining_deadline_ms));
+    if (!provider::set_vllm_agent_attempt_headers(redirect_cntl,
+                                                  correlation.request_uid(),
+                                                  correlation.attempt_seq(),
+                                                  target_incarnation_id,
+                                                  remaining_deadline_ms)) {
+      call_data->finish_with_error("Provider attempt identity is invalid.");
+      scheduler->finish_request(request->correlation.request_uid(), true);
+      delete redirect_cntl;
+      return;
+    }
     redirect_cntl->set_timeout_ms(static_cast<int>(std::min<uint64_t>(
         remaining_deadline_ms,
         static_cast<uint64_t>(std::numeric_limits<int>::max()))));

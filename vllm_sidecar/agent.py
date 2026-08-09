@@ -146,9 +146,15 @@ class AgentRuntime:
                 self._write_json(handler, 503, {"status": "fenced"})
             return
         if path == "/v1/internal/attempt/query":
+            if handler.command != "POST":
+                self._write_json(handler, 405, {"error": "method not allowed"})
+                return
             self._attempt_control(handler, cancel=False)
             return
         if path == "/v1/internal/attempt/cancel":
+            if handler.command != "POST":
+                self._write_json(handler, 405, {"error": "method not allowed"})
+                return
             self._attempt_control(handler, cancel=True)
             return
         if path in _INFERENCE_PATHS:
@@ -163,7 +169,7 @@ class AgentRuntime:
         if not self._ledger.accepting():
             self._write_json(handler, 503, {"error": "agent is fenced"})
             return
-        self._proxy(handler, path, None, None)
+        self._proxy(handler, path, None, None, None)
 
     def _attempt_control(
         self, handler: BaseHTTPRequestHandler, cancel: bool
@@ -182,20 +188,25 @@ class AgentRuntime:
         ):
             self._write_json(handler, 400, {"error": "invalid attempt identity"})
             return
-        if incarnation_id != self._ledger.incarnation_id():
+        if cancel:
+            result = self._ledger.cancel(
+                request_uid, attempt_seq, incarnation_id
+            )
+        else:
+            result = self._ledger.query(request_uid, attempt_seq, incarnation_id)
+        if result.reason == "ADMISSION_REASON_INVALID_REQUEST":
+            self._write_json(handler, 400, {"error": "invalid attempt identity"})
+            return
+        if result.reason == "ADMISSION_REASON_STALE_INCARNATION":
             self._write_json(handler, 409, {"error": "stale incarnation"})
             return
-        if cancel:
-            result = self._ledger.cancel(request_uid, attempt_seq)
-        else:
-            result = self._ledger.query(request_uid, attempt_seq)
         self._write_json(
             handler,
             200,
             _attempt_json(
                 result,
                 AttemptKey(request_uid, attempt_seq),
-                self._ledger.incarnation_id(),
+                incarnation_id,
             ),
         )
 
@@ -204,33 +215,45 @@ class AgentRuntime:
             self._write_json(handler, 405, {"error": "method not allowed"})
             return
         request_uid = handler.headers.get("X-Request-UID", "")
+        incarnation_id = handler.headers.get("X-Incarnation-ID", "")
         try:
             attempt_seq = int(handler.headers.get("X-Attempt-Seq", ""))
             remaining_ms = int(handler.headers.get("X-Remaining-Deadline-Ms", ""))
         except ValueError:
             self._write_json(handler, 400, {"error": "invalid V2 attempt headers"})
             return
-        result = self._ledger.begin(request_uid, attempt_seq, remaining_ms)
+        result = self._ledger.begin(
+            request_uid, attempt_seq, incarnation_id, remaining_ms
+        )
         if not result.accepted:
-            status = 409 if result.replayed else 503
+            if result.reason == "ADMISSION_REASON_INVALID_REQUEST":
+                status = 400
+            elif (
+                result.replayed
+                or result.reason == "ADMISSION_REASON_STALE_INCARNATION"
+            ):
+                status = 409
+            else:
+                status = 503
             self._write_json(
                 handler,
                 status,
                 _attempt_json(
                     result,
                     AttemptKey(request_uid, attempt_seq),
-                    self._ledger.incarnation_id(),
+                    incarnation_id,
                 ),
             )
             return
         key = AttemptKey(request_uid, attempt_seq)
-        self._proxy(handler, path, key, remaining_ms)
+        self._proxy(handler, path, key, incarnation_id, remaining_ms)
 
     def _proxy(
         self,
         handler: BaseHTTPRequestHandler,
         path: str,
         key: AttemptKey | None,
+        incarnation_id: str | None,
         remaining_ms: int | None,
     ) -> None:
         raw_body = self._read_body(handler)
@@ -238,6 +261,7 @@ class AgentRuntime:
             if key is not None:
                 self._ledger.finish(
                     key,
+                    incarnation_id or "",
                     "ATTEMPT_LIFECYCLE_STATE_FAILED",
                     "ADMISSION_REASON_INVALID_REQUEST",
                 )
@@ -266,13 +290,15 @@ class AgentRuntime:
         except requests.RequestException as error:
             if key is not None:
                 self._ledger.reap_expired()
-                current = self._ledger.query(key.request_uid, key.attempt_seq)
+                current = self._ledger.query(
+                    key.request_uid, key.attempt_seq, incarnation_id or ""
+                )
                 if current.state == "ATTEMPT_LIFECYCLE_STATE_EXPIRED":
                     self._write_json(
                         handler,
                         504,
                         _attempt_json(
-                            current, key, self._ledger.incarnation_id()
+                            current, key, incarnation_id or ""
                         ),
                     )
                     return
@@ -284,19 +310,22 @@ class AgentRuntime:
                         handler,
                         409,
                         _attempt_json(
-                            current, key, self._ledger.incarnation_id()
+                            current, key, incarnation_id or ""
                         ),
                     )
                     return
                 self._ledger.finish(
                     key,
+                    incarnation_id or "",
                     "ATTEMPT_LIFECYCLE_STATE_FAILED",
                     "ADMISSION_REASON_INTERNAL_ERROR",
                 )
             self._write_json(handler, 502, {"error": f"upstream failed: {error}"})
             return
 
-        if key is not None and not self._ledger.attach(key, response):
+        if key is not None and not self._ledger.attach(
+            key, incarnation_id or "", response
+        ):
             response.close()
             self._write_json(handler, 409, {"error": "attempt was cancelled"})
             return
@@ -319,18 +348,22 @@ class AgentRuntime:
                 if 200 <= response.status_code < 300:
                     self._ledger.finish(
                         key,
+                        incarnation_id or "",
                         "ATTEMPT_LIFECYCLE_STATE_DONE",
                         "ADMISSION_REASON_ATTEMPT_TERMINAL",
                     )
                 else:
                     self._ledger.finish(
                         key,
+                        incarnation_id or "",
                         "ATTEMPT_LIFECYCLE_STATE_FAILED",
                         "ADMISSION_REASON_INTERNAL_ERROR",
                     )
         except (BrokenPipeError, ConnectionResetError, requests.RequestException):
             if key is not None:
-                self._ledger.cancel(key.request_uid, key.attempt_seq)
+                self._ledger.cancel(
+                    key.request_uid, key.attempt_seq, incarnation_id or ""
+                )
         finally:
             response.close()
             handler.close_connection = True

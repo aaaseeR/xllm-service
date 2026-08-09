@@ -47,9 +47,9 @@ V2 首个交付版本已经完成；V2 仍须继续完成多模型、精确 KV-a
 
 ## CPU 验证基线
 
-- xllm-service：288/288 CTest 通过，包含 aggregated execution hold 与 Agent
+- xllm-service：289/289 CTest 通过，包含 aggregated execution hold 与 Agent
   Query/Cancel 响应证明；三个生产服务二进制完成 Debug 构建和链接。
-- vLLM Agent：43/43 Python 测试覆盖 Descriptor、metadata、metrics、lease/heartbeat、
+- vLLM Agent：44/44 Python 测试覆盖 Descriptor、metadata、metrics、lease/heartbeat、
   ledger、HTTP 代理、Cancel/Submit 竞态、本地 deadline 和 incarnation fencing。
 - xLLM：本轮未修改外层 xLLM；Service 继续显式使用外层 `service_dev` 构建，避免回退
   到 pinned submodule 的旧协议真相。

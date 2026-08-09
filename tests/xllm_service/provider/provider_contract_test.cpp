@@ -255,6 +255,12 @@ ExecutionPlan make_plan(const ProviderDescriptor& descriptor) {
     default:
       break;
   }
+  if (!plan.selected_roles().empty()) {
+    plan.mutable_selected_roles(0)->set_engine_uid(
+        descriptor.identity().engine_uid());
+    plan.mutable_selected_roles(0)->set_incarnation_id(
+        descriptor.identity().incarnation_id());
+  }
   return plan;
 }
 
@@ -565,6 +571,11 @@ TEST(ProviderContractTest, ExecutionPlanRejectsWrongRoleAndCapability) {
   plan.clear_attempt_seq();
   EXPECT_EQ(validate_execution_plan(descriptor, plan).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD);
+
+  plan = make_plan(descriptor);
+  plan.mutable_selected_roles(0)->set_incarnation_id("other-incarnation");
+  EXPECT_EQ(validate_execution_plan(descriptor, plan).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
 }
 
 TEST(ProviderContractTest, ExecutionPlanRejectsOverflowingDeadlineBudget) {
@@ -823,10 +834,12 @@ TEST(ProviderContractTest, PreparedNativeRendererPreservesCanonicalAndTokens) {
   canonical.set_attempt_seq(0);
   context.attempt_seq = 0;
   context.native_renderer_digest.clear();
+  encoded.set_provider_payload("stale-payload");
   EXPECT_EQ(missing_digest_adapter.request_codec()
                 .encode(canonical, context, &encoded)
                 .error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED);
+  EXPECT_EQ(encoded.ByteSizeLong(), 0u);
 }
 
 TEST(ProviderContractTest, VllmAscendAdapterPreservesCanonicalPayload) {
@@ -850,9 +863,11 @@ TEST(ProviderContractTest, VllmAscendAdapterPreservesCanonicalPayload) {
 TEST(ProviderContractTest, VllmAscendAdapterRejectsAmbiguousPayloadSchema) {
   VllmAscendAdapter adapter(make_descriptor(kOpenModeCases[3]));
   xllm::proto::EncodedRequest encoded;
+  encoded.set_provider_payload("stale-payload");
   EXPECT_EQ(
       adapter.request_codec().encode(make_request(), {}, &encoded).error(),
       xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED);
+  EXPECT_EQ(encoded.ByteSizeLong(), 0u);
 }
 
 TEST(ProviderContractTest, ProductionAdaptersRejectWrongProviderDescriptor) {
@@ -1056,6 +1071,7 @@ TEST(ProviderContractTest, ExecutionPlanBuilderBuildsRemotePdPlan) {
   EXPECT_EQ(
       build_execution_plan(canonical, encoded, prefill, &decode, &plan).error(),
       xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+  EXPECT_EQ(plan.ByteSizeLong(), 0u);
 }
 
 TEST(ProviderContractTest, ExecutionPlanBuilderBuildsAggregatedPlan) {

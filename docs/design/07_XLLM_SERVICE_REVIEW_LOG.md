@@ -1796,3 +1796,19 @@ V2.5 Store 和 V3 Placement 的边界不变。本轮只改变交付组合与完�
 06 D54/D55 记录本轮决定。README、01、02、09、11 已同步版本和文档效力；
 后续开发进度只使用 `V2-B*`、`V2-K*`、`V2-L*` 等内部能力门，不再创建 V1
 产品里程碑。
+
+## 34. V2 实现深度 Review
+
+### 34.1 第一轮：协议正确性与 fail-closed（2026-08-09）
+
+本轮发现并关闭一个高危跨进程 ABA：Service 的 vLLM Submit 未携带目标
+`incarnation_id`，Agent 的 Submit/Attach/Finish/Query/Cancel 也未在同一 ledger
+临界区绑定 incarnation，因此旧请求可能修改新 incarnation 复用的 attempt key。
+修复后所有数据面和控制面操作均以
+`(request_uid, attempt_seq, incarnation_id)` 为完整身份，旧 incarnation 稳定返回
+409，且 Service 只有在 HTTP 200、身份精确匹配、状态枚举已知时才刷新直接成功证据。
+
+同时关闭三个 fail-closed 缺口：Provider 编码和 ExecutionPlan 构建失败会清空调用方
+输出，避免复用对象泄漏旧 payload/plan；ExecutionPlan 的 primary role 必须与用于构建
+计划的 Descriptor 身份一致；Python Descriptor 的整数事实拒绝 `bool`、负数和 wire
+宽度溢出。CPU 门禁结果为 service 289/289、Agent/sidecar 44/44。

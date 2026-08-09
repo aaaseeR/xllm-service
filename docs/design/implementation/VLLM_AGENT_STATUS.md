@@ -37,8 +37,10 @@ limitations under the License.
 - `vllm_sidecar/descriptor.py` 对 runtime/model/topology/KV/scheduler 五组 verified
   facts fail closed，生成确定性 profile SHA-256 和完整 contract-v1 Descriptor。
 - `vllm_sidecar/agent.py` 是 Chat/Completion 的唯一反向代理入口，要求
-  `X-Request-UID`、`X-Attempt-Seq` 和 `X-Remaining-Deadline-Ms`，并向 vLLM 注入稳定
-  request ID。健康、lease 或 incarnation 失效会立即 fence 新 ingress。
+  `X-Request-UID`、`X-Attempt-Seq`、`X-Incarnation-ID` 和
+  `X-Remaining-Deadline-Ms`，并向 vLLM 注入稳定 request ID。Submit、Attach、Finish、
+  Query 和 Cancel 均在同一个 ledger 临界区校验 incarnation，旧进程请求不能修改新
+  incarnation 复用的 attempt key。健康、lease 或 incarnation 失效会立即 fence 新 ingress。
 - `vllm_sidecar/attempts.py` 使用 incarnation-scoped、有 record/terminal TTL 硬上限的
   ledger。Submit exactly-once；未知 Cancel 安装 `CANCELLED_BEFORE_CREATE`；Query
   `ABSENT` 不构成终态证明；deadline、Cancel、fence 和断连关闭持有的 upstream。
@@ -62,11 +64,11 @@ limitations under the License.
 | --- | --- | --- | --- |
 | strict Descriptor/Profile | 必填字段、非法 topology、raw ingress、身份交叉校验、digest 确定性 | 真实部署 facts 校验 | PASS / PENDING |
 | Submit exactly-once | 64 路同 key 并发仅一个成功；duplicate/tombstone/capacity | 真实高并发 vLLM | PASS / PENDING |
-| Query/Cancel/fence | lifecycle、Cancel-before-create、stale incarnation、Cancel 与未知 Submit 竞态 | SIGKILL、lease 分区 | PASS / PENDING |
+| Query/Cancel/fence | lifecycle、Cancel-before-create、stale incarnation、旧 incarnation 与复用 key 的 ABA、Cancel 与未知 Submit 竞态 | SIGKILL、lease 分区 | PASS / PENDING |
 | local deadline | fake clock ledger 与延迟 upstream loopback；超时返回 terminal `EXPIRED` | NPU abort 到资源释放时延 | PASS / PENDING |
 | HTTP proxy | Chat/Completion payload/request ID、未知推理路径防旁路、health/livez、成功/重复/错误、流终态基础路径 | 真实 SSE/客户端断流；Anthropic 尚未开放 | PASS / PENDING |
 | EngineState | per-DP label、缺 rank `PARTIAL`、ratio 聚合、state sequence/identity | 真实 vLLM-Ascend metrics | PASS / PENDING |
-| Service hold | aggregated commit/terminal invariant；Agent 精确身份 terminal/malformed response parser；全量 288/288 | Submit ACK 丢失一万次 | PASS / PENDING |
+| Service hold | aggregated commit/terminal invariant；Agent 精确身份 terminal/malformed response parser；Submit header 绑定目标 incarnation；全量 289/289 | Submit ACK 丢失一万次 | PASS / PENDING |
 
 ## 完善情况
 

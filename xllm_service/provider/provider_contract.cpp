@@ -873,7 +873,6 @@ ContractResult validate_execution_plan(const ProviderDescriptor& descriptor,
                   "execution plan selects an engine twice");
     }
   }
-
   bool role_shape_valid = false;
   if (plan.selection_order() == xllm::proto::SELECTION_ORDER_SINGLE) {
     role_shape_valid =
@@ -901,6 +900,13 @@ ContractResult validate_execution_plan(const ProviderDescriptor& descriptor,
   if (!role_shape_valid) {
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_SELECTED_ROLES,
                 "selected roles do not match selection order");
+  }
+  const xllm::proto::SelectedEngineRole& primary = plan.selected_roles(0);
+  if (primary.role() != descriptor.serving().role() ||
+      primary.engine_uid() != descriptor.identity().engine_uid() ||
+      primary.incarnation_id() != descriptor.identity().incarnation_id()) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+                "primary selected role does not match descriptor identity");
   }
 
   const auto& budget = plan.deadline_budget();

@@ -80,6 +80,8 @@ _SUPPORTED_API_FEATURES = {
     "completions",
     "models",
 }
+_MAX_UINT32 = (1 << 32) - 1
+_MAX_UINT64 = (1 << 64) - 1
 
 
 def load_provider_config(path: str) -> dict:
@@ -94,6 +96,15 @@ def load_provider_config(path: str) -> dict:
 def _require_nonempty(section: str, name: str, value: object) -> None:
     if value is None or value == "" or value == [] or value == 0:
         raise ProviderConfigError(f"{section}.{name} must be nonempty")
+
+
+def _require_positive_integer(
+    section: str, name: str, value: object, maximum: int
+) -> None:
+    if type(value) is not int or value <= 0 or value > maximum:
+        raise ProviderConfigError(
+            f"{section}.{name} must be a positive bounded integer"
+        )
 
 
 def validate_provider_config(config: object) -> None:
@@ -115,17 +126,25 @@ def validate_provider_config(config: object) -> None:
 
     topology = config["topology"]
     for name in ("device_count", "tp", "dp", "pp", "ep", "cp"):
-        if not isinstance(topology[name], int) or topology[name] <= 0:
-            raise ProviderConfigError(f"topology.{name} must be a positive integer")
+        _require_positive_integer(
+            "topology", name, topology[name], _MAX_UINT32
+        )
     scheduler = config["scheduler"]
-    for name in ("max_num_seqs", "max_num_batched_tokens"):
-        if not isinstance(scheduler[name], int) or scheduler[name] <= 0:
-            raise ProviderConfigError(f"scheduler.{name} must be a positive integer")
-    if (
-        not isinstance(config["kv"]["block_size"], int)
-        or config["kv"]["block_size"] <= 0
-    ):
-        raise ProviderConfigError("kv.block_size must be a positive integer")
+    _require_positive_integer(
+        "scheduler",
+        "max_num_seqs",
+        scheduler["max_num_seqs"],
+        _MAX_UINT32,
+    )
+    _require_positive_integer(
+        "scheduler",
+        "max_num_batched_tokens",
+        scheduler["max_num_batched_tokens"],
+        _MAX_UINT64,
+    )
+    _require_positive_integer(
+        "kv", "block_size", config["kv"]["block_size"], _MAX_UINT32
+    )
     if not isinstance(config["kv"]["cache_groups"], list) or not all(
         isinstance(item, str) and item for item in config["kv"]["cache_groups"]
     ):

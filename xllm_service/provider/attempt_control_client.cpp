@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <brpc/controller.h>
 
+#include <cstddef>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -25,6 +26,12 @@ limitations under the License.
 
 namespace xllm_service::provider {
 namespace {
+
+constexpr size_t kMaxIdentityBytes = 256;
+
+bool valid_identity(const std::string& value) {
+  return !value.empty() && value.size() <= kMaxIdentityBytes;
+}
 
 bool terminal_state(xllm::proto::AttemptLifecycleState state) {
   switch (state) {
@@ -90,14 +97,12 @@ AttemptControlResult call_vllm_agent(
   if (controller.Failed()) {
     return AttemptControlResult{};
   }
-  AttemptControlResult result = parse_vllm_agent_attempt_response(
+  return parse_vllm_agent_attempt_response(
       controller.http_response().status_code(),
       controller.response_attachment().to_string(),
       hold.attempt().request_uid(),
       hold.attempt().attempt_seq(),
       holder.incarnation_id());
-  result.direct_success = true;
-  return result;
 }
 
 AttemptControlResult call_xllm_native(
@@ -127,17 +132,35 @@ AttemptControlResult call_xllm_native(
   }
 
   AttemptControlResult result;
-  result.direct_success = !controller.Failed();
-  if (!result.direct_success || !response.ok() ||
+  if (controller.Failed() || !response.ok() ||
       !same_attempt_key(response.status().key(), hold, holder)) {
     return result;
   }
+  result.direct_success = true;
   result.state = response.status().state();
   result.terminal_proof = terminal_state(result.state);
   return result;
 }
 
 }  // namespace
+
+bool set_vllm_agent_attempt_headers(brpc::Controller* controller,
+                                    const std::string& request_uid,
+                                    uint64_t attempt_seq,
+                                    const std::string& incarnation_id,
+                                    uint64_t remaining_deadline_ms) {
+  if (controller == nullptr || !valid_identity(request_uid) ||
+      !valid_identity(incarnation_id) || remaining_deadline_ms == 0) {
+    return false;
+  }
+  controller->http_request().SetHeader("X-Request-UID", request_uid);
+  controller->http_request().SetHeader("X-Attempt-Seq",
+                                       std::to_string(attempt_seq));
+  controller->http_request().SetHeader("X-Incarnation-ID", incarnation_id);
+  controller->http_request().SetHeader("X-Remaining-Deadline-Ms",
+                                       std::to_string(remaining_deadline_ms));
+  return true;
+}
 
 AttemptControlResult call_provider_attempt_control(
     xllm::proto::ProviderId provider_id,
@@ -193,6 +216,7 @@ AttemptControlResult parse_vllm_agent_attempt_response(
   if (!state.has_value()) {
     return result;
   }
+  result.direct_success = true;
   result.state = *state;
   result.terminal_proof = terminal_state(*state);
   return result;

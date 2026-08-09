@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <brpc/channel.h>
+#include <brpc/controller.h>
 
 #include <cstdint>
 #include <memory>
@@ -36,6 +37,12 @@ struct AttemptControlResult {
   xllm::proto::AttemptLifecycleState state =
       xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED;
 };
+
+bool set_vllm_agent_attempt_headers(brpc::Controller* controller,
+                                    const std::string& request_uid,
+                                    uint64_t attempt_seq,
+                                    const std::string& incarnation_id,
+                                    uint64_t remaining_deadline_ms);
 
 AttemptControlResult call_provider_attempt_control(
     xllm::proto::ProviderId provider_id,

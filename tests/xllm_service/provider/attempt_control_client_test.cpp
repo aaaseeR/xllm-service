@@ -114,6 +114,7 @@ TEST(AttemptControlClientTest, AcceptsOnlyTerminalAgentStatesAsProof) {
   for (const std::string& state : terminal_states) {
     const AttemptControlResult result = parse_vllm_agent_attempt_response(
         200, agent_response(state), "request-1", 7, "incarnation-1");
+    EXPECT_TRUE(result.direct_success) << state;
     EXPECT_TRUE(result.terminal_proof) << state;
     EXPECT_NE(result.state, xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED)
         << state;
@@ -130,6 +131,7 @@ TEST(AttemptControlClientTest, AcceptsOnlyTerminalAgentStatesAsProof) {
   for (const std::string& state : nonterminal_states) {
     const AttemptControlResult result = parse_vllm_agent_attempt_response(
         200, agent_response(state), "request-1", 7, "incarnation-1");
+    EXPECT_TRUE(result.direct_success) << state;
     EXPECT_FALSE(result.terminal_proof) << state;
   }
 }
@@ -145,6 +147,7 @@ TEST(AttemptControlClientTest, MalformedOrFailedResponseNeverProvesTerminal) {
   for (const std::string& body : invalid_bodies) {
     const AttemptControlResult result = parse_vllm_agent_attempt_response(
         200, body, "request-1", 7, "incarnation-1");
+    EXPECT_FALSE(result.direct_success) << body;
     EXPECT_FALSE(result.terminal_proof) << body;
     EXPECT_EQ(result.state, xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED)
         << body;
@@ -157,6 +160,7 @@ TEST(AttemptControlClientTest, MalformedOrFailedResponseNeverProvesTerminal) {
       7,
       "incarnation-1");
   EXPECT_FALSE(failed.terminal_proof);
+  EXPECT_FALSE(failed.direct_success);
   EXPECT_EQ(failed.state, xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED);
 
   const std::vector<std::string> mismatched_bodies = {
@@ -168,10 +172,37 @@ TEST(AttemptControlClientTest, MalformedOrFailedResponseNeverProvesTerminal) {
   for (const std::string& body : mismatched_bodies) {
     const AttemptControlResult mismatch = parse_vllm_agent_attempt_response(
         200, body, "request-1", 7, "incarnation-1");
+    EXPECT_FALSE(mismatch.direct_success) << body;
     EXPECT_FALSE(mismatch.terminal_proof) << body;
     EXPECT_EQ(mismatch.state, xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED)
         << body;
   }
+}
+
+TEST(AttemptControlClientTest, BindsSubmitHeadersToExactIncarnation) {
+  brpc::Controller controller;
+  ASSERT_TRUE(set_vllm_agent_attempt_headers(
+      &controller, "request-1", 7, "incarnation-1", 1234));
+  ASSERT_NE(controller.http_request().GetHeader("X-Request-UID"), nullptr);
+  EXPECT_EQ(*controller.http_request().GetHeader("X-Request-UID"), "request-1");
+  ASSERT_NE(controller.http_request().GetHeader("X-Attempt-Seq"), nullptr);
+  EXPECT_EQ(*controller.http_request().GetHeader("X-Attempt-Seq"), "7");
+  ASSERT_NE(controller.http_request().GetHeader("X-Incarnation-ID"), nullptr);
+  EXPECT_EQ(*controller.http_request().GetHeader("X-Incarnation-ID"),
+            "incarnation-1");
+  ASSERT_NE(controller.http_request().GetHeader("X-Remaining-Deadline-Ms"),
+            nullptr);
+  EXPECT_EQ(*controller.http_request().GetHeader("X-Remaining-Deadline-Ms"),
+            "1234");
+
+  EXPECT_FALSE(set_vllm_agent_attempt_headers(
+      nullptr, "request-1", 7, "incarnation-1", 1234));
+  EXPECT_FALSE(set_vllm_agent_attempt_headers(
+      &controller, "", 7, "incarnation-1", 1234));
+  EXPECT_FALSE(
+      set_vllm_agent_attempt_headers(&controller, "request-1", 7, "", 1234));
+  EXPECT_FALSE(set_vllm_agent_attempt_headers(
+      &controller, "request-1", 7, "incarnation-1", 0));
 }
 
 TEST_F(AttemptControlClientLoopbackTest, CallsAgentQueryAndCancelEndpoints) {

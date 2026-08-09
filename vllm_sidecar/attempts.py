@@ -22,6 +22,22 @@ import time
 from typing import Protocol
 
 
+_MAX_IDENTITY_BYTES = 256
+_MAX_UINT64 = (1 << 64) - 1
+
+
+def _valid_identity(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= _MAX_IDENTITY_BYTES
+    )
+
+
+def _valid_attempt_seq(value: int) -> bool:
+    return type(value) is int and 0 <= value <= _MAX_UINT64
+
+
 class Closable(Protocol):
     def close(self) -> None: ...
 
@@ -69,8 +85,8 @@ class AttemptLedger:
         self._accepting = False
 
     def activate(self, incarnation_id: str) -> None:
-        if not incarnation_id:
-            raise ValueError("incarnation_id must be nonempty")
+        if not _valid_identity(incarnation_id):
+            raise ValueError("incarnation_id must be a bounded identity")
         to_close = []
         with self._lock:
             if incarnation_id != self._incarnation_id:
@@ -120,9 +136,17 @@ class AttemptLedger:
         self,
         request_uid: str,
         attempt_seq: int,
+        incarnation_id: str,
         remaining_deadline_ms: int,
     ) -> AttemptResult:
-        if not request_uid or attempt_seq < 0 or remaining_deadline_ms <= 0:
+        if (
+            not _valid_identity(request_uid)
+            or not _valid_attempt_seq(attempt_seq)
+            or not _valid_identity(incarnation_id)
+            or type(remaining_deadline_ms) is not int
+            or remaining_deadline_ms <= 0
+            or remaining_deadline_ms > _MAX_UINT64
+        ):
             return AttemptResult(
                 False,
                 False,
@@ -133,6 +157,13 @@ class AttemptLedger:
         key = AttemptKey(request_uid, attempt_seq)
         with self._lock:
             self._reap_locked(now)
+            if incarnation_id != self._incarnation_id:
+                return AttemptResult(
+                    False,
+                    False,
+                    "ATTEMPT_LIFECYCLE_STATE_FAILED",
+                    "ADMISSION_REASON_STALE_INCARNATION",
+                )
             previous = self._records.get(key)
             if previous is not None:
                 return AttemptResult(
@@ -166,31 +197,63 @@ class AttemptLedger:
                 "ADMISSION_REASON_NONE",
             )
 
-    def attach(self, key: AttemptKey, upstream: Closable) -> bool:
+    def attach(
+        self, key: AttemptKey, incarnation_id: str, upstream: Closable
+    ) -> bool:
         with self._lock:
             record = self._records.get(key)
-            if record is None or record.terminal_at is not None:
+            if (
+                record is None
+                or record.incarnation_id != incarnation_id
+                or record.terminal_at is not None
+            ):
                 return False
             record.upstream = upstream
             record.state = "ATTEMPT_LIFECYCLE_STATE_RUNNING"
             return True
 
-    def finish(self, key: AttemptKey, state: str, reason: str) -> None:
+    def finish(
+        self, key: AttemptKey, incarnation_id: str, state: str, reason: str
+    ) -> None:
         with self._lock:
             record = self._records.get(key)
-            if record is None or record.terminal_at is not None:
+            if (
+                record is None
+                or record.incarnation_id != incarnation_id
+                or record.terminal_at is not None
+            ):
                 return
             record.state = state
             record.reason = reason
             record.terminal_at = self._clock()
             record.upstream = None
 
-    def cancel(self, request_uid: str, attempt_seq: int) -> AttemptResult:
+    def cancel(
+        self, request_uid: str, attempt_seq: int, incarnation_id: str
+    ) -> AttemptResult:
+        if (
+            not _valid_identity(request_uid)
+            or not _valid_attempt_seq(attempt_seq)
+            or not _valid_identity(incarnation_id)
+        ):
+            return AttemptResult(
+                False,
+                False,
+                "ATTEMPT_LIFECYCLE_STATE_FAILED",
+                "ADMISSION_REASON_INVALID_REQUEST",
+            )
         key = AttemptKey(request_uid, attempt_seq)
         upstream = None
         with self._lock:
             now = self._clock()
             self._reap_locked(now)
+            if incarnation_id != self._incarnation_id:
+                return AttemptResult(
+                    False,
+                    False,
+                    "ATTEMPT_LIFECYCLE_STATE_FAILED",
+                    "ADMISSION_REASON_STALE_INCARNATION",
+                )
             record = self._records.get(key)
             if record is None:
                 if len(self._records) >= self._max_records:
@@ -219,10 +282,30 @@ class AttemptLedger:
         self._close_all([upstream] if upstream is not None else [])
         return result
 
-    def query(self, request_uid: str, attempt_seq: int) -> AttemptResult:
+    def query(
+        self, request_uid: str, attempt_seq: int, incarnation_id: str
+    ) -> AttemptResult:
+        if (
+            not _valid_identity(request_uid)
+            or not _valid_attempt_seq(attempt_seq)
+            or not _valid_identity(incarnation_id)
+        ):
+            return AttemptResult(
+                False,
+                False,
+                "ATTEMPT_LIFECYCLE_STATE_FAILED",
+                "ADMISSION_REASON_INVALID_REQUEST",
+            )
         key = AttemptKey(request_uid, attempt_seq)
         with self._lock:
             self._reap_locked(self._clock())
+            if incarnation_id != self._incarnation_id:
+                return AttemptResult(
+                    False,
+                    False,
+                    "ATTEMPT_LIFECYCLE_STATE_FAILED",
+                    "ADMISSION_REASON_STALE_INCARNATION",
+                )
             record = self._records.get(key)
             if record is None:
                 return AttemptResult(

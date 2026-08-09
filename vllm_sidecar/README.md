@@ -90,6 +90,7 @@ xllm-service sends these headers on Chat/Completion traffic:
 | --- | --- |
 | `X-Request-UID` | globally stable request identity |
 | `X-Attempt-Seq` | attempt identity; duplicate submission is rejected |
+| `X-Incarnation-ID` | exact target Agent incarnation; stale submissions are rejected atomically |
 | `X-Remaining-Deadline-Ms` | remaining local duration; zero/expired is rejected |
 
 The Agent exposes incarnation-scoped control endpoints:

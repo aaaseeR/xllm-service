@@ -84,6 +84,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             headers={
                 "X-Request-UID": "request-1",
                 "X-Attempt-Seq": "0",
+                "X-Incarnation-ID": "inc-1",
                 "X-Remaining-Deadline-Ms": "2000",
             },
             timeout=2.0,
@@ -105,6 +106,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             headers={
                 "X-Request-UID": "request-1",
                 "X-Attempt-Seq": "0",
+                "X-Incarnation-ID": "inc-1",
                 "X-Remaining-Deadline-Ms": "2000",
             },
             timeout=2.0,
@@ -141,18 +143,63 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             timeout=2.0,
         )
         assert invalid_identity.status_code == 400
+        assert (
+            requests.delete(
+                base + "/v1/internal/attempt/cancel", timeout=2.0
+            ).status_code
+            == 405
+        )
+        stale_submit = requests.post(
+            base + "/v1/chat/completions",
+            json={"model": "m"},
+            headers={
+                "X-Request-UID": "stale-submit",
+                "X-Attempt-Seq": "0",
+                "X-Incarnation-ID": "old-inc",
+                "X-Remaining-Deadline-Ms": "2000",
+            },
+            timeout=2.0,
+        )
+        assert stale_submit.status_code == 409
+        assert agent.ledger.query("stale-submit", 0, "inc-1").state == (
+            "ATTEMPT_LIFECYCLE_STATE_ABSENT"
+        )
+        invalid_submit = requests.post(
+            base + "/v1/completions",
+            json={"model": "m", "prompt": "p"},
+            headers={
+                "X-Request-UID": "bounded-submit",
+                "X-Attempt-Seq": str(1 << 64),
+                "X-Incarnation-ID": "inc-1",
+                "X-Remaining-Deadline-Ms": "2000",
+            },
+            timeout=2.0,
+        )
+        assert invalid_submit.status_code == 400
+        missing_incarnation = requests.post(
+            base + "/v1/completions",
+            json={"model": "m", "prompt": "p"},
+            headers={
+                "X-Request-UID": "missing-incarnation",
+                "X-Attempt-Seq": "0",
+                "X-Remaining-Deadline-Ms": "2000",
+            },
+            timeout=2.0,
+        )
+        assert missing_incarnation.status_code == 400
         unsupported = requests.post(
             base + "/v1/messages",
             json={"model": "m", "messages": []},
             headers={
                 "X-Request-UID": "raw-bypass",
                 "X-Attempt-Seq": "0",
+                "X-Incarnation-ID": "inc-1",
                 "X-Remaining-Deadline-Ms": "2000",
             },
             timeout=2.0,
         )
         assert unsupported.status_code == 404
-        assert agent.ledger.query("raw-bypass", 0).state == (
+        assert agent.ledger.query("raw-bypass", 0, "inc-1").state == (
             "ATTEMPT_LIFECYCLE_STATE_ABSENT"
         )
 
@@ -189,6 +236,7 @@ def test_cancel_wins_while_submit_result_is_unknown() -> None:
                 headers={
                     "X-Request-UID": "cancel-race",
                     "X-Attempt-Seq": "3",
+                    "X-Incarnation-ID": "inc-1",
                     "X-Remaining-Deadline-Ms": "2000",
                 },
                 timeout=2.0,
@@ -207,6 +255,7 @@ def test_cancel_wins_while_submit_result_is_unknown() -> None:
             headers={
                 "X-Request-UID": "cancel-race",
                 "X-Attempt-Seq": "3",
+                "X-Incarnation-ID": "inc-1",
                 "X-Remaining-Deadline-Ms": "2000",
             },
             timeout=2.0,
@@ -243,6 +292,7 @@ def test_local_deadline_fences_delayed_upstream_acceptance() -> None:
                 headers={
                     "X-Request-UID": "deadline-race",
                     "X-Attempt-Seq": "1",
+                    "X-Incarnation-ID": "inc-1",
                     "X-Remaining-Deadline-Ms": "50",
                 },
                 timeout=2.0,
