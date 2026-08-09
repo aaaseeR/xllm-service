@@ -20,21 +20,21 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：PARTIAL
 - 关联设计/Requirement ID：G3、F64、F65、F67、F78、D13、D15-D17、D41、D52
-- 最近验证基线：xLLM 与 xllm-service 本状态文档所在提交
+- 最近验证基线：xLLM `8c8d68a3`；xllm-service `f475173`
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
 
 | Provider | Mode | Model/Profile | 支持状态 | 限制与证据 |
 | --- | --- | --- | --- | --- |
-| xLLM Native | `REMOTE_PD/LAYERWISE_PUSH` | contract v1 strict Descriptor | CPU_VERIFIED（Service 聚合/发布/接收核心） | FULL/DELTA、master/snapshot fencing、有界异步扇出、Engine/Link TTL、incarnation 和 READY 路由门禁通过 |
+| xLLM Native | `REMOTE_PD/LAYERWISE_PUSH` | contract v1 strict Descriptor | CPU_VERIFIED（Native 生产 + Service 消费核心） | Native P/D 注册真实 Descriptor，heartbeat 发布完整 per-DP EngineState；FULL/DELTA、fencing、TTL、Link READY 门禁通过 |
 | xLLM Native | legacy Descriptor-less | BEST_EFFORT | PARTIAL | 第一个有效 FULL 前保留滚动升级兼容；FULL 后不允许与 strict 单边混配 |
 | vLLM-Ascend | `AGGREGATED` | contract v1 strict Descriptor | PARTIAL | Registry 核心可表达；Provider Agent 尚未发布真实 EngineState |
 
-总体状态保持 PARTIAL：单一协议、权威成员与软状态分离、master 聚合与有界异步扇出、
-权威 master incarnation 分发、接收缓存和真实调度消费链路已经闭环；Engine/Agent 真实
-状态生成和观测失明迟滞尚未闭环；Link 周期对账的 Service 侧已经闭环，真实 NPU
-handshake 故障矩阵待最终环境验证。
+总体状态保持 PARTIAL：单一协议、xLLM Native 状态生产、权威成员与软状态分离、
+master 聚合与有界异步扇出、权威 master incarnation 分发、接收缓存和真实调度消费
+链路已经闭环；vLLM Agent 状态生产和观测失明迟滞尚未闭环；Link 周期对账的 Service
+侧已经闭环，真实 NPU handshake 故障矩阵待最终环境验证。
 
 ## 实现
 
@@ -57,6 +57,15 @@ handshake 故障矩阵待最终环境验证。
 - heartbeat 可选携带 `EngineState`。master 校验成员 identity 后聚合状态；成员变化使
   当前 FULL 失效，并在精确覆盖恢复后生成新的权威 FULL。旧客户端不携带该字段时保持
   wire 兼容。
+- xLLM Native 仅为 V2 已开放的 P/D `LAYERWISE_PUSH` 模式发布 strict Descriptor；
+  DEFAULT/MIX/PULL 等模式继续走 descriptor-less 兼容路径，不伪造 V2 能力。Descriptor
+  从已加载模型/tokenizer/renderer、实际 worker 数派生的 TP/DP/CP/KV-split 拓扑、
+  BlockManager、scheduler 和 Connector 配置构造，各兼容性契约使用带 domain 的 SHA-256
+  digest。缺字段或运行时拓扑不一致时 fail closed。
+- xLLM heartbeat 从 `BlockManagerPool` 读取每个 DP 的真实 free/used block，发布单调
+  `state_seq`、incarnation/profile/model identity、admission credit 和安全有界的 KV
+  使用率。snapshot 不完整时不消耗序号；producer 支持并发调用。EngineState 是
+  `HeartbeatRequest` 的 additive field 7，旧 Service/Engine wire 仍兼容。
 - `StateStreamOutbox` 为每个订阅者维护一个在途请求和有界 latest-map。新订阅者、发送
   失败、队列溢出和周期检查均强制先发最新 FULL；成功后才继续 DELTA。发布 age 只按
   本地 monotonic elapsed 重基，回拨和溢出均 fail closed。
@@ -89,12 +98,16 @@ handshake 故障矩阵待最终环境验证。
 | master 聚合/发布 | 权威 FULL 精确覆盖、publish-age 重基、单在途、latest-map 合并、失败/溢出恢复 | N/A | 待多机压力 | PASS；Registry 10/10、Outbox 6/6 |
 | master identity | 旧地址 key 保持不变、独立 incarnation key、切主后 receiver 先等 FULL | N/A | 待真实 etcd 切主 | PASS（代码与协议）；真实 etcd 故障注入待补 |
 | 生产接入 | RPC descriptor 复用 shared StateBatch；Scheduler/InstanceMgr/route 编译链接；BRPC loopback 成功、8 路并发、超时和非法输入 | N/A | 待多副本 loopback | PASS；client 4/4 |
+| xLLM Native 生产 | Descriptor 确定性/非法输入、P/D mode、per-DP 完整/空容量、缺失 capability、snapshot 序号不消耗、32 线程唯一序号；heartbeat field 7 | N/A，无 tensor 数值逻辑 | 待真实 CANN/SOC 版本、NPU block 账本与 P/D heartbeat | PASS；Native 6/6、协议 8/8，并发套件连续 100 轮 |
 
 本批验证：xllm-service Debug 三个生产服务目标编译通过，全量 CPU 测试 263/263；
 EngineRegistry 10/10；StateStreamOutbox 6/6；StateStreamClient BRPC loopback 4/4；
-LinkReconciler 5/5；xLLM Provider 协议 8/8。State Stream 与 Link 的并发、退避和
-incarnation 关键用例连续 100 轮通过。没有 tensor 数值逻辑，因此本功能当前无伪造的
-Torch CPU 测试项。
+LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 8/8。State Stream、
+Link 和 Native producer 的关键并发用例连续 100 轮通过。xLLM 的
+`native_provider_runtime.cpp`、`xservice_client.cpp`、`llm_master.cpp` 和
+`vlm_master.cpp` 使用真实 Torch CPU/BRPC 编译参数通过。完整 xLLM runtime 目标仍被
+既有 `process_group.cpp` 的 CPU `ProcessGroupImpl` 不完整类型错误阻断，该文件不在本批
+改动中。没有 tensor 数值逻辑，因此本功能当前无伪造的 Torch CPU 测试项。
 
 ## 完善情况
 
@@ -103,18 +116,22 @@ Torch CPU 测试项。
   consumption；严格 P/D Link READY 门禁；heartbeat ingress；master 权威 FULL 构建；
   单在途、有界 latest-map publisher；兼容的 master identity 分发；BRPC 并发扇出；滚动
   升级前置兼容；Link 周期差集、独立状态机、有界重试与 State Stream 发布；master
-  降级后停止旧主发布和恢复 follower 监听。
-- 已知缺口/风险：xLLM Native 与 vLLM Agent 尚未在真实 heartbeat 中生成完整
-  EngineState，所以当前 ingress 需要调用端补齐后才能形成首个生产 FULL；Link 状态已
-  由真实 `LinkInstance` 结果生成，但尚未做 NPU 多 P/D 故障矩阵；状态分发指标、
-  `STATE_BLIND/REGISTRY_BLIND` 迟滞尚未实现。master identity 已保持旧 etcd 地址 value
-  不变，但仍需真实 etcd 故障注入覆盖两 key 事件乱序与 lease 到期。
+  降级后停止旧主发布和恢复 follower 监听；xLLM Native strict Descriptor 与真实
+  per-DP heartbeat EngineState 生产。
+- 已知缺口/风险：vLLM Agent 尚未在真实 heartbeat 中生成完整 EngineState；xLLM 的
+  NPU 硬件 runtime 版本目前只能发布平台与编译期 Torch 版本，仍需接入实际 CANN/驱动
+  和 resolved cache dtype/SOC 身份。Link 状态已由真实 `LinkInstance` 结果生成，但尚未
+  做 NPU 多 P/D 故障矩阵；状态分发指标、`STATE_BLIND/REGISTRY_BLIND` 迟滞尚未实现。
+  master identity 已保持旧 etcd 地址 value 不变，但仍需真实 etcd 故障注入覆盖两 key
+  事件乱序与 lease 到期。部署必须为 P/D 提供一致、不可变的 `model_id`，避免本地模型
+  路径被当作 revision 时产生保守的不兼容。
 - 回滚与兼容：proto 和 RPC 均 additive；第一个当前 FULL 到达前旧 runtime-state 路由
   行为保持不变。FULL 生效后 strict 路由 fail closed，软状态超时只停止新分配，不执行
   deregister、unlink 或在飞资源清理。
 - 性能、容量和观测证据：CPU 单测已覆盖有界内存、锁安全、慢订阅者超时、断连合并、
   FULL 恢复与并发调用，不代表生产扇出吞吐；仍需补长时间高频状态 soak 和分发指标。
-- 达到完整 G3 CPU_VERIFIED 仍需完成：xLLM/Agent EngineState 生产、真实 etcd 切主故障
-  注入、`STATE_BLIND/REGISTRY_BLIND` 迟滞和 readiness 接入。
+- 达到完整 G3 CPU_VERIFIED 仍需完成：vLLM Agent EngineState 生产、真实 etcd 切主故障
+  注入、`STATE_BLIND/REGISTRY_BLIND` 迟滞和 readiness 接入；xLLM 完整 CPU runtime
+  链接还需先修复上述既有 ProcessGroup 编译基线。
 - 达到 VERIFIED 仍需完成：上述 CPU 门禁全部通过，并在 NPU 多 P/D、多 Service、切主、
   heartbeat 丢失、陈旧状态和 link 故障矩阵中验证。
