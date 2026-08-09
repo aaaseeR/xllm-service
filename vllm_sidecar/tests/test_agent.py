@@ -11,6 +11,13 @@ import requests
 
 from vllm_sidecar.agent import AgentRuntime
 
+_TOKEN = "test-internal-token"
+
+
+def _agent(*args, **kwargs) -> AgentRuntime:
+    kwargs.setdefault("internal_token", _TOKEN)
+    return AgentRuntime(*args, **kwargs)
+
 
 class UpstreamHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -55,6 +62,7 @@ def _post_attempt(base: str, path: str, uid: str, seq: int) -> requests.Response
             "attempt_seq": seq,
             "incarnation_id": "inc-1",
         },
+        headers={"X-Internal-Token": _TOKEN},
         timeout=2.0,
     )
 
@@ -66,23 +74,33 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
     upstream_thread.start()
     upstream_base = f"http://127.0.0.1:{upstream.server_address[1]}"
 
-    agent = AgentRuntime("127.0.0.1:0", upstream_base)
+    agent = _agent("127.0.0.1:0", upstream_base)
     agent.start()
     agent.activate("inc-1")
     base = "http://" + agent.listen_address
     try:
         assert requests.get(base + "/health", timeout=2.0).status_code == 200
-        models = requests.get(base + "/v1/models?scope=all", timeout=2.0)
+        models = requests.get(
+            base + "/v1/models?scope=all",
+            headers={"X-Internal-Token": _TOKEN},
+            timeout=2.0,
+        )
         assert models.status_code == 200
         assert models.json()["path"] == "/v1/models?scope=all"
         assert (
-            requests.post(base + "/v1/models", json={}, timeout=2.0).status_code
+            requests.post(
+                base + "/v1/models",
+                json={},
+                headers={"X-Internal-Token": _TOKEN},
+                timeout=2.0,
+            ).status_code
             == 405
         )
         response = requests.post(
             base + "/v1/chat/completions",
             json={"model": "m", "messages": []},
             headers={
+                "X-Internal-Token": _TOKEN,
                 "X-Request-UID": "request-1",
                 "X-Attempt-Seq": "0",
                 "X-Incarnation-ID": "inc-1",
@@ -105,6 +123,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             base + "/v1/chat/completions",
             json={"model": "m"},
             headers={
+                "X-Internal-Token": _TOKEN,
                 "X-Request-UID": "request-1",
                 "X-Attempt-Seq": "0",
                 "X-Incarnation-ID": "inc-1",
@@ -131,6 +150,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
                 "attempt_seq": 0,
                 "incarnation_id": "old-inc",
             },
+            headers={"X-Internal-Token": _TOKEN},
             timeout=2.0,
         )
         assert stale.status_code == 409
@@ -141,12 +161,15 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
                 "attempt_seq": True,
                 "incarnation_id": "inc-1",
             },
+            headers={"X-Internal-Token": _TOKEN},
             timeout=2.0,
         )
         assert invalid_identity.status_code == 400
         assert (
             requests.delete(
-                base + "/v1/internal/attempt/cancel", timeout=2.0
+                base + "/v1/internal/attempt/cancel",
+                headers={"X-Internal-Token": _TOKEN},
+                timeout=2.0,
             ).status_code
             == 405
         )
@@ -154,6 +177,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             base + "/v1/chat/completions",
             json={"model": "m"},
             headers={
+                "X-Internal-Token": _TOKEN,
                 "X-Request-UID": "stale-submit",
                 "X-Attempt-Seq": "0",
                 "X-Incarnation-ID": "old-inc",
@@ -169,6 +193,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             base + "/v1/completions",
             json={"model": "m", "prompt": "p"},
             headers={
+                "X-Internal-Token": _TOKEN,
                 "X-Request-UID": "bounded-submit",
                 "X-Attempt-Seq": str(1 << 64),
                 "X-Incarnation-ID": "inc-1",
@@ -181,6 +206,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             base + "/v1/completions",
             json={"model": "m", "prompt": "p"},
             headers={
+                "X-Internal-Token": _TOKEN,
                 "X-Request-UID": "missing-incarnation",
                 "X-Attempt-Seq": "0",
                 "X-Remaining-Deadline-Ms": "2000",
@@ -193,6 +219,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             data=b"{",
             headers={
                 "Content-Type": "application/json",
+                "X-Internal-Token": _TOKEN,
                 "X-Request-UID": "invalid-json",
                 "X-Attempt-Seq": "0",
                 "X-Incarnation-ID": "inc-1",
@@ -208,6 +235,7 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             base + "/v1/messages",
             json={"model": "m", "messages": []},
             headers={
+                "X-Internal-Token": _TOKEN,
                 "X-Request-UID": "raw-bypass",
                 "X-Attempt-Seq": "0",
                 "X-Incarnation-ID": "inc-1",
@@ -238,7 +266,7 @@ def test_cancel_wins_while_submit_result_is_unknown() -> None:
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
 
-    agent = AgentRuntime(
+    agent = _agent(
         "127.0.0.1:0", f"http://127.0.0.1:{upstream.server_address[1]}"
     )
     agent.start()
@@ -251,6 +279,7 @@ def test_cancel_wins_while_submit_result_is_unknown() -> None:
                 base + "/v1/chat/completions",
                 json={"model": "m", "messages": []},
                 headers={
+                    "X-Internal-Token": _TOKEN,
                     "X-Request-UID": "cancel-race",
                     "X-Attempt-Seq": "3",
                     "X-Incarnation-ID": "inc-1",
@@ -269,6 +298,7 @@ def test_cancel_wins_while_submit_result_is_unknown() -> None:
             base + "/v1/chat/completions",
             json={"model": "m", "messages": []},
             headers={
+                "X-Internal-Token": _TOKEN,
                 "X-Request-UID": "cancel-race",
                 "X-Attempt-Seq": "3",
                 "X-Incarnation-ID": "inc-1",
@@ -293,7 +323,7 @@ def test_local_deadline_fences_delayed_upstream_acceptance() -> None:
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
 
-    agent = AgentRuntime(
+    agent = _agent(
         "127.0.0.1:0", f"http://127.0.0.1:{upstream.server_address[1]}"
     )
     agent.start()
@@ -306,6 +336,7 @@ def test_local_deadline_fences_delayed_upstream_acceptance() -> None:
                 base + "/v1/chat/completions",
                 json={"model": "m", "messages": []},
                 headers={
+                    "X-Internal-Token": _TOKEN,
                     "X-Request-UID": "deadline-race",
                     "X-Attempt-Seq": "1",
                     "X-Incarnation-ID": "inc-1",
@@ -343,7 +374,7 @@ def test_agent_bounds_inflight_proxy_requests() -> None:
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
 
-    agent = AgentRuntime(
+    agent = _agent(
         "127.0.0.1:0",
         f"http://127.0.0.1:{upstream.server_address[1]}",
         max_inflight_requests=1,
@@ -352,6 +383,7 @@ def test_agent_bounds_inflight_proxy_requests() -> None:
     agent.activate("inc-1")
     base = "http://" + agent.listen_address
     headers = {
+        "X-Internal-Token": _TOKEN,
         "X-Attempt-Seq": "0",
         "X-Incarnation-ID": "inc-1",
         "X-Remaining-Deadline-Ms": "2000",
@@ -394,7 +426,7 @@ def test_agent_bounds_aggregate_inflight_body_bytes() -> None:
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
 
-    agent = AgentRuntime(
+    agent = _agent(
         "127.0.0.1:0",
         f"http://127.0.0.1:{upstream.server_address[1]}",
         max_inflight_requests=2,
@@ -405,6 +437,7 @@ def test_agent_bounds_aggregate_inflight_body_bytes() -> None:
     agent.activate("inc-1")
     base = "http://" + agent.listen_address
     headers = {
+        "X-Internal-Token": _TOKEN,
         "X-Attempt-Seq": "0",
         "X-Incarnation-ID": "inc-1",
         "X-Remaining-Deadline-Ms": "2000",
@@ -441,7 +474,7 @@ def test_agent_bounds_aggregate_inflight_body_bytes() -> None:
 
 
 def test_cancel_fence_capacity_never_returns_false_ack() -> None:
-    agent = AgentRuntime(
+    agent = _agent(
         "127.0.0.1:0",
         "http://127.0.0.1:1",
         max_cancel_fences=1,
@@ -481,18 +514,20 @@ def test_cancel_fence_capacity_never_returns_false_ack() -> None:
 
 def test_agent_configuration_fails_closed_and_unstarted_stop_is_safe() -> None:
     with pytest.raises(ValueError):
-        AgentRuntime(
+        _agent(
             "127.0.0.1:0",
             "http://127.0.0.1:1",
             max_inflight_requests=0,
         )
     with pytest.raises(ValueError):
-        AgentRuntime(
+        _agent(
             "127.0.0.1:0",
             "http://user:password@127.0.0.1:1",
         )
     with pytest.raises(ValueError):
-        AgentRuntime("127.0.0.1:not-a-port", "http://127.0.0.1:1")
+        _agent("127.0.0.1:not-a-port", "http://127.0.0.1:1")
+    with pytest.raises(ValueError):
+        AgentRuntime("127.0.0.1:0", "http://127.0.0.1:1")
     with pytest.raises(ValueError):
         AgentRuntime(
             "127.0.0.1:0",
@@ -500,9 +535,9 @@ def test_agent_configuration_fails_closed_and_unstarted_stop_is_safe() -> None:
             internal_token="bad\ntoken",
         )
     with pytest.raises(ValueError):
-        AgentRuntime("[::1]:0", "http://127.0.0.1:1")
+        _agent("[::1]:0", "http://127.0.0.1:1")
 
-    agent = AgentRuntime("127.0.0.1:0", "http://127.0.0.1:1")
+    agent = _agent("127.0.0.1:0", "http://127.0.0.1:1")
     agent.stop()
 
 

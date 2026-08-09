@@ -147,10 +147,12 @@ class AgentRuntime:
             or inflight_body_capacity_bytes < max_request_body_bytes
             or not _positive_finite(connect_timeout_seconds)
             or not _positive_finite(ingress_timeout_seconds)
-            or not isinstance(internal_token, str)
-            or (internal_token and not valid_internal_token(internal_token))
+            or not valid_internal_token(internal_token)
         ):
-            raise ValueError("Agent concurrency and timeouts must be positive")
+            raise ValueError(
+                "Agent limits and timeouts must be positive and "
+                "internal_token must be a non-empty printable ASCII secret"
+            )
         self._listen_address = listen_address
         upstream = urlsplit(upstream_url)
         if (
@@ -269,7 +271,7 @@ class AgentRuntime:
             else:
                 self._write_json(handler, 503, {"status": "fenced"})
             return
-        if self._internal_token and not hmac.compare_digest(
+        if not hmac.compare_digest(
             handler.headers.get("X-Internal-Token", ""), self._internal_token
         ):
             self._write_json(handler, 401, {"error": "unauthorized"})

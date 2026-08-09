@@ -128,6 +128,7 @@ cc_library(
   SRCS
     execution_hold.cpp
   DEPS
+    glog::glog
     proto_xllm
 )
 
@@ -139,6 +140,8 @@ cc_library(
   SRCS
     attempt_control_client.cpp
   DEPS
+    OpenSSL::Crypto
+    glog::glog
     nlohmann_json::nlohmann_json
     proto::proto_rpc_service
     proto_xllm

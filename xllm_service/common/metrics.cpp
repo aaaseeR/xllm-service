@@ -17,6 +17,14 @@ limitations under the License.
 
 DEFINE_COUNTER(server_request_in_total,
                "Total number of request that server received");
+DEFINE_COUNTER(attempt_control_no_channel_total,
+               "Attempt-control calls without an Engine channel");
+DEFINE_COUNTER(attempt_control_token_invalid_total,
+               "vLLM attempt-control calls blocked by invalid auth config");
+DEFINE_COUNTER(attempt_control_rpc_failed_total,
+               "Attempt-control RPC or response validation failures");
+DEFINE_COUNTER(attempt_control_non_terminal_total,
+               "Attempt-control replies that did not prove convergence");
 
 // ttft latency histogram
 DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,

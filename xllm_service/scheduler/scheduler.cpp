@@ -320,6 +320,8 @@ Scheduler::Scheduler(const Options& options)
 }
 
 Scheduler::~Scheduler() {
+  set_draining(true);
+  refresh_readiness();
   exited_.store(true, std::memory_order_release);
   state_stream_cv_.notify_all();
   etcd_client_->stop_watch();
@@ -1085,8 +1087,11 @@ bool Scheduler::resolve_terminal_execution_hold(
   return false;
 }
 
-bool Scheduler::converge_execution_hold_for_retry_locked(
-    const std::shared_ptr<Request>& request) {
+bool Scheduler::request_cancel_fences_for_retry(
+    const std::shared_ptr<Request>& request,
+    std::optional<xllm::proto::ExecutionResourceHold>* fenced_hold) {
+  CHECK(fenced_hold != nullptr);
+  fenced_hold->reset();
   const std::optional<xllm::proto::ExecutionResourceHold> hold =
       request->execution_hold.snapshot();
   if (!hold.has_value()) {
@@ -1110,12 +1115,9 @@ bool Scheduler::converge_execution_hold_for_retry_locked(
                               options_.instance_delete_probe_timeout_ms())) {
       return false;
     }
-    request->execution_hold.apply_convergence_proof(
-        hold->attempt(),
-        holder,
-        xllm::proto::HOLDER_CONVERGENCE_PROOF_CANCEL_FENCE_ACK);
   }
-  return !request->execution_hold.has_hold();
+  *fenced_hold = *hold;
+  return true;
 }
 
 bool Scheduler::select_retry_instances(
@@ -1171,10 +1173,47 @@ bool Scheduler::retry_first_output_attempt_locked(
     *failure_message = "First-output retry denied: ATTEMPT_SEQUENCE_EXHAUSTED";
     return false;
   }
-  std::lock_guard<std::mutex> cleanup_guard(execution_hold_cleanup_mutex_);
-  if (!converge_execution_hold_for_retry_locked(request)) {
+  std::optional<xllm::proto::ExecutionResourceHold> fenced_hold;
+  if (!request_cancel_fences_for_retry(request, &fenced_hold)) {
     *failure_message = "First-output retry denied: OLD_EXECUTION_NOT_CONVERGED";
     return false;
+  }
+
+  std::lock_guard<std::mutex> cleanup_guard(execution_hold_cleanup_mutex_);
+  {
+    std::lock_guard<std::mutex> request_guard(request_mutex_);
+    const auto request_it = requests_.find(request->correlation.request_uid());
+    if (request_it == requests_.end() || request_it->second != request) {
+      *failure_message = "First-output retry request ended during fencing";
+      return false;
+    }
+  }
+  if (fenced_hold.has_value()) {
+    const std::optional<xllm::proto::ExecutionResourceHold> current_hold =
+        request->execution_hold.snapshot();
+    if (!current_hold.has_value() ||
+        current_hold->attempt().request_uid() !=
+            fenced_hold->attempt().request_uid() ||
+        !current_hold->attempt().has_attempt_seq() ||
+        !fenced_hold->attempt().has_attempt_seq() ||
+        current_hold->attempt().attempt_seq() !=
+            fenced_hold->attempt().attempt_seq()) {
+      *failure_message =
+          "First-output retry execution hold changed during fencing";
+      return false;
+    }
+    for (const xllm::proto::ExecutionHolder& holder :
+         fenced_hold->potential_holders()) {
+      request->execution_hold.apply_convergence_proof(
+          fenced_hold->attempt(),
+          holder,
+          xllm::proto::HOLDER_CONVERGENCE_PROOF_CANCEL_FENCE_ACK);
+    }
+    if (request->execution_hold.has_hold()) {
+      *failure_message =
+          "First-output retry cancel proofs did not resolve the old hold";
+      return false;
+    }
   }
   if (!request->first_output_retry_budget->commit_retry(now)) {
     *failure_message = "First-output retry budget changed before commit";
@@ -1268,27 +1307,8 @@ void Scheduler::fail_output_dispatch_locked(
   }
 }
 
-void Scheduler::cancel_or_detach_execution_hold_locked(
+void Scheduler::detach_execution_hold_locked(
     const std::shared_ptr<Request>& request) {
-  std::optional<xllm::proto::ExecutionResourceHold> hold =
-      request->execution_hold.snapshot();
-  if (!hold.has_value()) {
-    return;
-  }
-
-  for (const xllm::proto::ExecutionHolder& holder : hold->potential_holders()) {
-    if (!call_attempt_control(*hold,
-                              holder,
-                              /*query=*/false,
-                              options_.instance_delete_probe_timeout_ms())) {
-      continue;
-    }
-    request->execution_hold.apply_convergence_proof(
-        hold->attempt(),
-        holder,
-        xllm::proto::HOLDER_CONVERGENCE_PROOF_CANCEL_FENCE_ACK);
-  }
-
   if (!request->execution_hold.has_hold()) {
     return;
   }
@@ -1298,7 +1318,9 @@ void Scheduler::cancel_or_detach_execution_hold_locked(
     LOG(ERROR) << "Failed to detach unresolved execution hold, request_uid="
                << request->correlation.request_uid()
                << ", status=" << static_cast<int>(status);
+    return;
   }
+  execution_hold_cleanup_cv_.notify_one();
 }
 
 bool Scheduler::call_attempt_control(
@@ -1309,9 +1331,18 @@ bool Scheduler::call_attempt_control(
   const std::shared_ptr<brpc::Channel> channel =
       instance_mgr_->get_channel(holder.engine_uid());
   if (channel == nullptr) {
+    COUNTER_INC(attempt_control_no_channel_total);
     return false;
   }
   const InstanceMetaInfo instance = get_instance_info(holder.engine_uid());
+  if (instance.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND &&
+      !provider::valid_vllm_agent_internal_token(
+          options_.internal_api_token())) {
+    COUNTER_INC(attempt_control_token_invalid_total);
+    LOG_EVERY_N(ERROR, 100)
+        << "Cannot converge vLLM attempt: internal_api_token is invalid";
+    return false;
+  }
   const provider::AttemptControlResult result =
       provider::call_provider_attempt_control(
           instance.provider_id,
@@ -1324,6 +1355,11 @@ bool Scheduler::call_attempt_control(
           timeout_ms);
   record_direct_engine_evidence(
       holder.engine_uid(), holder.incarnation_id(), result.direct_success);
+  if (!result.direct_success) {
+    COUNTER_INC(attempt_control_rpc_failed_total);
+  } else if (!result.terminal_proof) {
+    COUNTER_INC(attempt_control_non_terminal_total);
+  }
   return result.direct_success && result.terminal_proof;
 }
 
@@ -1967,10 +2003,11 @@ void Scheduler::finish_request(const std::string& service_request_id,
       if (it != requests_.end()) {
         request = it->second;
         requests_.erase(it);
+        requests_drained_cv_.notify_all();
       }
     }
     if (request != nullptr) {
-      cancel_or_detach_execution_hold_locked(request);
+      detach_execution_hold_locked(request);
     }
   }
 
@@ -2038,6 +2075,9 @@ void Scheduler::clear_requests_on_failed_instance(
           ++it;
         }
       }
+      if (!cleared_requests.empty()) {
+        requests_drained_cv_.notify_all();
+      }
     }
 
     for (const std::shared_ptr<Request>& request : cleared_requests) {
@@ -2048,7 +2088,7 @@ void Scheduler::clear_requests_on_failed_instance(
             terminated_holder,
             xllm::proto::HOLDER_CONVERGENCE_PROOF_PROCESS_TERMINATED);
       }
-      cancel_or_detach_execution_hold_locked(request);
+      detach_execution_hold_locked(request);
     }
   }
 
@@ -2356,6 +2396,12 @@ void Scheduler::refresh_readiness() {
 
 void Scheduler::set_draining(bool draining) {
   draining_.store(draining, std::memory_order_release);
+}
+
+bool Scheduler::wait_for_requests_drained(std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lock(request_mutex_);
+  return requests_drained_cv_.wait_for(
+      lock, timeout, [this] { return requests_.empty(); });
 }
 
 bool Scheduler::accepting_new_requests() const {

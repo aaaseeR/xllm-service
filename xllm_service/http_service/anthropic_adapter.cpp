@@ -600,6 +600,4 @@ bool anthropic_event_sse(const xllm::proto::AnthropicStreamEvent& event,
   return true;
 }
 
-std::string anthropic_done_sse() { return "data: [DONE]\n\n"; }
-
 }  // namespace xllm_service

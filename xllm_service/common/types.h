@@ -90,7 +90,6 @@ enum class InstanceType : int8_t {
 
 enum class InstanceRuntimeState : int8_t {
   ACTIVE = 0,
-  LEASE_LOST = 1,
   SUSPECT = 2,
 };
 
@@ -98,13 +97,20 @@ inline const char* runtime_state_name(InstanceRuntimeState state) {
   switch (state) {
     case InstanceRuntimeState::ACTIVE:
       return "ACTIVE";
-    case InstanceRuntimeState::LEASE_LOST:
-      return "LEASE_LOST";
     case InstanceRuntimeState::SUSPECT:
       return "SUSPECT";
     default:
       return "UNKNOWN";
   }
+}
+
+inline bool is_wildcard_rpc_address(const std::string& address) {
+  const size_t separator = address.rfind(':');
+  if (separator == std::string::npos) {
+    return false;
+  }
+  const std::string host = address.substr(0, separator);
+  return host == "0.0.0.0" || host == "::" || host == "[::]" || host == "*";
 }
 
 inline const char* legacy_backend_type(xllm::proto::ProviderId provider_id) {
@@ -295,6 +301,11 @@ struct InstanceMetaInfo {
       nlohmann::json json_value = nlohmann::json::parse(json_str);
       name = json_value.at("name").get<std::string>();
       rpc_address = json_value.at("rpc_address").get<std::string>();
+      if (is_wildcard_rpc_address(rpc_address)) {
+        LOG(ERROR) << "rpc_address must be a dialable address, got: "
+                   << rpc_address;
+        return false;
+      }
       incarnation_id = json_value.value("incarnation_id", std::string());
       register_ts_ms = json_value.value("register_ts_ms", uint64_t(0));
       type = static_cast<InstanceType>(json_value.at("type").get<int8_t>());

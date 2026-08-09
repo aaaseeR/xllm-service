@@ -114,6 +114,7 @@ xllm::proto::EngineState make_state(
   state.set_ownership(xllm::proto::ENGINE_OWNERSHIP_OWNED);
   state.set_shallow_health(xllm::proto::HEALTH_STATUS_HEALTHY);
   state.set_deep_health(xllm::proto::HEALTH_STATUS_UNKNOWN);
+  state.set_connector_state("READY");
   state.set_state_quality(xllm::proto::STATE_QUALITY_PARTIAL);
   state.set_provider_id(descriptor.identity().provider_id());
   state.set_profile_digest(descriptor.profile_digest());
@@ -267,6 +268,26 @@ TEST(EngineRegistryTest, UsesReceiverMonotonicAgeAndNeverRegressesState) {
   EXPECT_EQ(registry.find_state(key)->lifecycle(),
             xllm::proto::ENGINE_LIFECYCLE_DRAINING);
   EXPECT_FALSE(registry.is_schedulable(key, 102));
+}
+
+TEST(EngineRegistryTest, ConnectorNotReadyFailsClosed) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor descriptor = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderEngineKey key =
+      make_provider_engine_key(descriptor);
+  ASSERT_TRUE(registry.upsert_member(descriptor).ok());
+  set_registry_view(&registry, "master");
+
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  xllm::proto::EngineState state = make_state(descriptor, 1);
+  state.set_connector_state("NOT_READY");
+  *full.add_engine_states() = std::move(state);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  EXPECT_TRUE(applied);
+  EXPECT_FALSE(registry.is_schedulable(key, 100));
 }
 
 TEST(EngineRegistryTest, IncarnationReplacementCannotBeResurrectedByState) {

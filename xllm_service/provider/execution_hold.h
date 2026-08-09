@@ -46,6 +46,7 @@ enum class ExecutionHoldStatus {
 };
 
 class RequestExecutionHold;
+struct ExecutionHoldAdoptionState;
 
 // Bounded Service-local table for resource convergence that may outlive the
 // client request. Capacity is reserved before dispatch and the same move-only
@@ -79,10 +80,12 @@ class ExecutionHoldCleanupTable final {
    private:
     struct CapacityState;
 
-    explicit Reservation(std::shared_ptr<CapacityState> state);
+    Reservation(std::shared_ptr<CapacityState> state,
+                std::weak_ptr<ExecutionHoldAdoptionState> adoption_state);
     void reset();
 
     std::shared_ptr<CapacityState> state_;
+    std::weak_ptr<ExecutionHoldAdoptionState> adoption_state_;
 
     friend class ExecutionHoldCleanupTable;
     friend class RequestExecutionHold;
@@ -95,6 +98,7 @@ class ExecutionHoldCleanupTable final {
   };
 
   explicit ExecutionHoldCleanupTable(Config config);
+  ~ExecutionHoldCleanupTable();
 
   ExecutionHoldCleanupTable(const ExecutionHoldCleanupTable&) = delete;
   ExecutionHoldCleanupTable& operator=(const ExecutionHoldCleanupTable&) =
@@ -166,6 +170,7 @@ class ExecutionHoldCleanupTable final {
   static AttemptKey to_key(const xllm::proto::ExecutionAttemptId& attempt);
 
   std::shared_ptr<Reservation::CapacityState> capacity_;
+  std::shared_ptr<ExecutionHoldAdoptionState> adoption_state_;
   mutable std::mutex mutex_;
   RetryOrder retry_order_;
   std::unordered_map<AttemptKey, CleanupRecord, AttemptKeyHash> records_;
@@ -177,6 +182,7 @@ class ExecutionHoldCleanupTable final {
 class RequestExecutionHold final {
  public:
   RequestExecutionHold() = default;
+  ~RequestExecutionHold();
 
   RequestExecutionHold(const RequestExecutionHold&) = delete;
   RequestExecutionHold& operator=(const RequestExecutionHold&) = delete;
@@ -212,6 +218,7 @@ class RequestExecutionHold final {
   std::optional<xllm::proto::ExecutionResourceHold> hold_;
   std::vector<bool> converged_holders_;
   ExecutionHoldCleanupTable::Reservation reservation_;
+  std::weak_ptr<ExecutionHoldAdoptionState> adoption_state_;
   bool detached_ = false;
 
   friend class ExecutionHoldCleanupTable;

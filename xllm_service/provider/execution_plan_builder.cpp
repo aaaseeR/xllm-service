@@ -184,7 +184,6 @@ ContractResult build_execution_plan(
   budget->set_submit_ms(0);
   budget->set_handoff_ms(0);
   budget->set_output_ms(canonical.remaining_deadline_ms());
-  candidate.mutable_prediction()->set_uncertainty(1.0);
 
   ContractResult estimate =
       set_resource_estimate(canonical, encoded, primary, &candidate);

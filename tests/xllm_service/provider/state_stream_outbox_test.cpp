@@ -36,6 +36,7 @@ xllm::proto::EngineState make_state(std::string engine_uid,
   state.set_profile_digest("profile");
   state.set_model_revision("model");
   state.set_state_seq(state_seq);
+  state.set_connector_state("READY");
   state.set_heartbeat_age_ms_at_publish(0);
   state.set_state_age_ms_at_publish(0);
   return state;

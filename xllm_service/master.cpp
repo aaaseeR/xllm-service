@@ -59,6 +59,11 @@ void Master::stop() {
   }
   scheduler_->set_draining(true);
   scheduler_->refresh_readiness();
+  if (!scheduler_->wait_for_requests_drained(
+          std::chrono::milliseconds(options_.shutdown_drain_timeout_ms()))) {
+    LOG(WARNING) << "Shutdown drain timed out with active requests; "
+                    "remaining holds will be transferred to cleanup";
+  }
 
   if (readiness_thread_ && readiness_thread_->joinable()) {
     readiness_thread_->join();

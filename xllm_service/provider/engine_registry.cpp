@@ -759,6 +759,7 @@ bool EngineRegistry::has_unrefuted_cached_state_locked(
   if (engine_state.lifecycle() != xllm::proto::ENGINE_LIFECYCLE_READY ||
       engine_state.ownership() != xllm::proto::ENGINE_OWNERSHIP_OWNED ||
       engine_state.shallow_health() != xllm::proto::HEALTH_STATUS_HEALTHY ||
+      engine_state.connector_state() != "READY" ||
       engine_state.state_quality() == xllm::proto::STATE_QUALITY_STALE ||
       !engine_state.has_heartbeat_age_ms_at_publish() ||
       !engine_state.has_state_age_ms_at_publish() ||

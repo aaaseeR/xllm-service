@@ -21,7 +21,10 @@ limitations under the License.
 #include <glog/logging.h>
 #include <json2pb/pb_to_json.h>
 
+#include <atomic>
 #include <functional>
+#include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
 
 #include "anthropic.pb.h"
@@ -29,6 +32,36 @@ limitations under the License.
 #include "completion.pb.h"
 
 namespace xllm_service {
+
+enum class StreamProtocol {
+  kOpenAI,
+  kAnthropic,
+};
+
+class StreamOutputSink {
+ public:
+  virtual ~StreamOutputSink() = default;
+  virtual int write(const butil::IOBuf& attachment) = 0;
+  virtual void notify_on_stopped(google::protobuf::Closure* callback) = 0;
+};
+
+class ProgressiveAttachmentSink final : public StreamOutputSink {
+ public:
+  explicit ProgressiveAttachmentSink(
+      butil::intrusive_ptr<brpc::ProgressiveAttachment> attachment)
+      : attachment_(std::move(attachment)) {}
+
+  int write(const butil::IOBuf& attachment) override {
+    return attachment_->Write(attachment);
+  }
+
+  void notify_on_stopped(google::protobuf::Closure* callback) override {
+    attachment_->NotifyOnStopped(callback);
+  }
+
+ private:
+  butil::intrusive_ptr<brpc::ProgressiveAttachment> attachment_;
+};
 
 // Interface for the classes that are used to handle grpc requests.
 class CallData {
@@ -79,26 +112,40 @@ class StreamCallData : public CallData {
       ::google::protobuf::Closure* done,
       Request* request,
       Response* response,
-      std::function<void(const std::string&)> trace_callback = nullptr)
+      std::function<void(const std::string&)> trace_callback = nullptr,
+      std::shared_ptr<StreamOutputSink> stream_sink = nullptr,
+      StreamProtocol stream_protocol = StreamProtocol::kOpenAI,
+      bool create_progressive_attachment = true)
       : controller_(controller),
         done_(done),
         request_(request),
         response_(response),
-        trace_callback_(std::move(trace_callback)) {
+        trace_callback_(std::move(trace_callback)),
+        stream_sink_(std::move(stream_sink)),
+        stream_protocol_(stream_protocol) {
     stream_ = stream;
     get_x_request_id(x_request_id, controller_);
     get_x_request_time(x_request_time, controller_);
 
     if (stream_) {
-      pa_ = controller_->CreateProgressiveAttachment();
+      if (stream_sink_ == nullptr && create_progressive_attachment) {
+        butil::intrusive_ptr<brpc::ProgressiveAttachment> attachment =
+            controller_->CreateProgressiveAttachment();
+        if (attachment != nullptr) {
+          stream_sink_ = std::make_shared<ProgressiveAttachmentSink>(
+              std::move(attachment));
+        }
+      }
 
       controller_->http_response().set_content_type("text/event-stream");
       controller_->http_response().set_status_code(200);
       controller_->http_response().SetHeader("Connection", "keep-alive");
       controller_->http_response().SetHeader("Cache-Control", "no-cache");
-      // Done Run first for steam response
-      done_->Run();
-
+      if (stream_sink_ == nullptr) {
+        controller_->SetFailed("Progressive stream attachment is unavailable");
+        connection_status_.store(-1, std::memory_order_release);
+      }
+      run_done_once();
     } else {
       controller_->http_response().SetHeader("Content-Type",
                                              "application/json; charset=utf-8");
@@ -111,7 +158,7 @@ class StreamCallData : public CallData {
   ~StreamCallData() {
     // For non stream response, call brpc done Run
     if (!stream_) {
-      done_->Run();
+      run_done_once();
     }
   }
 
@@ -127,6 +174,7 @@ class StreamCallData : public CallData {
   bool write_and_finish(const std::string& attachment /*json string*/) {
     if (trace_callback_) trace_callback_(attachment);
     controller_->response_attachment() = attachment;
+    finished_.store(true, std::memory_order_release);
     return true;
   }
 
@@ -145,47 +193,59 @@ class StreamCallData : public CallData {
       trace_callback_(str);
     }
 
+    finished_.store(true, std::memory_order_release);
     return true;
   }
 
-  // For non stream response
   bool finish_with_error(const std::string& error_message) {
     if (!stream_) {
       controller_->SetFailed(error_message);
-    } else {
-      io_buf_.clear();
-      io_buf_.append(error_message);
-      pa_->Write(io_buf_);
+      finished_.store(true, std::memory_order_release);
+      return true;
+    }
+    if (finished_.exchange(true, std::memory_order_acq_rel)) {
+      return true;
     }
 
-    return true;
+    nlohmann::json payload;
+    std::string error_event;
+    if (stream_protocol_ == StreamProtocol::kAnthropic) {
+      payload = {
+          {"type", "error"},
+          {"error", {{"type", "api_error"}, {"message", error_message}}}};
+      error_event = "event: error\ndata: " + payload.dump() + "\n\n";
+    } else {
+      payload = {
+          {"error", {{"message", error_message}, {"type", "server_error"}}}};
+      error_event = "data: " + payload.dump() + "\n\n";
+    }
+    const bool error_written = write_stream_payload(error_event);
+    if (stream_protocol_ == StreamProtocol::kAnthropic) {
+      return error_written;
+    }
+    return write_stream_payload("data: [DONE]\n\n") && error_written;
   }
 
   // For stream response
   bool write(const butil::IOBuf& attachment_iobuf) {
-    if (trace_callback_) {
-      std::string str;
-      attachment_iobuf.copy_to(&str);
-      trace_callback_(str);
+    if (finished_.load(std::memory_order_acquire)) {
+      return false;
     }
-    connection_status_ |= pa_->Write(attachment_iobuf);
-    return true;
+    return write_stream_payload(attachment_iobuf);
   }
 
   // For stream response
   bool write(const std::string& attachment) {
-    if (trace_callback_) trace_callback_(attachment);
-    io_buf_.clear();
-    io_buf_.append(attachment);
-    connection_status_ |= pa_->Write(io_buf_);
-    if (attachment.find("data: [DONE]") != std::string::npos) {
-      finished_ = true;
+    if (finished_.load(std::memory_order_acquire)) {
+      return false;
     }
-
-    return true;
+    return write_stream_payload(attachment);
   }
 
   bool write(Response& response) {
+    if (finished_.load(std::memory_order_acquire)) {
+      return false;
+    }
     io_buf_.clear();
     io_buf_.append("data: ");
     butil::IOBufAsZeroCopyOutputStream json_output(&io_buf_);
@@ -203,15 +263,24 @@ class StreamCallData : public CallData {
       trace_callback_(str);
     }
 
-    connection_status_ |= pa_->Write(io_buf_);
-    return true;
+    return write_stream_payload(io_buf_, /*trace=*/false);
   }
 
-  bool finish() { return write("data: [DONE]\n\n"); }
+  bool finish() {
+    if (finished_.exchange(true, std::memory_order_acq_rel)) {
+      return true;
+    }
+    if (stream_protocol_ == StreamProtocol::kAnthropic) {
+      return stream_sink_ != nullptr &&
+             connection_status_.load(std::memory_order_acquire) == 0;
+    }
+    return write_stream_payload("data: [DONE]\n\n");
+  }
 
   bool is_disconnected() const override {
     if (stream_) {
-      return connection_status_ != 0;
+      return stream_sink_ == nullptr ||
+             connection_status_.load(std::memory_order_acquire) != 0;
     } else {
       if (controller_) {
         return controller_->IsCanceled();
@@ -222,7 +291,11 @@ class StreamCallData : public CallData {
 
   void notify_on_disconnect(google::protobuf::Closure* callback) override {
     if (stream_) {
-      pa_->NotifyOnStopped(callback);
+      if (stream_sink_ != nullptr) {
+        stream_sink_->notify_on_stopped(callback);
+      } else {
+        callback->Run();
+      }
     } else {
       controller_->NotifyOnCancel(callback);
     }
@@ -231,9 +304,39 @@ class StreamCallData : public CallData {
   Request& request() { return *request_; }
   Response& response() { return *response_; }
   ::google::protobuf::Closure* done() { return done_; }
-  bool finished() { return finished_; }
+  bool finished() const { return finished_.load(std::memory_order_acquire); }
 
  private:
+  void run_done_once() {
+    if (!done_called_.exchange(true, std::memory_order_acq_rel)) {
+      done_->Run();
+    }
+  }
+
+  bool write_stream_payload(const std::string& attachment) {
+    io_buf_.clear();
+    io_buf_.append(attachment);
+    return write_stream_payload(io_buf_);
+  }
+
+  bool write_stream_payload(const butil::IOBuf& attachment, bool trace = true) {
+    if (trace && trace_callback_) {
+      std::string text;
+      attachment.copy_to(&text);
+      trace_callback_(text);
+    }
+    if (stream_sink_ == nullptr ||
+        connection_status_.load(std::memory_order_acquire) != 0) {
+      return false;
+    }
+    const int status = stream_sink_->write(attachment);
+    if (status != 0) {
+      connection_status_.store(status, std::memory_order_release);
+      return false;
+    }
+    return true;
+  }
+
   brpc::Controller* controller_;
   ::google::protobuf::Closure* done_;
 
@@ -241,14 +344,16 @@ class StreamCallData : public CallData {
   Response* response_ = nullptr;
 
   bool stream_ = false;
-  butil::intrusive_ptr<brpc::ProgressiveAttachment> pa_;
   butil::IOBuf io_buf_;
 
-  bool finished_ = false;
+  std::atomic<bool> finished_{false};
+  std::atomic<bool> done_called_{false};
   json2pb::Pb2JsonOptions json_options_;
   std::function<void(const std::string&)> trace_callback_;
+  std::shared_ptr<StreamOutputSink> stream_sink_;
+  StreamProtocol stream_protocol_ = StreamProtocol::kOpenAI;
 
-  int connection_status_ = 0;
+  std::atomic<int> connection_status_{0};
 };
 
 using CompletionCallData = StreamCallData<::xllm::proto::CompletionRequest,
@@ -263,7 +368,25 @@ class AnthropicCallData
  public:
   using Base = StreamCallData<::xllm::proto::ChatRequest,
                               ::xllm::proto::AnthropicMessagesResponse>;
-  using Base::Base;
+
+  AnthropicCallData(
+      brpc::Controller* controller,
+      bool stream,
+      ::google::protobuf::Closure* done,
+      ::xllm::proto::ChatRequest* request,
+      ::xllm::proto::AnthropicMessagesResponse* response,
+      std::function<void(const std::string&)> trace_callback = nullptr,
+      std::shared_ptr<StreamOutputSink> stream_sink = nullptr,
+      bool create_progressive_attachment = true)
+      : Base(controller,
+             stream,
+             done,
+             request,
+             response,
+             std::move(trace_callback),
+             std::move(stream_sink),
+             StreamProtocol::kAnthropic,
+             create_progressive_attachment) {}
 };
 
 }  // namespace xllm_service

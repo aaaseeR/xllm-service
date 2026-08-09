@@ -161,28 +161,6 @@ ContractResult validate_mode_spec_role(EngineRole role, ExecutionMode mode) {
   return ContractResult::success();
 }
 
-ContractResult validate_prediction(const xllm::proto::PlanPrediction& value) {
-  const auto valid_nonnegative = [](double candidate) {
-    return std::isfinite(candidate) && candidate >= 0.0;
-  };
-  if ((value.has_ttft_upper_bound_ms() &&
-       !valid_nonnegative(value.ttft_upper_bound_ms())) ||
-      (value.has_tpot_upper_bound_ms() &&
-       !valid_nonnegative(value.tpot_upper_bound_ms())) ||
-      (value.has_completion_upper_bound_ms() &&
-       !valid_nonnegative(value.completion_upper_bound_ms()))) {
-    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
-                "plan prediction contains an invalid upper bound");
-  }
-  if (value.has_uncertainty() &&
-      (!std::isfinite(value.uncertainty()) || value.uncertainty() < 0.0 ||
-       value.uncertainty() > 1.0)) {
-    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
-                "plan prediction uncertainty must be in [0, 1]");
-  }
-  return ContractResult::success();
-}
-
 }  // namespace
 
 ContractResult::ContractResult(ProviderContractError error, std::string message)
@@ -754,30 +732,10 @@ ContractResult validate_engine_state(const ProviderDescriptor& descriptor,
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_CAPABILITY,
                 "deep health was published without capability");
   }
-  if (state.has_throughput_tokens_per_second() &&
-      (!std::isfinite(state.throughput_tokens_per_second()) ||
-       state.throughput_tokens_per_second() < 0.0)) {
+  if (state.connector_state() != "READY" &&
+      state.connector_state() != "NOT_READY") {
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
-                "throughput must be finite and nonnegative");
-  }
-  double previous_upper_bound = 0.0;
-  for (const auto& bucket : state.latency_histogram_delta()) {
-    if (!std::isfinite(bucket.upper_bound()) ||
-        bucket.upper_bound() <= previous_upper_bound) {
-      return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
-                  "histogram upper bounds must be strictly increasing");
-    }
-    previous_upper_bound = bucket.upper_bound();
-  }
-  std::unordered_set<std::string> failure_reasons;
-  for (const auto& counter : state.failure_counters()) {
-    if (counter.reason().empty()) {
-      return missing("engine state failure reason");
-    }
-    if (!failure_reasons.insert(counter.reason()).second) {
-      return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DUPLICATE_ENTRY,
-                  "engine state contains a duplicate failure reason");
-    }
+                "connector state must be READY or NOT_READY");
   }
   return ContractResult::success();
 }
@@ -924,7 +882,7 @@ ContractResult validate_execution_plan(const ProviderDescriptor& descriptor,
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
                 "execution plan score must be finite");
   }
-  return validate_prediction(plan.prediction());
+  return ContractResult::success();
 }
 
 }  // namespace xllm_service::provider

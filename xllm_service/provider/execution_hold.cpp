@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "provider/execution_hold.h"
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -26,6 +28,12 @@ limitations under the License.
 #include <utility>
 
 namespace xllm_service::provider {
+
+struct ExecutionHoldAdoptionState {
+  std::mutex mutex;
+  ExecutionHoldCleanupTable* table = nullptr;
+};
+
 namespace {
 
 using xllm::proto::ExecutionAttemptId;
@@ -184,14 +192,16 @@ struct ExecutionHoldCleanupTable::Reservation::CapacityState {
 };
 
 ExecutionHoldCleanupTable::Reservation::Reservation(
-    std::shared_ptr<CapacityState> state)
-    : state_(std::move(state)) {}
+    std::shared_ptr<CapacityState> state,
+    std::weak_ptr<ExecutionHoldAdoptionState> adoption_state)
+    : state_(std::move(state)), adoption_state_(std::move(adoption_state)) {}
 
 ExecutionHoldCleanupTable::Reservation::~Reservation() { reset(); }
 
 ExecutionHoldCleanupTable::Reservation::Reservation(
     Reservation&& other) noexcept
-    : state_(std::move(other.state_)) {}
+    : state_(std::move(other.state_)),
+      adoption_state_(std::move(other.adoption_state_)) {}
 
 ExecutionHoldCleanupTable::Reservation&
 ExecutionHoldCleanupTable::Reservation::operator=(
@@ -199,6 +209,7 @@ ExecutionHoldCleanupTable::Reservation::operator=(
   if (this != &other) {
     reset();
     state_ = std::move(other.state_);
+    adoption_state_ = std::move(other.adoption_state_);
   }
   return *this;
 }
@@ -224,6 +235,13 @@ ExecutionHoldCleanupTable::ExecutionHoldCleanupTable(Config config) {
     throw std::invalid_argument("invalid execution hold cleanup capacity");
   }
   capacity_ = std::make_shared<Reservation::CapacityState>(std::move(config));
+  adoption_state_ = std::make_shared<ExecutionHoldAdoptionState>();
+  adoption_state_->table = this;
+}
+
+ExecutionHoldCleanupTable::~ExecutionHoldCleanupTable() {
+  std::lock_guard<std::mutex> lock(adoption_state_->mutex);
+  adoption_state_->table = nullptr;
 }
 
 std::optional<ExecutionHoldCleanupTable::Reservation>
@@ -237,7 +255,7 @@ ExecutionHoldCleanupTable::try_reserve() {
   }
   ++capacity_->reserved_records;
   capacity_->reserved_bytes += config.max_cleanup_record_bytes;
-  return Reservation(capacity_);
+  return Reservation(capacity_, adoption_state_);
 }
 
 ExecutionHoldStatus ExecutionHoldCleanupTable::install_request_hold(
@@ -467,11 +485,39 @@ ExecutionHoldStatus RequestExecutionHold::install(
   if (detached_) {
     return ExecutionHoldStatus::kAlreadyDetached;
   }
+  adoption_state_ = reservation.adoption_state_;
   reservation_ = std::move(reservation);
   hold_ = std::move(hold);
   converged_holders_.assign(
       static_cast<size_t>(hold_->potential_holders_size()), false);
   return ExecutionHoldStatus::kOk;
+}
+
+RequestExecutionHold::~RequestExecutionHold() {
+  if (!has_hold()) {
+    return;
+  }
+  const std::shared_ptr<ExecutionHoldAdoptionState> adoption_state =
+      adoption_state_.lock();
+  if (adoption_state == nullptr) {
+    LOG(ERROR) << "Destroying an unresolved execution hold after its cleanup "
+                  "table was destroyed";
+    return;
+  }
+  std::lock_guard<std::mutex> lock(adoption_state->mutex);
+  if (adoption_state->table == nullptr) {
+    LOG(ERROR) << "Destroying an unresolved execution hold after its cleanup "
+                  "table was destroyed";
+    return;
+  }
+  const ExecutionHoldStatus status = adoption_state->table->adopt(this);
+  if (status != ExecutionHoldStatus::kOk &&
+      status != ExecutionHoldStatus::kNoHold &&
+      status != ExecutionHoldStatus::kAlreadyDetached) {
+    LOG(ERROR) << "Failed to preserve an unresolved execution hold during "
+                  "destruction, status="
+               << static_cast<int>(status);
+  }
 }
 
 ExecutionHoldStatus RequestExecutionHold::set_likely_holder(
@@ -510,12 +556,23 @@ ExecutionHoldStatus RequestExecutionHold::confirm_holder(
     return ExecutionHoldStatus::kUnsafeProof;
   }
 
+  const std::optional<size_t> holder_index = find_holder(*hold_, holder);
+  CHECK(holder_index.has_value());
+  const bool holder_already_converged = converged_holders_[*holder_index];
+
   hold_->clear_potential_holders();
   *hold_->add_potential_holders() = holder;
   *hold_->mutable_confirmed_holder() = holder;
   hold_->clear_likely_holder();
   hold_->set_proof(proof);
-  converged_holders_.assign(1, false);
+  converged_holders_.assign(1, holder_already_converged);
+  if (holder_already_converged) {
+    hold_->set_proof(xllm::proto::EXECUTION_HOLD_PROOF_TERMINAL);
+    hold_.reset();
+    converged_holders_.clear();
+    reservation_ = ExecutionHoldCleanupTable::Reservation();
+    return ExecutionHoldStatus::kResolved;
+  }
   return ExecutionHoldStatus::kOk;
 }
 

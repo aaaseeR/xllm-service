@@ -25,6 +25,7 @@ limitations under the License.
 | --- | --- | --- |
 | 双仓 CPU 开发基线 | CPU_VERIFIED | [V2_BASELINE_STATUS.md](./V2_BASELINE_STATUS.md) |
 | V2-B0 至 V2-B5 内部开发门 | CPU_VERIFIED / NPU_PENDING | [B0_B5_STATUS.md](./B0_B5_STATUS.md) |
+| Opus 5 V2 Review 整改 | CPU_VERIFIED / NPU_PENDING | [OPUS5_REVIEW_REMEDIATION.md](./OPUS5_REVIEW_REMEDIATION.md) |
 | Provider Contract 与能力门禁核心 | CPU_VERIFIED | [PROVIDER_CONTRACT_STATUS.md](./PROVIDER_CONTRACT_STATUS.md) |
 | vLLM-Ascend 严格 Provider Agent | NPU_PENDING | [VLLM_AGENT_STATUS.md](./VLLM_AGENT_STATUS.md) |
 | G3 Engine Registry 与 State Stream | PARTIAL | [STATE_STREAM_STATUS.md](./STATE_STREAM_STATUS.md) |

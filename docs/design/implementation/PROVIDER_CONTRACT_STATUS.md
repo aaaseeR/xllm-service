@@ -20,7 +20,7 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：CPU_VERIFIED
 - 关联设计/Requirement ID：G-2、G-1、F66、F72、F73、F80-F82、D50、D52、D56
-- 最近验证基线：xLLM `b38c691a`、xllm-service 本状态文档所在提交
+- 最近验证基线：xLLM `a260e2fc`、xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
@@ -102,7 +102,7 @@ limitations under the License.
 | G-2/F81 Descriptor | 四种开放 profile、缺能力、重复项、runtime alias 负向测试 | N/A | 待真实 Provider | PASS |
 | G-2/F82 ExecutionPlan | 四种 role shape、capability、deadline、identity 门禁 | N/A | 待真实 Provider | PASS |
 | STRICT renderer | canonical/encoded/model/capability/renderer 一致性正负测试 | N/A | 待真实 tokenizer/runtime | PASS |
-| EngineState schema | UNKNOWN 与 0、per-DP、ratio、histogram 负向测试 | N/A | 待 State Stream | PASS |
+| EngineState schema | UNKNOWN 与 0、per-DP、ratio、connector READY/NOT_READY 负向测试 | N/A | 待 State Stream | PASS；READY 已作为调度硬门禁 |
 | Adapter registry | ownership、lookup、重复 key、非法 Descriptor、生产 factory、同 key 并发懒注册合并、profile digest 碰撞拒绝、跨 attempt request context 复用；缓存关键三项重复 100 轮 | N/A | N/A | PASS |
 | 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
 | Canonical/Plan 生产接入 | ingress 语义保留、Native REMOTE_PD 与 vLLM AGGREGATED plan、renderer identity/digest、UNKNOWN KV estimate | N/A，无 tensor 逻辑 | 待真实 Provider wire | PASS，4 项新增测试 |
@@ -111,8 +111,9 @@ limitations under the License.
 | STRICT P/D 兼容 | 不同 profile 正向；model、KV/Connector、topology、runtime 与 strict/legacy 单边混配负向测试 | N/A，无 tensor 逻辑 | 待真实 P/D handshake | PASS |
 
 Service 的 Provider/Registry 纯 CPU 测试已覆盖 Adapter、route、EngineState 和
-LinkState；当前全量 service CPU 回归为 293/293，vLLM Agent/sidecar CPU 回归为
-60/60，xLLM CPU 公共路径基线为 97/97。新增 xLLM Engine plan
+LinkState；当前全量 service CPU 回归在 pinned 与外部 xLLM 两种构建下均为
+304/304，vLLM Agent/sidecar CPU 回归为 60/60，xLLM CPU 公共路径基线为
+100/100。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
 生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
 仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。
@@ -131,6 +132,8 @@ validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completio
 - 已知缺口/风险：当前 schema 尚无可校验的 topology-transform proof，因此非相同
   topology 保守拒绝；per-pair `LinkState=READY` 的接收和路由门禁已完成，失败隔离、
   publisher 与周期对账仍属于 G3 未完成部分。
+  动态吞吐、延迟直方图、失败计数和计划预测字段在没有校准 producer 与生产决策
+  consumer 前已从 schema 删除并 reserved；当前不声称动态性能排序能力。
   客户端 model alias 到权威 model revision 的映射需由 catalog 明确，当前 STRICT
   路径按字符串完全一致 fail closed。G3 的
   Engine Registry/State cache 已实现且进入候选过滤，但当前不证明硬件 Runtime 行为。

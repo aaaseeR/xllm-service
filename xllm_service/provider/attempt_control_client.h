@@ -38,6 +38,10 @@ struct AttemptControlResult {
       xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED;
 };
 
+bool constant_time_internal_token_equal(const std::string& expected,
+                                        const std::string& provided);
+bool valid_vllm_agent_internal_token(const std::string& internal_api_token);
+
 bool set_vllm_agent_internal_token(brpc::Controller* controller,
                                    const std::string& internal_api_token);
 

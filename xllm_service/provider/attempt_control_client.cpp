@@ -16,7 +16,10 @@ limitations under the License.
 #include "provider/attempt_control_client.h"
 
 #include <brpc/controller.h>
+#include <glog/logging.h>
+#include <openssl/crypto.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -149,16 +152,34 @@ AttemptControlResult call_xllm_native(
 
 }  // namespace
 
-bool set_vllm_agent_internal_token(brpc::Controller* controller,
-                                   const std::string& internal_api_token) {
-  if (controller == nullptr || internal_api_token.empty() ||
+bool constant_time_internal_token_equal(const std::string& expected,
+                                        const std::string& provided) {
+  return expected.size() == provided.size() && !expected.empty() &&
+         CRYPTO_memcmp(expected.data(), provided.data(), expected.size()) == 0;
+}
+
+bool valid_vllm_agent_internal_token(const std::string& internal_api_token) {
+  if (internal_api_token.empty() ||
       internal_api_token.size() > kMaxInternalTokenBytes) {
     return false;
   }
-  for (const unsigned char character : internal_api_token) {
-    if (character < '!' || character > '~') {
-      return false;
-    }
+  return std::all_of(internal_api_token.begin(),
+                     internal_api_token.end(),
+                     [](unsigned char character) {
+                       return character >= '!' && character <= '~';
+                     });
+}
+
+bool set_vllm_agent_internal_token(brpc::Controller* controller,
+                                   const std::string& internal_api_token) {
+  if (controller == nullptr) {
+    LOG_EVERY_N(ERROR, 100) << "Provider Agent controller is null";
+    return false;
+  }
+  if (!valid_vllm_agent_internal_token(internal_api_token)) {
+    LOG_EVERY_N(ERROR, 100)
+        << "Provider Agent internal token is missing, oversized, or invalid";
+    return false;
   }
   controller->http_request().SetHeader("X-Internal-Token", internal_api_token);
   return true;

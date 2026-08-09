@@ -27,8 +27,8 @@ limitations under the License.
 
 | Provider | Mode | Model/Profile | 支持状态 | 限制与证据 |
 | --- | --- | --- | --- | --- |
-| xLLM Native | CPU 公共路径 | 协议、Provider/Event wire、资源状态机、流式语义、deadline、exact 首事件、JSON 解析、异步输出投递 | CPU_VERIFIED | 默认六目标 97/97；output queue 14/14；protocol 14/14；Torch CPU storage/ownership 覆盖 |
-| xLLM Service + xLLM Native | 模板、Provider/Event Contract、请求身份、execution hold、output reorder、deadline、断连、seq=0 Query 恢复和首输出前 attempt 替换 | 当前外层 xLLM `service_dev` | CPU_VERIFIED | 293/293 tests passed；三个生产二进制 build/link verify |
+| xLLM Native | CPU 公共路径 | 协议、Provider/Event wire、资源状态机、注册生命周期、流式语义、deadline、exact 首事件、JSON 解析、异步输出投递 | CPU_VERIFIED | 默认七目标 100/100；output queue 14/14；protocol 14/14；Torch CPU storage/ownership 覆盖 |
+| xLLM Service + xLLM Native | 模板、Provider/Event Contract、请求身份、execution hold、output reorder、deadline、断连、seq=0 Query 恢复和首输出前 attempt 替换 | pinned 与当前外层 xLLM `service_dev` | CPU_VERIFIED | 两种构建均为 304/304 tests passed；三个生产二进制 build/link verify |
 | vLLM-Ascend | strict Agent/legacy sidecar 公共逻辑 | 无设备路径 | CPU_VERIFIED / NPU_PENDING | strict Descriptor、attempt/deadline/fencing/per-DP State 与 HTTP loopback 通过；真实 NPU/同命待验证 |
 
 ## 实现
@@ -45,9 +45,9 @@ limitations under the License.
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
 | DEV-STYLE | `git diff --check`；xLLM clang-format 规则人工核对 | N/A | N/A | PASS |
-| DEV-CPU-XLLM | `xllm-dev xllm-test <xllm> native Debug` 默认六目标；定向 output queue 和 protocol 目标 | queue 直接覆盖非连续 view retained storage、源 tensor 释放后所有权及空 tensor | N/A | PASS，97/97 + 14/14 + 14/14；queue 1400 次压力无失败 |
+| DEV-CPU-XLLM | `xllm-dev xllm-test <xllm> native Debug` 默认七目标；定向 output queue 和 protocol 目标 | queue 直接覆盖非连续 view retained storage、源 tensor 释放后所有权及空 tensor | N/A | PASS，100/100 + 14/14 + 14/14；queue 1400 次压力无失败 |
 | DEV-PRODUCTION-XLLM | 所有受影响生产 TU 使用 Clang C++20 `-Werror` 编译；`xllm-build`/`xllm-verify` | 无设备 `PlatformStream` 和 VMM host 类型可编译 | N/A | PASS |
-| DEV-CPU-SERVICE | `XLLM_SOURCE_DIR=<xllm> xllm-dev service-test <xllm-service> native Debug` | execution hold/output reorder/deadline/Query recovery/断连/attempt retry 不含 tensor 逻辑 | N/A | PASS，293/293；22 个关键竞态用例各 100 轮无失败 |
+| DEV-CPU-SERVICE | pinned 与 `XLLM_SOURCE_DIR=<xllm>` 两种 `xllm-dev service-test <xllm-service> native Debug` | execution hold/output reorder/deadline/Query recovery/断连/attempt retry 不含 tensor 逻辑 | N/A | PASS，均为 304/304；22 个关键竞态用例各 100 轮无失败 |
 | DEV-CPU-VLLM-AGENT | 沙箱内 `python -m pytest -q vllm_sidecar/tests` | N/A，Python 控制面 | 待真实 vLLM-Ascend/NPU | PASS，60/60 |
 | DEV-PRODUCTION-SERVICE | `service-build` + `service-verify` | 三个 ARM64 Debug ELF；无缺失动态库 | N/A | PASS |
 | DEV-CROSS-REPO | xllm-service 对外层 xLLM `service_dev` override 构建与测试 | N/A | N/A | PASS |

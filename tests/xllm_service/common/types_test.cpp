@@ -181,5 +181,15 @@ TEST(InstanceMetaInfoTest, ParseReturnsFalseWhenRequiredFieldMissing) {
   EXPECT_FALSE(info.parse_from_json(json_str));
 }
 
+TEST(InstanceMetaInfoTest, ParseRejectsWildcardRpcAddress) {
+  for (const std::string& address :
+       {"0.0.0.0:8000", "[::]:8000", ":::8000", "*:8000"}) {
+    InstanceMetaInfo info;
+    const nlohmann::json payload = {
+        {"name", "i1"}, {"rpc_address", address}, {"type", 0}};
+    EXPECT_FALSE(info.parse_from_json(payload.dump())) << address;
+  }
+}
+
 }  // namespace
 }  // namespace xllm_service

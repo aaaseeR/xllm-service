@@ -133,7 +133,7 @@ limitations under the License.
 | 内存/未定义行为 | GCC 13 ASan+UBSan 定向运行 Engine 17 项与 Service hold 19 项 | N/A | N/A | PASS；Clang sanitizer runtime 未随 ARM64 镜像安装 |
 | deadline 约束 reservation/调度 | optional wire、fake monotonic、Service 有界并发索引；D admission/reservation cap、P 三个边界和六类 Engine 调度路径生产 TU 以 `-Werror` 编译 | 公共测试目标使用 Torch CPU；无 tensor 数值变化 | 待真实 KV/transfer | PASS（CPU 核心与生产编译）；loopback 待补 |
 | G1/G2 exact 首事件保留与恢复 | xLLM adapter/protocol/4 MiB/field 24；Service Query state、D/P incarnation、attempt、seq、payload 和 index fail-closed；7 项真实 brpc loopback 覆盖并发、timeout、D restart 和 live race | adapter 目标链接 Torch CPU；无 tensor 数值变化 | 待 P/D 数据面故障注入 | PASS（CPU loopback） |
-| 双仓回归 | xLLM 默认六目标 97/97，另有 queue 14/14、protocol 14/14；Service 293/293；vLLM Agent/sidecar 60/60；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | N/A | PASS |
+| 双仓回归 | xLLM 默认七目标 100/100，另有 queue 14/14、protocol 14/14；Service pinned/override 均为 304/304；vLLM Agent/sidecar 60/60；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | N/A | PASS |
 
 ## 完善情况
 

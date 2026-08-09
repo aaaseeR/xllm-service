@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <thread>
 
@@ -86,6 +87,7 @@ class Scheduler final {
 
   void refresh_readiness();
   void set_draining(bool draining);
+  bool wait_for_requests_drained(std::chrono::milliseconds timeout);
   bool accepting_new_requests() const;
   provider::ReadinessSnapshot readiness_status() const;
 
@@ -159,15 +161,15 @@ class Scheduler final {
       const std::shared_ptr<Request>& request);
   void rollback_request_safety_guards_locked(
       const std::shared_ptr<Request>& request);
-  bool converge_execution_hold_for_retry_locked(
-      const std::shared_ptr<Request>& request);
+  bool request_cancel_fences_for_retry(
+      const std::shared_ptr<Request>& request,
+      std::optional<xllm::proto::ExecutionResourceHold>* fenced_hold);
   bool retry_first_output_attempt_locked(
       const std::shared_ptr<Request>& request,
       std::string* failure_message);
   bool select_retry_instances(const std::shared_ptr<Request>& request);
   bool prepare_v2_execution_plan(const std::shared_ptr<Request>& request);
-  void cancel_or_detach_execution_hold_locked(
-      const std::shared_ptr<Request>& request);
+  void detach_execution_hold_locked(const std::shared_ptr<Request>& request);
   void fail_output_dispatch_locked(const std::shared_ptr<Request>& request,
                                    llm::StatusCode status_code,
                                    std::string message);
@@ -249,6 +251,7 @@ class Scheduler final {
   // `service request id` -> `request` map
   std::unordered_map<std::string, std::shared_ptr<Request>> requests_;
   std::mutex request_mutex_;
+  std::condition_variable requests_drained_cv_;
 
   // use threadpool to handle all RequestOuputs queue
   static constexpr size_t kOutputTheadNum_ = 128;  // magic num

@@ -46,7 +46,6 @@ int main(int argc, char* argv[]) {
   xllm_service::XllmRpcService service(service_options, nullptr);
 
   // Initialize brpc server
-  std::string server_address = "0.0.0.0:" + std::to_string(FLAGS_port);
   brpc::Server server;
   if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
     LOG(ERROR) << "Failed to add service to server";
@@ -74,7 +73,7 @@ int main(int argc, char* argv[]) {
     return -1;
   }
 
-  LOG(INFO) << "Xllm rpc service listening on " << server_address;
+  LOG(INFO) << "Xllm rpc service listening on " << server.listen_address();
 
   // Wait until Ctrl-C is pressed, then Stop() and Join() the server.
   server.RunUntilAskedToQuit();

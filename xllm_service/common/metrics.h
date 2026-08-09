@@ -106,6 +106,10 @@ class AutoCounter final {
 // NOLINTEND(bugprone-macro-parentheses)
 
 DECLARE_COUNTER(server_request_in_total);
+DECLARE_COUNTER(attempt_control_no_channel_total);
+DECLARE_COUNTER(attempt_control_token_invalid_total);
+DECLARE_COUNTER(attempt_control_rpc_failed_total);
+DECLARE_COUNTER(attempt_control_non_terminal_total);
 
 DECLARE_HISTOGRAM(time_to_first_token_latency_milliseconds);
 DECLARE_HISTOGRAM(inter_token_latency_milliseconds);

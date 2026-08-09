@@ -101,6 +101,10 @@ class Options {
 
   PROPERTY(uint64_t, readiness_check_interval_ms) = 200;
 
+  // Stop accepting new requests, then allow this bounded interval for
+  // already-admitted requests to reach a terminal outcome during shutdown.
+  PROPERTY(uint64_t, shutdown_drain_timeout_ms) = 5000;
+
   PROPERTY(uint64_t, engine_link_retry_initial_ms) = 1000;
 
   PROPERTY(uint64_t, engine_link_retry_max_ms) = 10000;

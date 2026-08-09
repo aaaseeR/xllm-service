@@ -63,6 +63,4 @@ bool anthropic_event_sse(const xllm::proto::AnthropicStreamEvent& event,
                          std::string* sse,
                          std::string* error);
 
-std::string anthropic_done_sse();
-
 }  // namespace xllm_service

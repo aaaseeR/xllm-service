@@ -217,7 +217,6 @@ ExecutionPlan make_plan(const ProviderDescriptor& descriptor) {
   plan.mutable_deadline_budget()->set_submit_ms(100);
   plan.mutable_deadline_budget()->set_handoff_ms(200);
   plan.mutable_deadline_budget()->set_output_ms(600);
-  plan.mutable_prediction()->set_uncertainty(0.1);
   plan.set_score(1.0);
 
   ModeRequirements requirements;
@@ -277,6 +276,7 @@ xllm::proto::EngineState make_state(const ProviderDescriptor& descriptor) {
   state.set_ownership(xllm::proto::ENGINE_OWNERSHIP_OWNED);
   state.set_shallow_health(xllm::proto::HEALTH_STATUS_HEALTHY);
   state.set_deep_health(xllm::proto::HEALTH_STATUS_UNKNOWN);
+  state.set_connector_state("READY");
   state.set_state_quality(xllm::proto::STATE_QUALITY_PARTIAL);
   return state;
 }
@@ -500,13 +500,52 @@ TEST(ProviderContractTest, CanonicalAndEncodedRequestsValidate) {
             xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_CAPABILITY);
 }
 
-TEST(ProviderContractTest, EngineStatePreservesUnknownOptionalMetrics) {
+TEST(ProviderContractTest, EngineStateConsumesConnectorReadiness) {
   ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[1]);
   xllm::proto::EngineState state = make_state(descriptor);
   ContractResult result = validate_engine_state(descriptor, state);
   EXPECT_TRUE(result.ok()) << result.message();
-  EXPECT_FALSE(state.has_throughput_tokens_per_second());
   EXPECT_EQ(state.deep_health(), xllm::proto::HEALTH_STATUS_UNKNOWN);
+
+  state.set_connector_state("UNKNOWN");
+  EXPECT_EQ(validate_engine_state(descriptor, state).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
+}
+
+TEST(ProviderContractTest, SharedWireSchemaReservesRetiredV2Placeholders) {
+  const google::protobuf::Descriptor* admission =
+      xllm::proto::AdmissionResult::descriptor();
+  const google::protobuf::Descriptor* state =
+      xllm::proto::EngineState::descriptor();
+  const google::protobuf::Descriptor* plan =
+      xllm::proto::ExecutionPlan::descriptor();
+  ASSERT_NE(admission, nullptr);
+  ASSERT_NE(state, nullptr);
+  ASSERT_NE(plan, nullptr);
+
+  EXPECT_TRUE(admission->IsReservedNumber(6));
+  EXPECT_TRUE(admission->IsReservedName("per_rank"));
+  EXPECT_TRUE(state->IsReservedNumber(10));
+  EXPECT_TRUE(state->IsReservedNumber(11));
+  EXPECT_TRUE(state->IsReservedNumber(13));
+  EXPECT_TRUE(state->IsReservedName("latency_histogram_delta"));
+  EXPECT_TRUE(state->IsReservedName("throughput_tokens_per_second"));
+  EXPECT_TRUE(state->IsReservedName("failure_counters"));
+  EXPECT_EQ(state->FindFieldByName("connector_state")->number(), 12);
+  EXPECT_TRUE(plan->IsReservedNumber(13));
+  EXPECT_TRUE(plan->IsReservedName("prediction"));
+
+  xllm::proto::AdmissionResult result;
+  result.set_disposition(xllm::proto::ADMISSION_DISPOSITION_ACCEPTED);
+  result.set_reason(xllm::proto::ADMISSION_REASON_NONE);
+  result.set_state(xllm::proto::ATTEMPT_LIFECYCLE_STATE_RESERVED);
+  result.set_reservation_ttl_ms(100);
+  const std::string golden =
+      "\x08\x01"
+      "\x10\x01"
+      "\x18\x02"
+      "\x28\x64";
+  EXPECT_EQ(result.SerializeAsString(), golden);
 }
 
 TEST(ProviderContractTest, FullPerDpStateRequiresEveryUniqueRank) {
@@ -525,23 +564,12 @@ TEST(ProviderContractTest, FullPerDpStateRequiresEveryUniqueRank) {
             xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
 }
 
-TEST(ProviderContractTest, EngineStateRejectsInvalidRatiosAndHistograms) {
+TEST(ProviderContractTest, EngineStateRejectsInvalidRatios) {
   ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[1]);
   descriptor.add_capabilities(xllm::proto::PROVIDER_CAPABILITY_PER_DP_STATE);
   xllm::proto::EngineState state = make_state(descriptor);
   state.add_per_dp()->set_dp_rank(0);
   state.mutable_per_dp(0)->set_kv_used_ratio(1.1);
-  EXPECT_EQ(validate_engine_state(descriptor, state).error(),
-            xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
-
-  state.mutable_per_dp(0)->set_kv_used_ratio(0.5);
-  state.add_latency_histogram_delta()->set_upper_bound(-1.0);
-  EXPECT_EQ(validate_engine_state(descriptor, state).error(),
-            xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
-
-  state.clear_latency_histogram_delta();
-  state.add_latency_histogram_delta()->set_upper_bound(10.0);
-  state.add_latency_histogram_delta()->set_upper_bound(5.0);
   EXPECT_EQ(validate_engine_state(descriptor, state).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
 }

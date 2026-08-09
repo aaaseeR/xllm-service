@@ -20,7 +20,7 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：PARTIAL
 - 关联设计/Requirement ID：G3、F64、F65、F67、F78、D13、D15-D18、D34、D41、D52
-- 最近验证基线：xLLM `8c8d68a3`；xllm-service `4dfc935`
+- 最近验证基线：xLLM `a260e2fc`；xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
@@ -54,6 +54,9 @@ NPU handshake 故障矩阵待最终环境验证。
   STATE_BLIND 宽限内只使用未被直连失败推翻的最后良好状态，宽限后要求 TTL 内的直接
   成功证据；REGISTRY_BLIND 只允许短宽限且失败证据立即生效。证据表与成员同生命周期、
   受 `max_members` 硬上限约束，不刷新负载年龄。
+- `EngineState.connector_state` 只接受 `READY`/`NOT_READY`，且 `READY` 是所有模式下
+  的调度硬门禁。未校准的吞吐、延迟直方图和失败计数字段已删除并 reserved；当前
+  State Stream 只声明已经存在生产消费者的过滤事实，不声明动态性能排序。
 - Receiver 只接受 Registry 当前 master incarnation 的单调 snapshot；切主后必须先
   FULL，DELTA 才可应用。FULL 必须精确覆盖当前成员，重复项、未知 enum、容量越界、
   Descriptor/compatibility proof 不一致全部 fail closed。
@@ -133,12 +136,14 @@ NPU handshake 故障矩阵待最终环境验证。
 | 生产接入 | RPC descriptor 复用 shared StateBatch；Scheduler/InstanceMgr/route 编译链接；BRPC loopback 成功、8 路并发、超时和非法输入 | N/A | 待多副本 loopback | PASS；client 4/4 |
 | xLLM Native 生产 | Descriptor 确定性/非法输入、P/D mode、per-DP 完整/空容量、缺失 capability、snapshot 序号不消耗、32 线程唯一序号；heartbeat field 7 | N/A，无 tensor 数值逻辑 | 待真实 CANN/SOC 版本、NPU block 账本与 P/D heartbeat | PASS；Native 6/6、协议 8/8，并发套件连续 100 轮 |
 
-本批验证：xllm-service Debug 三个生产服务目标编译、动态链接通过，全量 CPU 测试
-293/293；ObservationController 8/8；ReadinessController 6/6；HealthResponse 3/3；
-EngineRegistry 14/14；StateStreamOutbox 6/6；
+本批验证：xllm-service Debug 三个生产服务目标编译、动态链接通过，pinned 与外部
+xLLM 两种构建的全量 CPU 测试均为 304/304；ObservationController 8/8；
+ReadinessController 6/6；HealthResponse 3/3；EngineRegistry 15/15；
+StateStreamOutbox 6/6；
 StateStreamClient BRPC loopback 4/4；
 LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 8/8。State Stream、
-Link 和 Native producer 的关键并发用例连续 100 轮通过。xLLM 的
+Link 和 Native producer 的关键并发用例连续 100 轮通过；xLLM 公共 CPU 回归为
+100/100。xLLM 的
 `native_provider_runtime.cpp`、`xservice_client.cpp`、`llm_master.cpp` 和
 `vlm_master.cpp` 使用真实 Torch CPU/BRPC 编译参数通过。完整 xLLM runtime 目标仍被
 既有 `process_group.cpp` 的 CPU `ProcessGroupImpl` 不完整类型错误阻断，该文件不在本批

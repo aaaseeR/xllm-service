@@ -1250,12 +1250,13 @@ void XllmHttpServiceImpl::Heartbeat(
     cntl->response_attachment().append(body);
   };
 
-  // Optional static shared-token auth; skip the check when no token configured
-  // (backward compatible with deployments that don't set internal_api_token).
+  // Native Engine heartbeat authentication remains optional for backward
+  // compatibility. When configured, compare the secret in constant time.
   const std::string& expected = options_.internal_api_token();
   if (!expected.empty()) {
     const std::string* got = cntl->http_request().GetHeader("X-Internal-Token");
-    if (got == nullptr || *got != expected) {
+    if (got == nullptr ||
+        !provider::constant_time_internal_token_equal(expected, *got)) {
       LOG(WARNING) << "Heartbeat rejected: invalid X-Internal-Token";
       reply(401, "{\"error\":\"invalid internal token\"}");
       return;

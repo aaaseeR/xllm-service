@@ -233,6 +233,16 @@ TEST(AttemptControlClientTest, BindsSubmitHeadersToExactIncarnation) {
   EXPECT_FALSE(set_vllm_agent_internal_token(nullptr, "test-token"));
   EXPECT_FALSE(set_vllm_agent_internal_token(&controller, ""));
   EXPECT_FALSE(set_vllm_agent_internal_token(&controller, "bad\ntoken"));
+  EXPECT_TRUE(valid_vllm_agent_internal_token("test-token"));
+  EXPECT_FALSE(valid_vllm_agent_internal_token(""));
+  EXPECT_FALSE(valid_vllm_agent_internal_token("bad\ntoken"));
+}
+
+TEST(AttemptControlClientTest, ComparesInternalTokensWithoutByteEarlyExit) {
+  EXPECT_TRUE(constant_time_internal_token_equal("test-token", "test-token"));
+  EXPECT_FALSE(constant_time_internal_token_equal("test-token", "test-tokee"));
+  EXPECT_FALSE(constant_time_internal_token_equal("test-token", "short"));
+  EXPECT_FALSE(constant_time_internal_token_equal("", ""));
 }
 
 TEST_F(AttemptControlClientLoopbackTest, CallsAgentQueryAndCancelEndpoints) {

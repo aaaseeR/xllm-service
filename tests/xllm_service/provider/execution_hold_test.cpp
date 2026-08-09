@@ -283,6 +283,32 @@ TEST(ExecutionHoldTest, ConfirmedHolderRequiresEvidenceAndSafelyNarrows) {
             ExecutionHoldStatus::kUnsafeProof);
 }
 
+TEST(ExecutionHoldTest, ConfirmHolderPreservesExistingConvergenceEvidence) {
+  ExecutionHoldCleanupTable table(make_config());
+  RequestExecutionHold request_hold;
+  const ExecutionHolder confirmed = make_holder("0");
+  const ExecutionHolder other = make_holder("1");
+
+  ASSERT_EQ(table.install_request_hold(
+                &request_hold,
+                xllm::proto::EXECUTION_HOLD_KIND_REMOTE_D_RESERVATION,
+                make_attempt(),
+                "coordinator-1",
+                {confirmed, other}),
+            ExecutionHoldStatus::kOk);
+  EXPECT_EQ(request_hold.apply_convergence_proof(
+                make_attempt(),
+                confirmed,
+                xllm::proto::HOLDER_CONVERGENCE_PROOF_CANCEL_FENCE_ACK),
+            ExecutionHoldStatus::kOk);
+  EXPECT_EQ(
+      request_hold.confirm_holder(
+          confirmed, xllm::proto::EXECUTION_HOLD_PROOF_GENERATION_COMMITTED),
+      ExecutionHoldStatus::kResolved);
+  EXPECT_FALSE(request_hold.has_hold());
+  EXPECT_EQ(table.stats().reserved_records, 0);
+}
+
 TEST(ExecutionHoldTest, QueryAbsentCanNeverClearARequestHold) {
   ExecutionHoldCleanupTable table(make_config());
   RequestExecutionHold request_hold;
@@ -406,6 +432,25 @@ TEST(ExecutionHoldTest, EarlyRequestEndTransfersSameTokenToCleanup) {
   ASSERT_TRUE(snapshot.has_value());
   EXPECT_EQ(snapshot->potential_holders_size(), 2);
   EXPECT_EQ(table.adopt(&request_hold), ExecutionHoldStatus::kAlreadyDetached);
+}
+
+TEST(ExecutionHoldTest, DestructorTransfersUnresolvedHoldToCleanup) {
+  ExecutionHoldCleanupTable table(make_config());
+  {
+    RequestExecutionHold request_hold;
+    ASSERT_EQ(table.install_request_hold(
+                  &request_hold,
+                  xllm::proto::EXECUTION_HOLD_KIND_REMOTE_D_RESERVATION,
+                  make_attempt(),
+                  "coordinator-1",
+                  {make_holder("0")}),
+              ExecutionHoldStatus::kOk);
+  }
+
+  EXPECT_TRUE(table.contains(make_attempt()));
+  const auto stats = table.stats();
+  EXPECT_EQ(stats.reserved_records, 1);
+  EXPECT_EQ(stats.cleanup_records, 1);
 }
 
 TEST(ExecutionHoldTest, CleanupRejectsAbsentAndReleasesAfterAllProofs) {
