@@ -305,6 +305,12 @@ TEST(ExecutionHoldTest, ConfirmHolderPreservesExistingConvergenceEvidence) {
       request_hold.confirm_holder(
           confirmed, xllm::proto::EXECUTION_HOLD_PROOF_GENERATION_COMMITTED),
       ExecutionHoldStatus::kResolved);
+  EXPECT_TRUE(
+      execution_holder_confirmation_succeeded(ExecutionHoldStatus::kResolved));
+  EXPECT_TRUE(
+      execution_holder_confirmation_succeeded(ExecutionHoldStatus::kOk));
+  EXPECT_FALSE(
+      execution_holder_confirmation_succeeded(ExecutionHoldStatus::kNoHold));
   EXPECT_FALSE(request_hold.has_hold());
   EXPECT_EQ(table.stats().reserved_records, 0);
 }

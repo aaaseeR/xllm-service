@@ -45,6 +45,15 @@ enum class ExecutionHoldStatus {
   kRecordTooLarge,
 };
 
+// Holder confirmation can either retain the narrowed hold (kOk) or consume an
+// already converged holder and release it immediately (kResolved). Both are
+// successful confirmation outcomes for the scheduler commit barrier.
+constexpr bool execution_holder_confirmation_succeeded(
+    ExecutionHoldStatus status) {
+  return status == ExecutionHoldStatus::kOk ||
+         status == ExecutionHoldStatus::kResolved;
+}
+
 class RequestExecutionHold;
 struct ExecutionHoldAdoptionState;
 

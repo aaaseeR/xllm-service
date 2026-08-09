@@ -20,7 +20,7 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：CPU_VERIFIED
 - 关联设计/Requirement ID：G-2、G-1、F66、F72、F73、F80-F82、D50、D52、D56
-- 最近验证基线：xLLM `a260e2fc`、xllm-service 本状态文档所在提交
+- 最近验证基线：xLLM `b1cc43dc`、xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
@@ -113,7 +113,7 @@ limitations under the License.
 Service 的 Provider/Registry 纯 CPU 测试已覆盖 Adapter、route、EngineState 和
 LinkState；当前全量 service CPU 回归在 pinned 与外部 xLLM 两种构建下均为
 304/304，vLLM Agent/sidecar CPU 回归为 60/60，xLLM CPU 公共路径基线为
-100/100。新增 xLLM Engine plan
+103/103。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
 生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
 仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。

@@ -54,6 +54,11 @@ limitations under the License.
   `CommitGeneration`、`CancelRequest`、`QueryRequest` 已接入 brpc handler。
   reservation 在 commit 前由 lifecycle table 释放，commit 后所有权转给 scheduler，
   terminal finish 不再误 cancel，显式 cancel/析构/sweep 均走唯一清理路径。
+- Engine 成员租约：incarnation 与进程内 attempt ledger 不可分离；etcd 权威 key
+  丢失后保持 fail-stop，不以连续 missing 延迟 fencing，也不在原进程复用 identity。
+  默认且最小 TTL 为 15 秒，heartbeat/reconcile 必须处于 `(0, ttl/3]`，非法配置在
+  初始化阶段拒绝；KeepAlive 失败显式记录 key、TTL 和异常，供区分续租故障与最终
+  authoritative missing。
 - P 生产接线：请求携带绑定的 Decode incarnation、reservation TTL 和 transfer
   mode；临时拒绝只重放同一 immutable attempt，永久拒绝失败关闭；commit ACK
   丢失时 Query 同一 incarnation，只有已 committed/running/done 才开放首事件。
@@ -124,6 +129,7 @@ limitations under the License.
 | G1 D 真实 reservation/释放所有权 | 真实生产 TU 严格编译；commit 前 release、commit 后 cancel、finish 不 cancel 单测 | 当前生产目标链接 Torch CPU；无 tensor 数值变化 | 待真实 KV/credit/slot | PASS（CPU 编译与状态机） |
 | G1 P RPC 歧义与首事件屏障 | Commit/Query/Cancel、响应数量异常和空 channel fail-closed；retry budget + dispatch margin 不超过 Service gap timeout，RPC controller 受本地 monotonic budget 截断；生产 TU 严格编译 | N/A | 待 brpc/RDMA 故障注入 | PASS（CPU 核心与编译）；集成故障矩阵待补 |
 | G1 incarnation 绑定 | routing 字段号/roundtrip 协议测试；双仓外层 xLLM override build | N/A | 待进程重启竞态 | PASS |
+| G1 Engine 成员租约 | PRESENT/MISSING/UNAVAILABLE 三态；15 秒 TTL 下限、reconcile 周期正负边界；KeepAlive 与 xservice client 生产 TU 严格编译 | N/A | 待真实 etcd 选举、分区、lease expiry 与 fleet restart 注入 | PASS（CPU 状态机与编译）；集群可用性待验证 |
 | F83 Service 单 hold | 32 线程并发安装只成功一次；resolved 后下一 attempt 可安装；Request 直接持有不可复制 hold | N/A | 待真实请求 | PASS |
 | F83 cleanup 容量 | record/byte backpressure、64 线程精确耗尽、RAII 与跨表 token 拒绝 | N/A | N/A | PASS |
 | F83 收敛证明 | 全候选、confirmed 收窄、旧 attempt/incarnation、`QUERY_ABSENT`、hard-bound profile 门禁 | N/A | 待 Provider Query/Cancel | PASS |
@@ -133,7 +139,7 @@ limitations under the License.
 | 内存/未定义行为 | GCC 13 ASan+UBSan 定向运行 Engine 17 项与 Service hold 19 项 | N/A | N/A | PASS；Clang sanitizer runtime 未随 ARM64 镜像安装 |
 | deadline 约束 reservation/调度 | optional wire、fake monotonic、Service 有界并发索引；D admission/reservation cap、P 三个边界和六类 Engine 调度路径生产 TU 以 `-Werror` 编译 | 公共测试目标使用 Torch CPU；无 tensor 数值变化 | 待真实 KV/transfer | PASS（CPU 核心与生产编译）；loopback 待补 |
 | G1/G2 exact 首事件保留与恢复 | xLLM adapter/protocol/4 MiB/field 24；Service Query state、D/P incarnation、attempt、seq、payload 和 index fail-closed；7 项真实 brpc loopback 覆盖并发、timeout、D restart 和 live race | adapter 目标链接 Torch CPU；无 tensor 数值变化 | 待 P/D 数据面故障注入 | PASS（CPU loopback） |
-| 双仓回归 | xLLM 默认七目标 100/100，另有 queue 14/14、protocol 14/14；Service pinned/override 均为 304/304；vLLM Agent/sidecar 60/60；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | N/A | PASS |
+| 双仓回归 | xLLM 默认七目标 103/103，另有 queue 14/14、protocol 14/14；Service pinned/override 均为 304/304；vLLM Agent/sidecar 60/60；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | 本批不修改 KV/HBM 数据面，simulated HBM 不适用 | PASS |
 
 ## 完善情况
 
@@ -154,6 +160,10 @@ limitations under the License.
   legacy 路径不会自动获得 V2 资源安全语义，开放开关前必须完成 capability 门禁。
 - 性能、容量和观测证据：CPU 测试证明内存逻辑有固定 record/byte/fence 上限；尚无
   真实 workload 的 allocator 锁持有时间、冲突率、cleanup burst 或 1 万次故障数据。
+- CPU 证据只证明链路、状态机和 host/Torch CPU 所有权，不替代 HBM。后续修改 KV
+  分配、迁移、淘汰或内容时，必须增加 simulated HBM 的固定容量、block 地址/所有权、
+  内容/checksum、OOM/碎片和故障回收测试；本批成员租约与 EngineState 协议修复不触碰
+  KV/HBM 数据面，因此该层为不适用，而非已验证。
 - 达到全 G1 CPU_VERIFIED 仍需完成：cleanup worker metrics 与
   reservation/deadline profile 配置化和 Gateway deadline 策略；补齐 CPU
   多进程端到端 cleanup/deadline/fault loop；接入 local hold，并确保所有开放 mode

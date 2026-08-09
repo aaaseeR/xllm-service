@@ -107,6 +107,25 @@ loopback 实现，不能把可移植逻辑藏在 `USE_NPU` 分支中。
 或 PyTorch CPU 上证明 shape、dtype、layout、数值和边界语义，再进入 NPU 专项
 验证。禁止以“最终运行在 NPU”为理由跳过 CPU 测试。
 
+xLLM CPU 运行只用于证明控制链路、协议、状态机、并发和 host 内存所有权，不能
+作为 HBM 或 NPU 数据面的替代证据。所有涉及 KV cache/HBM 的功能必须在 NPU 前增加
+一层可注入的模拟 HBM 验证：模拟固定容量、block/page 地址空间、分配/释放和所有权，
+并能注入 OOM、碎片、重复释放、延迟释放、进程/attempt fencing 与并发竞争。测试必须
+核对 KV block 内容或明确的 checksum/reference，不能只断言 RPC 成功或计数器变化。
+
+KV/HBM 功能的证据固定分为三层并分别记录，不得互相冒充：
+
+1. CPU/Torch CPU：控制链路、算法、tensor/layout 与 host 所有权正确；
+2. simulated HBM：容量、地址/block 所有权、KV 内容、回收和故障不变量正确；
+3. NPU：真实 HBM、CANN/kernel、DMA/RDMA、stream/event 和设备故障行为正确。
+
+生产抽象以 NPU 首发和后续多硬件接入为目标：公共层只定义 device-neutral 的 KV
+资源、地址/block、stream/event、transfer、capability 和错误契约，各 NPU/CUDA/MLU/
+DCU 等 backend 实现同一接口。simulated HBM 只是该生产契约的 CPU 测试实现，生产代码
+不得反向依赖 simulator，也不得为迁就模拟器弱化真实设备的异步、对齐、容量或错误
+语义。公共 Scheduler/Provider 禁止散落 `USE_NPU`/CANN 特例；硬件差异由 backend
+capability/profile 与明确 Adapter 边界表达。
+
 ### 4.2 功能覆盖要求
 
 “CPU 测试覆盖全”按功能与状态语义验收，不以单一行覆盖率代替。每个新增或
@@ -129,6 +148,14 @@ Torch CPU 测试还必须覆盖：
 - 确定性要求、异常输入，以及需要 backward 时的梯度正确性；
 - 与设备无关的序列化、分片、block/layout 和跨 rank 元数据计算。
 
+KV cache/HBM 模拟测试还必须覆盖：
+
+- 固定容量的满/空边界、OOM、碎片、高低水位和回收后再分配；
+- block/page 地址唯一性、跨 DP/rank 映射、引用/所有权转移和禁止重复释放；
+- Prefill 写入、Decode 读取、迁移/淘汰后的 KV 内容或 checksum reference 一致性；
+- timeout、cancel、attempt/incarnation 替换、传输结果不明与进程终止后的精确回收；
+- 并发 allocate/free/transfer 的线性化结果，以及模拟 HBM 使用量始终守恒。
+
 硬件专属测试可以延后到 NPU，但必须在支持矩阵中标为 `NPU_PENDING`，并说明
 无法由 CPU 证明的硬件不变量、所需环境和验收用例。`NPU_PENDING` 不得掩盖
 本可在 CPU 上验证的逻辑。
@@ -142,7 +169,8 @@ Torch CPU 测试还必须覆盖：
 3. fake Engine/Provider 的组件测试；
 4. loopback 多 Service/P/D 的 CPU 集成测试；
 5. Torch CPU reference/parity 测试；
-6. 故障注入、资源泄漏和确定性回归测试。
+6. 涉及 KV cache 时的 simulated HBM 容量/内容/所有权测试；
+7. 故障注入、资源泄漏和确定性回归测试。
 
 合入前必须满足：
 
@@ -150,6 +178,7 @@ Torch CPU 测试还必须覆盖：
 - 所有新增测试及受影响既有测试通过，无静默 skip；
 - 测试失败、flaky 或缺失必须记录为未完成，禁止把失败基线算作通过；
 - 测试可以离线复现，不依赖真实 etcd、在线模型服务或 NPU；
+- 涉及 KV/HBM 的 CPU 合入门必须通过模拟 HBM，不得仅用链路 mock 替代；
 - 修复缺陷时先增加能够稳定复现缺陷的测试，再提交修复。
 
 ## 5. 开发文档与完成度
@@ -169,7 +198,7 @@ Torch CPU 测试还必须覆盖：
 Provider / mode / model / dtype / topology 支持矩阵
 状态：PLANNED | IN_PROGRESS | PARTIAL | CPU_VERIFIED |
       NPU_PENDING | VERIFIED | BLOCKED
-需求 -> CPU test -> Torch CPU test -> NPU test 的追踪表
+需求 -> CPU test -> Torch CPU test -> simulated HBM test -> NPU test 的追踪表
 已知缺口、风险、兼容与回滚方式
 性能/容量基线和观测指标
 最近验证的 commit、命令、环境和结果
@@ -209,7 +238,8 @@ Provider / mode / model / dtype / topology 支持矩阵
 
 1. 设计章节、协议、不变量和明确不做项已确认；
 2. 实现符合 xLLM 风格，结构清晰，无重复实现和临时占位；
-3. 全部可移植逻辑已由 CPU/Torch CPU 测试覆盖并通过；
+3. 全部可移植逻辑已由 CPU/Torch CPU 测试覆盖并通过，KV/HBM 功能另已通过
+   simulated HBM 门禁；
 4. 跨仓 wire、错误码、状态和兼容性有机械测试；
 5. 开发状态文档已更新，支持范围、缺口和验证证据真实可复现；
 6. 资源释放、失败收敛、并发和回滚路径已验证；

@@ -276,7 +276,6 @@ xllm::proto::EngineState make_state(const ProviderDescriptor& descriptor) {
   state.set_ownership(xllm::proto::ENGINE_OWNERSHIP_OWNED);
   state.set_shallow_health(xllm::proto::HEALTH_STATUS_HEALTHY);
   state.set_deep_health(xllm::proto::HEALTH_STATUS_UNKNOWN);
-  state.set_connector_state("READY");
   state.set_state_quality(xllm::proto::STATE_QUALITY_PARTIAL);
   return state;
 }
@@ -500,16 +499,12 @@ TEST(ProviderContractTest, CanonicalAndEncodedRequestsValidate) {
             xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_CAPABILITY);
 }
 
-TEST(ProviderContractTest, EngineStateConsumesConnectorReadiness) {
+TEST(ProviderContractTest, EngineStateNeedsNoPlaceholderConnectorSignal) {
   ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[1]);
   xllm::proto::EngineState state = make_state(descriptor);
   ContractResult result = validate_engine_state(descriptor, state);
   EXPECT_TRUE(result.ok()) << result.message();
   EXPECT_EQ(state.deep_health(), xllm::proto::HEALTH_STATUS_UNKNOWN);
-
-  state.set_connector_state("UNKNOWN");
-  EXPECT_EQ(validate_engine_state(descriptor, state).error(),
-            xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
 }
 
 TEST(ProviderContractTest, SharedWireSchemaReservesRetiredV2Placeholders) {
@@ -527,11 +522,12 @@ TEST(ProviderContractTest, SharedWireSchemaReservesRetiredV2Placeholders) {
   EXPECT_TRUE(admission->IsReservedName("per_rank"));
   EXPECT_TRUE(state->IsReservedNumber(10));
   EXPECT_TRUE(state->IsReservedNumber(11));
+  EXPECT_TRUE(state->IsReservedNumber(12));
   EXPECT_TRUE(state->IsReservedNumber(13));
   EXPECT_TRUE(state->IsReservedName("latency_histogram_delta"));
   EXPECT_TRUE(state->IsReservedName("throughput_tokens_per_second"));
+  EXPECT_TRUE(state->IsReservedName("connector_state"));
   EXPECT_TRUE(state->IsReservedName("failure_counters"));
-  EXPECT_EQ(state->FindFieldByName("connector_state")->number(), 12);
   EXPECT_TRUE(plan->IsReservedNumber(13));
   EXPECT_TRUE(plan->IsReservedName("prediction"));
 

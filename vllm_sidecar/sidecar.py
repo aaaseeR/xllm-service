@@ -337,7 +337,6 @@ class Sidecar:
                 "shallow_health": "HEALTH_STATUS_HEALTHY",
                 "deep_health": "HEALTH_STATUS_UNKNOWN",
                 "per_dp": metrics["per_dp"],
-                "connector_state": "READY",
                 "state_quality": metrics["state_quality"],
                 "provider_id": "PROVIDER_ID_VLLM_ASCEND",
                 "profile_digest": descriptor["profile_digest"],

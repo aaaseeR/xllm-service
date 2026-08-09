@@ -1057,7 +1057,7 @@ bool Scheduler::confirm_generation_commit(
       request->execution_hold.confirm_holder(
           execution_holder(*request),
           xllm::proto::EXECUTION_HOLD_PROOF_GENERATION_COMMITTED);
-  if (status == provider::ExecutionHoldStatus::kOk) {
+  if (provider::execution_holder_confirmation_succeeded(status)) {
     return true;
   }
   LOG(ERROR) << "GenerationCommit output did not match the execution hold, "

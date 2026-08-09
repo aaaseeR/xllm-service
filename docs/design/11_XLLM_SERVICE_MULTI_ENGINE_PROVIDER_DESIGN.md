@@ -226,13 +226,15 @@ EngineState = {
   lifecycle, ownership, shallow_health, deep_health,
   per_dp: [{dp_rank, running, waiting_capacity, waiting_deferred,
             kv_used_ratio, kv_free_blocks, admission_credit}],
-  latency_histogram_delta, throughput,
-  connector_state, failure_counters,
   state_quality
 }
 ```
 
 缺失值是 `UNKNOWN`，不能写成 0。State Stream 仍是软观测；最终容量由 Provider 本地准入决定。
+EngineState 不发布没有真实生产信号的 connector 占位值；已删除的动态性能字段和
+connector tag/name 均保持 `reserved`。Remote PD 的真实传输通道健康由带 handshake
+结果、connector/version 与 incarnation 的 `LinkState` 表达，只有 `READY` link 才能
+参与严格 P/D 调度。
 
 ### 5.2 聚合规则
 

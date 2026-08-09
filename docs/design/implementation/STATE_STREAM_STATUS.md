@@ -20,7 +20,7 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：PARTIAL
 - 关联设计/Requirement ID：G3、F64、F65、F67、F78、D13、D15-D18、D34、D41、D52
-- 最近验证基线：xLLM `a260e2fc`；xllm-service 本状态文档所在提交
+- 最近验证基线：xLLM `b1cc43dc`；xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
@@ -54,9 +54,11 @@ NPU handshake 故障矩阵待最终环境验证。
   STATE_BLIND 宽限内只使用未被直连失败推翻的最后良好状态，宽限后要求 TTL 内的直接
   成功证据；REGISTRY_BLIND 只允许短宽限且失败证据立即生效。证据表与成员同生命周期、
   受 `max_members` 硬上限约束，不刷新负载年龄。
-- `EngineState.connector_state` 只接受 `READY`/`NOT_READY`，且 `READY` 是所有模式下
-  的调度硬门禁。未校准的吞吐、延迟直方图和失败计数字段已删除并 reserved；当前
-  State Stream 只声明已经存在生产消费者的过滤事实，不声明动态性能排序。
+- 没有真实生产信号的 `EngineState.connector_state` 已删除并 reserved，避免 Native
+  常量 `READY` 被误当成 KV/传输健康证明。未校准的吞吐、延迟直方图和失败计数字段
+  同样保持 reserved；当前 State Stream 只声明已有生产消费者的事实。Remote PD 的
+  connector/version、handshake 结果和健康门禁只由 incarnation-scoped
+  `LinkState=READY` 表达。
 - Receiver 只接受 Registry 当前 master incarnation 的单调 snapshot；切主后必须先
   FULL，DELTA 才可应用。FULL 必须精确覆盖当前成员，重复项、未知 enum、容量越界、
   Descriptor/compatibility proof 不一致全部 fail closed。
@@ -143,7 +145,7 @@ StateStreamOutbox 6/6；
 StateStreamClient BRPC loopback 4/4；
 LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 8/8。State Stream、
 Link 和 Native producer 的关键并发用例连续 100 轮通过；xLLM 公共 CPU 回归为
-100/100。xLLM 的
+103/103。xLLM 的
 `native_provider_runtime.cpp`、`xservice_client.cpp`、`llm_master.cpp` 和
 `vlm_master.cpp` 使用真实 Torch CPU/BRPC 编译参数通过。完整 xLLM runtime 目标仍被
 既有 `process_group.cpp` 的 CPU `ProcessGroupImpl` 不完整类型错误阻断，该文件不在本批

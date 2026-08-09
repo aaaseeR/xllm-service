@@ -732,11 +732,6 @@ ContractResult validate_engine_state(const ProviderDescriptor& descriptor,
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_CAPABILITY,
                 "deep health was published without capability");
   }
-  if (state.connector_state() != "READY" &&
-      state.connector_state() != "NOT_READY") {
-    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
-                "connector state must be READY or NOT_READY");
-  }
   return ContractResult::success();
 }
 
