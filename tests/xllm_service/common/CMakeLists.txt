@@ -55,3 +55,17 @@ target_link_libraries(uuid_test
                       PRIVATE brpc-static leveldb::leveldb ZLIB::ZLIB
                               protobuf::libprotobuf OpenSSL::SSL
                               OpenSSL::Crypto)
+
+cc_test(
+  NAME
+    hash_util_test
+  SRCS
+    hash_util_test.cpp
+  DEPS
+    :common
+    GTest::gtest_main
+)
+target_link_libraries(hash_util_test
+                      PRIVATE brpc-static leveldb::leveldb ZLIB::ZLIB
+                              protobuf::libprotobuf OpenSSL::SSL
+                              OpenSSL::Crypto)

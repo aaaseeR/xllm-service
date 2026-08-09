@@ -108,9 +108,9 @@ bool matches_current_kv_engine(const xllm_service::InstanceMetaInfo& info,
           identity.model_revision()) {
     return false;
   }
-  // K0 intentionally accepts only the conservative profile namespace. K2
-  // replaces this with the canonical tenant/adapter namespace contract.
-  return identity.kv_namespace() == "profile:" + info.provider_profile_digest;
+  return !info.provider_descriptor->kv().kv_namespace().empty() &&
+         identity.kv_namespace() ==
+             info.provider_descriptor->kv().kv_namespace();
 }
 
 xllm::proto::ExecutionAttemptId execution_attempt(

@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -68,6 +69,16 @@ void print_hex_array(uint8_t* array);
 
 void xxh3_128bits_hash(const uint8_t* pre_hash_value,
                        const Slice<int32_t>& token_ids,
+                       uint8_t* hash_value);
+
+// Portable V2 hash encoding shared with xLLM. Empty namespace retains the
+// legacy local hash domain; a non-empty namespace is length-delimited into the
+// preimage together with parent, tokens and per-block extra bytes.
+void xxh3_128bits_hash(std::string_view kv_namespace,
+                       uint64_t hash_seed,
+                       const uint8_t* pre_hash_value,
+                       const Slice<int32_t>& token_ids,
+                       std::string_view block_extra,
                        uint8_t* hash_value);
 
 }  // namespace xllm_service

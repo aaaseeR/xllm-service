@@ -32,6 +32,12 @@ bool set_request_execution_context(RequestProto* request_pb,
   request_pb->clear_execution_plan();
   if (request.execution_plan.has_value()) {
     *request_pb->mutable_execution_plan() = *request.execution_plan;
+    if (request.kv_namespace.empty()) {
+      return false;
+    }
+    request_pb->set_kv_namespace(request.kv_namespace);
+  } else {
+    request_pb->clear_kv_namespace();
   }
   if (request.request_deadline.has_value()) {
     const uint64_t remaining_ms = request.request_deadline->remaining_ms();

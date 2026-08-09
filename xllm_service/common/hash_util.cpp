@@ -17,17 +17,43 @@ limitations under the License.
 
 #include <MurmurHash3.h>
 #include <assert.h>
+#include <glog/logging.h>
 #include <xxhash.h>
 
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
+#include <string_view>
 #include <thread>
 
 #include "common/global_gflags.h"
 
 namespace xllm_service {
+namespace {
+
+constexpr std::string_view kCanonicalHashDomain = "xkvh-v1";
+
+void append_u32_le(uint32_t value, std::vector<uint8_t>* output) {
+  output->push_back(static_cast<uint8_t>(value));
+  output->push_back(static_cast<uint8_t>(value >> 8));
+  output->push_back(static_cast<uint8_t>(value >> 16));
+  output->push_back(static_cast<uint8_t>(value >> 24));
+}
+
+void write_u64_le(uint64_t value, uint8_t* output) {
+  for (size_t index = 0; index < sizeof(value); ++index) {
+    output[index] = static_cast<uint8_t>(value >> (index * 8));
+  }
+}
+
+void append_bytes(std::string_view value, std::vector<uint8_t>* output) {
+  append_u32_le(static_cast<uint32_t>(value.size()), output);
+  output->insert(output->end(), value.begin(), value.end());
+}
+
+}  // namespace
 
 void xxh3_128bits_hash(const uint8_t* pre_hash_value,
                        const Slice<int32_t>& token_ids,
@@ -55,6 +81,45 @@ void xxh3_128bits_hash(const uint8_t* pre_hash_value,
     memcpy(
         hash_value, &xxh3_128bits_hash_value, sizeof(xxh3_128bits_hash_value));
   }
+}
+
+void xxh3_128bits_hash(std::string_view kv_namespace,
+                       uint64_t hash_seed,
+                       const uint8_t* pre_hash_value,
+                       const Slice<int32_t>& token_ids,
+                       std::string_view block_extra,
+                       uint8_t* hash_value) {
+  if (kv_namespace.empty()) {
+    xxh3_128bits_hash(pre_hash_value, token_ids, hash_value);
+    return;
+  }
+  CHECK_LE(kv_namespace.size(), std::numeric_limits<uint32_t>::max());
+  CHECK_LE(token_ids.size(), std::numeric_limits<uint32_t>::max());
+  CHECK_LE(block_extra.size(), std::numeric_limits<uint32_t>::max());
+
+  std::vector<uint8_t> preimage;
+  preimage.reserve(kCanonicalHashDomain.size() + kv_namespace.size() +
+                   block_extra.size() + token_ids.size() * sizeof(int32_t) +
+                   XXH3_128BITS_HASH_VALUE_LEN + 16);
+  preimage.insert(
+      preimage.end(), kCanonicalHashDomain.begin(), kCanonicalHashDomain.end());
+  append_bytes(kv_namespace, &preimage);
+  preimage.push_back(pre_hash_value == nullptr ? 0 : 1);
+  if (pre_hash_value != nullptr) {
+    preimage.insert(preimage.end(),
+                    pre_hash_value,
+                    pre_hash_value + XXH3_128BITS_HASH_VALUE_LEN);
+  }
+  append_u32_le(static_cast<uint32_t>(token_ids.size()), &preimage);
+  for (size_t index = 0; index < token_ids.size(); ++index) {
+    append_u32_le(static_cast<uint32_t>(token_ids[index]), &preimage);
+  }
+  append_bytes(block_extra, &preimage);
+
+  const XXH128_hash_t digest =
+      XXH3_128bits_withSeed(preimage.data(), preimage.size(), hash_seed);
+  write_u64_le(digest.low64, hash_value);
+  write_u64_le(digest.high64, hash_value + sizeof(digest.low64));
 }
 
 void print_hex_array(uint8_t* array) {

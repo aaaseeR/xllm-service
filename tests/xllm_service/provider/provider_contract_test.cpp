@@ -128,6 +128,9 @@ ProviderDescriptor make_descriptor(const ModeCase& mode_case) {
   kv->set_kv_layout_digest("kv-sha256");
   kv->set_cache_dtype("bf16");
   kv->set_block_size(16);
+  kv->set_kv_namespace("kv-namespace-sha256");
+  kv->set_hash_version(1);
+  kv->set_hash_seed(1024);
   kv->add_cache_groups("full-attention");
   kv->set_head_shard_mapping_digest("head-shard-sha256");
   kv->set_connector("native");
@@ -439,6 +442,23 @@ TEST(ProviderContractTest, DescriptorRejectsProviderRuntimeAlias) {
   descriptor.mutable_identity()->set_runtime_family("vllm-ascend");
   ContractResult result = validate_provider_descriptor(descriptor);
   EXPECT_EQ(result.error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+}
+
+TEST(ProviderContractTest, DescriptorRejectsPartialKVHashContract) {
+  ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[0]);
+  descriptor.mutable_kv()->clear_hash_version();
+  EXPECT_EQ(validate_provider_descriptor(descriptor).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  descriptor = make_descriptor(kOpenModeCases[0]);
+  descriptor.mutable_kv()->clear_kv_namespace();
+  EXPECT_EQ(validate_provider_descriptor(descriptor).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  descriptor = make_descriptor(kOpenModeCases[0]);
+  descriptor.mutable_kv()->clear_hash_seed();
+  EXPECT_EQ(validate_provider_descriptor(descriptor).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
 }
 
@@ -960,6 +980,16 @@ TEST(ProviderContractTest, RemotePdCompatibilityRejectsHardMismatches) {
 
   decode = baseline_decode;
   decode.mutable_kv()->set_connector_version("other-connector-version");
+  EXPECT_EQ(validate_remote_pd_compatibility(prefill, decode, &proof).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  decode = baseline_decode;
+  decode.mutable_kv()->set_kv_namespace("other-kv-namespace");
+  EXPECT_EQ(validate_remote_pd_compatibility(prefill, decode, &proof).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  decode = baseline_decode;
+  decode.mutable_kv()->set_hash_seed(2048);
   EXPECT_EQ(validate_remote_pd_compatibility(prefill, decode, &proof).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
 

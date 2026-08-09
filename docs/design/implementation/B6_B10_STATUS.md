@@ -32,7 +32,7 @@ protection、真实 cluster 和 NPU 保持 pending；B8 正在实现。B8-B10 �
 | --- | --- | --- | --- |
 | V2-B6 | 00 §4、02 G-1 测试底座、11 硬件感知边界 | 真正生效的 pin/CPU 合入入口；device-neutral KV/HBM 资源契约；xLLM simulated HBM test backend；容量、block 地址/所有权、内容/checksum、OOM/碎片、并发与故障回收门禁 | CPU_VERIFIED / PLATFORM_AND_NPU_PENDING；见 [SIMULATED_HBM_STATUS.md](./SIMULATED_HBM_STATUS.md) |
 | V2-B7 | 08 V2-K0 | Engine block 真源产生 KV store/remove/clear 事件；独立 KV lane；incarnation/cache epoch/event sequence；有界 shadow index；gap 后分页 snapshot 恢复和对账；只观测不影响路由 | CPU_VERIFIED / NPU_AND_CLUSTER_PENDING；见 [B7_K0_KV_SHADOW_STATUS.md](./B7_K0_KV_SHADOW_STATUS.md) |
-| V2-B8 | 08 V2-K1 | 统一候选过滤后的 HBM P/D Prefix + load 联合评分；least-load/top-prefix shortlist；pending-work、survival/residence credit；按 bucket 灰度；UNKNOWN 或恢复中自动 load-only | IN_PROGRESS |
+| V2-B8 | 08 V2-K1 | 统一候选过滤后的 HBM P/D Prefix + load 联合评分；canonical cross-repo hash/namespace/seed 与 P→D 透传已完成；least-load/top-prefix shortlist、pending-work、survival/residence credit 已完成；actual observation 与 bucket gate 进行中 | IN_PROGRESS |
 | V2-B9 | 09 | 每 Service/ModelPool 有界队列；request/token/byte/tenant 硬上限；priority band、tenant flow 公平和 flow 内 FCFS/EDF；整池饱和门；按 capability 选择 REMOTE_PD、LOCAL_PREFILL_DECODE、PREFILL_ONLY | PLANNED |
 | V2-B10 | 08 V2-K2、完整 09/11、00 §2.1 | 多模型隔离；优先级/公平与 KV 选择联合；可观测低层 shadow credit；双 Provider 最终 conformance；容量/故障/回退矩阵；完整支持矩阵和 V2 代码完成口径 | PLANNED |
 

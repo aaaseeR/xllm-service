@@ -97,6 +97,10 @@ struct Request {
   std::optional<xllm::proto::ProviderDescriptor> prefill_provider_descriptor;
   std::optional<xllm::proto::ProviderDescriptor> decode_provider_descriptor;
 
+  // Bound from the immutable Provider Descriptor and forwarded unchanged to
+  // Native P and D. Empty means the legacy Engine-local hash domain.
+  std::string kv_namespace;
+
   // K1 keeps both the route actually used and the shadow alternative. Actual
   // Engine usage is reconciled against this bounded record at completion.
   std::optional<provider::KVRouteObservation> kv_route_observation;

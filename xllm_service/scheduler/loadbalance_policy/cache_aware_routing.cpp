@@ -67,10 +67,12 @@ uint64_t stable_request_hash(const Request& request) {
 }
 
 std::vector<std::string> build_block_hashes(
+    const std::string& kv_namespace,
+    uint64_t hash_seed,
     const std::vector<int32_t>& token_ids,
     size_t block_size) {
   std::vector<std::string> hashes;
-  if (block_size == 0) {
+  if (kv_namespace.empty() || block_size == 0) {
     return hashes;
   }
   const size_t block_count = token_ids.size() / block_size;
@@ -81,8 +83,11 @@ std::vector<std::string> build_block_hashes(
   for (size_t block = 0; block < block_count; ++block) {
     XXH3Key current{};
     xxh3_128bits_hash(
+        kv_namespace,
+        hash_seed,
         parent,
         tokens.slice(block * block_size, (block + 1) * block_size),
+        /*block_extra=*/{},
         current.data);
     hashes.emplace_back(current.to_string());
     previous = current;
@@ -154,19 +159,25 @@ bool CacheAwareRouting::select_instances_pair(
   }
 
   const uint64_t block_size = candidates.front().prefill.block_size;
-  const bool incompatible_block_size =
-      block_size == 0 ||
+  const std::string& kv_namespace = candidates.front().prefill.kv_namespace;
+  const uint64_t hash_seed = candidates.front().prefill.hash_seed;
+  const bool incompatible_hash_contract =
+      block_size == 0 || kv_namespace.empty() || hash_seed == 0 ||
       std::any_of(candidates.begin(), candidates.end(), [&](const auto& plan) {
         return plan.prefill.block_size != block_size ||
+               plan.prefill.kv_namespace != kv_namespace ||
+               plan.prefill.hash_seed != hash_seed ||
                (plan.decode.has_value() &&
-                plan.decode->block_size != block_size);
+                (plan.decode->block_size != block_size ||
+                 plan.decode->kv_namespace != kv_namespace ||
+                 plan.decode->hash_seed != hash_seed));
       });
-  if (incompatible_block_size) {
+  if (incompatible_hash_contract) {
     return fallback_load_only(request);
   }
 
-  const std::vector<std::string> block_hashes =
-      build_block_hashes(request->token_ids, block_size);
+  const std::vector<std::string> block_hashes = build_block_hashes(
+      kv_namespace, hash_seed, request->token_ids, block_size);
   for (provider::KVRoutePlanCandidate& candidate : candidates) {
     observe_prefix(kv_shadow_index_, block_hashes, &candidate.prefill);
     if (candidate.decode.has_value()) {

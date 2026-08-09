@@ -40,6 +40,7 @@ TEST(RequestExecutionContextTest, CopiesStrictPlanIntoCompletionRequest) {
   request.execution_plan->set_contract_version(1);
   request.execution_plan->set_request_uid("request-uid");
   request.execution_plan->set_attempt_seq(0);
+  request.kv_namespace = "kv-namespace";
   xllm::proto::CompletionRequest request_pb;
 
   ASSERT_TRUE(set_request_execution_context(&request_pb, request));
@@ -49,6 +50,7 @@ TEST(RequestExecutionContextTest, CopiesStrictPlanIntoCompletionRequest) {
   EXPECT_EQ(request_pb.execution_plan().contract_version(), 1u);
   EXPECT_TRUE(request_pb.execution_plan().has_attempt_seq());
   EXPECT_EQ(request_pb.execution_plan().attempt_seq(), 0u);
+  EXPECT_EQ(request_pb.kv_namespace(), "kv-namespace");
   EXPECT_GT(request_pb.remaining_deadline_ms(), 0u);
   EXPECT_LE(request_pb.remaining_deadline_ms(), 10000u);
 }
@@ -61,6 +63,17 @@ TEST(RequestExecutionContextTest, ClearsUntrustedPlanOnLegacyChatRequest) {
 
   ASSERT_TRUE(set_request_execution_context(&request_pb, request));
   EXPECT_FALSE(request_pb.has_execution_plan());
+  EXPECT_TRUE(request_pb.kv_namespace().empty());
+}
+
+TEST(RequestExecutionContextTest, RejectsStrictPlanWithoutKVNamespace) {
+  Request request;
+  initialize_request_context(&request);
+  request.execution_plan.emplace();
+  request.execution_plan->set_request_uid("request-uid");
+  xllm::proto::CompletionRequest request_pb;
+
+  EXPECT_FALSE(set_request_execution_context(&request_pb, request));
 }
 
 TEST(RequestExecutionContextTest, RejectsMissingRetryPolicy) {

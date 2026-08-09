@@ -67,6 +67,7 @@ struct KVRouteEngineCandidate {
   xllm::proto::ProviderEngineKey engine_key;
   std::string model_revision;
   std::string kv_namespace;
+  uint64_t hash_seed = 0;
   std::string cache_group;
   uint64_t block_size = 0;
   xllm::proto::EngineRole role = xllm::proto::ENGINE_ROLE_UNSPECIFIED;

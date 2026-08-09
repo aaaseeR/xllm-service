@@ -450,6 +450,15 @@ ContractResult validate_provider_descriptor(
       kv.connector().empty() || kv.connector_version().empty()) {
     return missing("descriptor.kv field");
   }
+  const bool has_hash_contract =
+      !kv.kv_namespace().empty() && kv.hash_version() > 0 && kv.hash_seed() > 0;
+  const bool lacks_hash_contract = kv.kv_namespace().empty() &&
+                                   kv.hash_version() == 0 &&
+                                   kv.hash_seed() == 0;
+  if (!has_hash_contract && !lacks_hash_contract) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+                "KV namespace and hash version must be published together");
+  }
   ContractResult cache_groups =
       validate_unique_strings(kv.cache_groups(), "kv.cache_groups", false);
   if (!cache_groups.ok()) {
@@ -532,6 +541,9 @@ ContractResult validate_remote_pd_compatibility(
       prefill_kv.kv_layout_digest() == decode_kv.kv_layout_digest() &&
       prefill_kv.cache_dtype() == decode_kv.cache_dtype() &&
       prefill_kv.block_size() == decode_kv.block_size() &&
+      prefill_kv.kv_namespace() == decode_kv.kv_namespace() &&
+      prefill_kv.hash_version() == decode_kv.hash_version() &&
+      prefill_kv.hash_seed() == decode_kv.hash_seed() &&
       sorted_strings(prefill_kv.cache_groups()) ==
           sorted_strings(decode_kv.cache_groups()) &&
       prefill_kv.head_shard_mapping_digest() ==

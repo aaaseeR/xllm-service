@@ -665,8 +665,11 @@ bool InstanceMgr::get_kv_route_candidates(
           provider::make_provider_engine_key(*info.provider_descriptor);
       candidate.model_revision =
           info.provider_descriptor->model().model_revision();
-      candidate.kv_namespace = "profile:" + info.provider_profile_digest;
-      candidate.cache_group = "group:0";
+      candidate.kv_namespace = info.provider_descriptor->kv().kv_namespace();
+      candidate.hash_seed = info.provider_descriptor->kv().hash_seed();
+      if (info.provider_descriptor->kv().cache_groups_size() > 0) {
+        candidate.cache_group = info.provider_descriptor->kv().cache_groups(0);
+      }
       candidate.block_size = info.provider_descriptor->kv().block_size();
     }
 
@@ -975,6 +978,45 @@ bool InstanceMgr::bind_request_instance_incarnations(
     LOG(ERROR) << "Load balancer produced an invalid Provider route shape: "
                << request->routing.debug_string();
     return false;
+  }
+
+  request->kv_namespace.clear();
+  if (request->prefill_provider_descriptor.has_value()) {
+    const std::string& prefill_namespace =
+        request->prefill_provider_descriptor->kv().kv_namespace();
+    const uint32_t prefill_hash_version =
+        request->prefill_provider_descriptor->kv().hash_version();
+    const uint64_t prefill_hash_seed =
+        request->prefill_provider_descriptor->kv().hash_seed();
+    const bool prefill_has_hash_contract = !prefill_namespace.empty() &&
+                                           prefill_hash_version > 0 &&
+                                           prefill_hash_seed > 0;
+    if (request->decode_provider_descriptor.has_value()) {
+      const std::string& decode_namespace =
+          request->decode_provider_descriptor->kv().kv_namespace();
+      const uint32_t decode_hash_version =
+          request->decode_provider_descriptor->kv().hash_version();
+      const uint64_t decode_hash_seed =
+          request->decode_provider_descriptor->kv().hash_seed();
+      const bool decode_has_hash_contract = !decode_namespace.empty() &&
+                                            decode_hash_version > 0 &&
+                                            decode_hash_seed > 0;
+      if (prefill_has_hash_contract != decode_has_hash_contract ||
+          (prefill_has_hash_contract &&
+           (decode_namespace != prefill_namespace ||
+            decode_hash_version != prefill_hash_version ||
+            decode_hash_seed != prefill_hash_seed))) {
+        LOG(ERROR) << "Bound P/D Providers use different KV hash domains.";
+        return false;
+      }
+    }
+    if (prefill_has_hash_contract) {
+      request->kv_namespace = prefill_namespace;
+    } else if (request->provider_id == xllm::proto::PROVIDER_ID_XLLM_NATIVE) {
+      // Backward-compatible descriptors remain selectable for legacy tests,
+      // but Native V2 dispatch rejects them in set_request_execution_context.
+      DLOG(WARNING) << "Bound Native Provider has no KV hash contract.";
+    }
   }
 
   return true;
