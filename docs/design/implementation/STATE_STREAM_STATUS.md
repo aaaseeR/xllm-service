@@ -29,13 +29,14 @@ limitations under the License.
 | --- | --- | --- | --- | --- |
 | xLLM Native | `REMOTE_PD/LAYERWISE_PUSH` | contract v1 strict Descriptor | CPU_VERIFIED（Native 生产 + Service 消费核心） | Native P/D 注册真实 Descriptor，heartbeat 发布完整 per-DP EngineState；FULL/DELTA、fencing、TTL、Link READY 门禁通过 |
 | xLLM Native | legacy Descriptor-less | BEST_EFFORT | UNSUPPORTED | V2 路由统一 fail closed；完成相应 V2 Descriptor/EngineState producer 后才能加入候选 |
-| vLLM-Ascend | `AGGREGATED` | contract v1 strict Descriptor | PARTIAL | Registry 核心可表达；Provider Agent 尚未发布真实 EngineState |
+| vLLM-Ascend | `AGGREGATED` | contract v1 strict Descriptor | CPU_VERIFIED / NPU_PENDING | Agent 发布单调、incarnation/profile/model 对齐的 per-DP EngineState；真实指标与 NPU deep health 待验证 |
 
 总体状态保持 PARTIAL：单一协议、xLLM Native 状态生产、权威成员与软状态分离、
 master 聚合与有界异步扇出、权威 master incarnation 分发、接收缓存和真实调度消费
 链路已经闭环；`NORMAL/STATE_BLIND/REGISTRY_BLIND` 迟滞、统一候选过滤、实际直连证据、
 永久 listener 和独立 readiness 已完成 CPU 闭环；Link 周期对账的 Service 侧已经闭环，
-vLLM Agent 状态生产、真实 etcd 切主注入和 NPU handshake 故障矩阵待最终环境验证。
+vLLM Agent 状态生产已完成 CPU 闭环；真实 etcd 切主注入、vLLM-Ascend 指标校准和
+NPU handshake 故障矩阵待最终环境验证。
 
 ## 实现
 
@@ -82,6 +83,10 @@ vLLM Agent 状态生产、真实 etcd 切主注入和 NPU handshake 故障矩阵
   `state_seq`、incarnation/profile/model identity、admission credit 和安全有界的 KV
   使用率。snapshot 不完整时不消耗序号；producer 支持并发调用。EngineState 是
   `HeartbeatRequest` 的 additive field 7，旧 Service/Engine wire 仍兼容。
+- vLLM strict Agent 从带 DP label 的 Prometheus 样本生成 per-DP running、waiting、
+  deferred、KV ratio 和 admission credit，缺任一配置 DP 时只发布 `PARTIAL`；heartbeat
+  携带单调 `state_seq` 和 Descriptor 的 incarnation/profile/model identity。legacy
+  sidecar 仍只发布 contract-v0 aggregate metrics，不能伪装 strict State producer。
 - `StateStreamOutbox` 为每个订阅者维护一个在途请求和有界 latest-map。新订阅者、发送
   失败、队列溢出和周期检查均强制先发最新 FULL；成功后才继续 DELTA。发布 age 只按
   本地 monotonic elapsed 重基，回拨和溢出均 fail closed。
@@ -129,7 +134,7 @@ vLLM Agent 状态生产、真实 etcd 切主注入和 NPU handshake 故障矩阵
 | xLLM Native 生产 | Descriptor 确定性/非法输入、P/D mode、per-DP 完整/空容量、缺失 capability、snapshot 序号不消耗、32 线程唯一序号；heartbeat field 7 | N/A，无 tensor 数值逻辑 | 待真实 CANN/SOC 版本、NPU block 账本与 P/D heartbeat | PASS；Native 6/6、协议 8/8，并发套件连续 100 轮 |
 
 本批验证：xllm-service Debug 三个生产服务目标编译、动态链接通过，全量 CPU 测试
-284/284；ObservationController 8/8；ReadinessController 6/6；HealthResponse 3/3；
+288/288；ObservationController 8/8；ReadinessController 6/6；HealthResponse 3/3；
 EngineRegistry 14/14；StateStreamOutbox 6/6；
 StateStreamClient BRPC loopback 4/4；
 LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 8/8。State Stream、
@@ -152,8 +157,9 @@ Link 和 Native producer 的关键并发用例连续 100 轮通过。xLLM 的
   dispatch/HTTP/Query/heartbeat/轻量 probe 直连证据；权威 DELETE revision fencing 与
   同 incarnation 防复活；永久 listener、`/livez`、`/readyz`、稳定 503 和 readiness
   recovery hold。
-- 已知缺口/风险：vLLM Agent 尚未在真实 heartbeat 中生成完整 EngineState；xLLM 的
-  NPU 硬件 runtime 版本目前只能发布平台与编译期 Torch 版本，仍需接入实际 CANN/驱动
+- 已知缺口/风险：vLLM Agent EngineState 已在 CPU producer/heartbeat 测试中闭环，但
+  尚未与真实 vLLM-Ascend 指标和 NPU deep-health 对账；xLLM 的 NPU 硬件 runtime 版本
+  目前只能发布平台与编译期 Torch 版本，仍需接入实际 CANN/驱动
   和 resolved cache dtype/SOC 身份。Link 状态已由真实 `LinkInstance` 结果生成，但尚未
   做 NPU 多 P/D 故障矩阵。master identity 已保持旧 etcd 地址 value 不变，但仍需真实
   etcd 故障注入覆盖两 key 事件乱序、成员 PUT/DELETE/revoke 与 lease 到期；当前 CPU
@@ -165,8 +171,8 @@ Link 和 Native producer 的关键并发用例连续 100 轮通过。xLLM 的
   分配，不执行 deregister、unlink 或在飞资源清理。
 - 性能、容量和观测证据：CPU 单测已覆盖有界内存、锁安全、慢订阅者超时、断连合并、
   FULL 恢复与并发调用，不代表生产扇出吞吐；仍需补长时间高频状态 soak 和分发指标。
-- 达到完整 G3 CPU_VERIFIED 仍需完成：vLLM Agent EngineState 生产、真实 etcd 切主和
-  成员事件故障注入；xLLM 完整 CPU runtime 链接还需先修复上述既有 ProcessGroup 编译
+- 达到完整 G3 CPU_VERIFIED 仍需完成：真实 etcd 切主和成员事件故障注入；xLLM 完整
+  CPU runtime 链接还需先修复上述既有 ProcessGroup 编译
   基线。
 - 达到 VERIFIED 仍需完成：上述 CPU 门禁全部通过，并在 NPU 多 P/D、多 Service、切主、
   heartbeat 丢失、陈旧状态和 link 故障矩阵中验证。

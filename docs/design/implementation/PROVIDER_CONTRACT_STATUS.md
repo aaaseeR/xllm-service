@@ -30,7 +30,7 @@ limitations under the License.
 | xLLM Native | `REMOTE_PD/LAYERWISE_PUSH/P_FIRST` | contract v1 | CPU_VERIFIED | Descriptor、capability、plan role shape 与 deadline 门禁通过 |
 | xLLM Native | `LOCAL_PREFILL_DECODE/NONE/D_ONLY` | contract v1 | CPU_VERIFIED | mixed accounting 与 structured admission 是硬能力 |
 | xLLM Native | `PREFILL_ONLY/NONE/P_ONLY` | contract v1 | CPU_VERIFIED | 独立 P-only capability 与单 P role shape 是硬门禁 |
-| vLLM-Ascend | `AGGREGATED/NONE/SINGLE` | contract v1 | CPU_VERIFIED | 仅证明公共契约；真实 Agent 尚未实现 |
+| vLLM-Ascend | `AGGREGATED/NONE/SINGLE` | contract v1 | CPU_VERIFIED | 严格 Agent 已发布完整 Descriptor，并完成唯一 ingress、attempt/deadline/fencing CPU loopback；真实 NPU 待验证 |
 | vLLM-Ascend | `REMOTE_PD/LAYERWISE_PUSH/D_FIRST` | contract v1 | BLOCKED | schema 可表达，V2 固定返回 `MODE_NOT_OPEN` |
 
 ## 实现
@@ -60,7 +60,8 @@ limitations under the License.
   完整 `ProviderDescriptor`。完整 Descriptor 在 JSON 入口执行摘要/incarnation
   交叉校验，并在实例进入生产索引前运行公共 Descriptor validator；旧
   `backend_type` 只在 JSON 兼容入口映射一次，未知值或双身份冲突 fail closed。
-  当前 vLLM sidecar 明确发布 contract version 0，继续属于 BEST_EFFORT 兼容桥。
+  vLLM strict Agent 发布 contract version 1；未提供 verified profile 的 legacy sidecar
+  明确发布 contract version 0，继续属于 BEST_EFFORT 兼容桥。
 - Scheduler 已按每个请求从可执行 Provider route 中选择 Adapter dispatch kind，
   不再读取进程级 `default_backend_type` 决定 tokenization 或数据面；该 CLI flag
   仅为旧部署参数兼容保留且不参与运行时决策。Round-robin、CAR、SLO 指标入口、
@@ -110,8 +111,8 @@ limitations under the License.
 | STRICT P/D 兼容 | 不同 profile 正向；model、KV/Connector、topology、runtime 与 strict/legacy 单边混配负向测试 | N/A，无 tensor 逻辑 | 待真实 P/D handshake | PASS |
 
 Service 的 Provider/Registry 纯 CPU 测试已覆盖 Adapter、route、EngineState 和
-LinkState；当前全量 service CPU 回归为 246/246，vLLM sidecar CPU 回归为 29/29（其中
-metadata 11/11），xLLM CPU 公共路径基线为 96/96。新增 xLLM Engine plan
+LinkState；当前全量 service CPU 回归为 288/288，vLLM Agent/sidecar CPU 回归为
+43/43，xLLM CPU 公共路径基线为 96/96。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
 生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
 仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。

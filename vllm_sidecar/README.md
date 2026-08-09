@@ -1,144 +1,167 @@
-# vLLM Sidecar — auto-register a vLLM instance into xllm-service
+<!-- Copyright 2026 The xLLM Authors. All Rights Reserved.
 
-A vLLM server speaks only HTTP/OpenAI. It does not write etcd, hold a lease, or
-emit heartbeats — so on its own it cannot join an xllm-service cluster. This
-sidecar runs next to a vLLM process and bridges that gap, **with no C++ changes**:
-xllm-service already discovers instances by watching the `XLLM:DEFAULT:` etcd
-prefix.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-It replaces the manual `demo/register_vllm.sh` (a one-shot `etcdctl put`) with a
-long-running process that keeps registration in lockstep with vLLM's health.
+    http://www.apache.org/licenses/LICENSE-2.0
 
-## Lifecycle
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================-->
 
-```
-            ┌─────────────┐   /health up    ┌────────────────────────────┐
-  start ──▶ │ wait health │ ───────────────▶│ grant lease(ttl) + put key │
-            └─────────────┘                 └──────────────┬─────────────┘
-                  ▲                                         │ every keepalive-interval:
-                  │  health recovers                        │   probe /health
-                  │  (re-register, new incarnation)         ▼
-            ┌─────┴───────┐  N consecutive fails   ┌──────────────────────┐
-            │ deregistered│ ◀──────────────────────│ healthy → keepalive  │
-            └─────────────┘                        │ unhealthy → count++  │
-                  ▲                                 └──────────────────────┘
-                  │ SIGTERM/SIGINT → revoke lease (immediate deregister)
-```
+# vLLM-Ascend Provider Agent
 
-* **health-gate** — never registers until vLLM `/health` is up.
-* **lease, not heartbeat** — the etcd lease *is* the liveness signal. Keepalive
-  refreshes the TTL **without rewriting the key**, so the master's watcher sees
-  only the initial `PUT` and the final `DELETE` (on revoke or TTL expiry); no
-  watch churn.
-* **fast + safe deregister** — on N failed probes or a signal, the lease is
-  revoked so the key disappears at once; if the sidecar is killed `-9`, the key
-  still expires within `--lease-ttl`.
-* **clean restart** — each (re)registration uses a fresh `incarnation_id`
-  (uuid4), which the master uses to ignore stale deletes for a replaced instance
-  and to clean up the previous incarnation.
+`vllm_sidecar` has two deliberately separate operating modes:
 
-## How the master picks it up (no C++ changes)
+- **strict V2 Agent** (production target): the only externally reachable vLLM
+  ingress, contract-v1 registration, incarnation fencing, bounded attempt
+  Query/Cancel, request deadline enforcement and per-DP EngineState.
+- **legacy sidecar** (compatibility only): lease registration plus aggregate
+  metrics. It publishes contract version 0 and is never a strict V2 route.
 
-| step | code |
-|---|---|
-| watch `XLLM:DEFAULT:` etc. | `instance_mgr.cpp:133` `add_watch(prefix, ...)` |
-| `PUT` → register | `instance_mgr.cpp:568` `update_instance_metainfo` → `register_instance` |
-| lease expiry → `DELETE` → probe → suspect/remove | `instance_mgr.cpp:615+` |
-| JSON schema | `common/types.h:248` `parse_from_json` (needs `name`,`rpc_address`,`type`) |
-| key prefix / namespace | `instance_mgr.cpp:45` map, `utils.cpp:105` namespace |
+The strict Agent runs in the same failure domain as one local vLLM-Ascend
+runtime. Raw vLLM ingress must be isolated from xllm-service and clients; all
+inference traffic goes through the Agent endpoint.
 
-> **Constraint:** a single vLLM instance with no decode peer is routable only as
-> `type=DEFAULT (0)` — keep `--instance-type=DEFAULT`. This mirrors the M2 finding.
+## Strict V2 lifecycle
 
-## Install
+1. Load and validate a verified provider profile. Missing identity, model,
+   topology, KV, scheduler or failure-domain facts fail startup.
+2. Start the Agent fenced and wait for the local vLLM `/health` endpoint.
+3. Grant an etcd lease, publish the complete contract-v1 Descriptor, then
+   activate a fresh `incarnation_id`.
+4. Accept each `(request_uid, attempt_seq)` at most once. The bounded ledger
+   preserves terminal tombstones and implements Query, Cancel and
+   Cancel-before-create.
+5. Forward only admitted inference traffic, inject a stable vLLM request ID,
+   enforce the remaining deadline locally, and close the upstream request on
+   cancellation, client disconnect, expiry or fencing.
+6. Publish monotonic EngineState heartbeats with per-DP state. A lost lease,
+   unhealthy runtime, stale registration or shutdown fences ingress before
+   deregistration/re-registration.
+
+If the Agent is killed without cleanup, the lease expires within
+`--lease-ttl`. Deployment must additionally enforce the configured
+`runtime.fate_bound_mode` (`parent_death_signal` or `same_restart_unit`) so an
+orphaned raw runtime cannot remain reachable.
+
+## Install and CPU test
 
 ```bash
-pip install -r vllm_sidecar/requirements.txt   # only `requests`
+pip install -r vllm_sidecar/requirements.txt
+python -m pytest -q vllm_sidecar/tests
 ```
 
-## Run
+The CPU suite uses a loopback HTTP runtime and covers descriptor validation,
+profile digest stability, duplicate submission, cancellation races, terminal
+tombstones, deadlines, incarnation replacement, streaming proxying, per-DP
+metric parsing and strict heartbeat production. It does not claim NPU runtime
+or deployment failure-domain validation.
+
+## Run strict V2 Agent
+
+Copy `provider_config.example.json`, replace every digest/version/topology
+field with deployment facts, and start:
 
 ```bash
 python -m vllm_sidecar.sidecar \
-    --etcd-endpoints 127.0.0.1:2379 \
-    --vllm-url       http://127.0.0.1:18000 \
-    --register-addr  127.0.0.1:18000          # host:port, NO scheme
+  --provider-config vllm_sidecar/provider_config.json \
+  --vllm-url http://127.0.0.1:18000 \
+  --agent-listen 0.0.0.0:18100 \
+  --register-addr 0.0.0.0:18100 \
+  --etcd-endpoints 127.0.0.1:2379 \
+  --xllm-service-url http://127.0.0.1:9998
 ```
 
-`--register-addr` defaults to the host:port derived from `--vllm-url`. The master
-prepends `http://` itself (`init_brpc_channel`), so pass it bare.
+`--agent-listen` and `--register-addr` must be identical. The latter is a bare
+`host:port`, not a URL. For a real deployment, advertise a routable address
+instead of `0.0.0.0`; the strict equality requirement prevents accidentally
+registering the raw vLLM port.
 
-### Flags
+### Strict inference contract
 
-| flag | default | notes |
-|---|---|---|
-| `--etcd-endpoints` | `127.0.0.1:2379` | comma-separated; also `ETCD_ENDPOINTS` |
-| `--etcd-namespace` | `""` | **must match** master's `--etcd_namespace` |
-| `--etcd-username` / `--etcd-password` | `""` | also `ETCD_USERNAME`/`ETCD_PASSWORD` |
-| `--vllm-url` | `http://127.0.0.1:18000` | local vLLM base URL |
-| `--register-addr` | derived | host:port the master dials, no scheme |
-| `--backend-type` | `vllm` | written into InstanceMetaInfo |
-| `--instance-type` | `DEFAULT` | keep DEFAULT for a single instance |
-| `--instance-name` | `vllm` | prefix for incarnation id / logs |
-| `--lease-ttl` | `6` | seconds (≈ 2× keepalive interval) |
-| `--keepalive-interval` | `2` | seconds between probe + lease refresh |
-| `--health-fail-threshold` | `3` | failed probes before deregister |
+xllm-service sends these headers on Chat/Completion traffic:
 
-## Verify
+| Header | Meaning |
+| --- | --- |
+| `X-Request-UID` | globally stable request identity |
+| `X-Attempt-Seq` | attempt identity; duplicate submission is rejected |
+| `X-Remaining-Deadline-Ms` | remaining local duration; zero/expired is rejected |
+
+The Agent exposes incarnation-scoped control endpoints:
+
+```text
+POST /v1/internal/attempt/query
+POST /v1/internal/attempt/cancel
+{"request_uid":"...","attempt_seq":0,"incarnation_id":"..."}
+```
+
+Only a terminal Query result whose `request_uid`, `attempt_seq` and
+`incarnation_id` exactly match the queried attempt, or an acknowledged Cancel
+fence for that identity, allows xllm-service to release an unresolved
+aggregated execution hold.
+
+Strict mode proxies only `/v1/chat/completions`, `/v1/completions`, and the
+read-only `/v1/models`. Other vLLM paths, including `/v1/messages`,
+`/v1/responses`, embeddings and vendor raw generation endpoints, return 404
+instead of bypassing the attempt ledger. They may be opened only together with
+their Service Adapter, API capability filter, deadline/cancel path and tests.
+
+### Health endpoints
+
+| Endpoint | Contract |
+| --- | --- |
+| `/livez` | Agent process is alive |
+| `/health`, `/readyz` | current incarnation is registered and accepting |
+
+## Provider profile
+
+The verified JSON contains five required sections: `runtime`, `model`,
+`topology`, `kv`, and `scheduler`. The Agent canonicalizes the complete profile
+and publishes its SHA-256 digest in both Descriptor and EngineState. It refuses
+unknown fate-binding modes, raw-ingress exposure, zero capacities and missing
+compatibility facts.
+
+The example is a schema sample, not a production attestation. In particular,
+model/tokenizer/template/renderer, KV layout/sharding, Connector and scheduler
+digests must be generated from the actual deployment.
+
+## Metrics and EngineState
+
+The Agent scrapes vLLM Prometheus metrics and preserves DP labels
+(`data_parallel_rank`, `dp_rank`, or `engine`). It publishes per-DP running,
+waiting, deferred, KV usage and admission credit. State quality is `FULL` only
+when all configured DP ranks are present; otherwise it is `PARTIAL`. Ratios are
+never summed across DP ranks.
+
+Heartbeats are sent to `/v1/internal/heartbeat`. Configure the same internal
+token on xllm-service and the Agent (`--internal-token` or
+`XLLM_INTERNAL_TOKEN`) and expose this endpoint only on a trusted network.
+Liveness remains lease-based; metrics failures do not rewrite the etcd key.
+
+## Legacy compatibility mode
+
+Omit `--provider-config` and `--agent-listen` to retain the old lease/aggregate
+metrics bridge:
 
 ```bash
-# instance appears (with a lease) and is reachable through xllm-service
-etcdctl get --prefix XLLM:DEFAULT:
-etcdctl lease list
-curl http://127.0.0.1:9998/v1/models           # -> backend model list
-
-# kill the sidecar; key disappears within lease-ttl, master logs removal
-kill <sidecar_pid> && sleep 7
-etcdctl get --prefix XLLM:DEFAULT:              # empty
+python -m vllm_sidecar.sidecar \
+  --vllm-url http://127.0.0.1:18000 \
+  --register-addr 127.0.0.1:18000 \
+  --etcd-endpoints 127.0.0.1:2379
 ```
 
-## Heartbeat (load metrics)
+This mode intentionally registers the raw vLLM address, has no attempt ledger,
+and publishes contract version 0. It is BEST_EFFORT compatibility only and
+must not be promoted to a strict V2 route.
 
-Alongside lease keepalive, the sidecar scrapes vLLM's Prometheus `/metrics` and
-POSTs a heartbeat to the master every `--heartbeat-interval` seconds:
+## Remaining validation
 
-    POST <xllm-service-url>/v1/internal/heartbeat
-    X-Internal-Token: <token>            # only if configured
-    {"name","incarnation_id","load_metrics":{...},"latency_metrics":{...}}
-
-The master reuses the same `handle_instance_heartbeat` path as the brpc backends:
-the JSON is parsed into a `proto::HeartbeatRequest` and feeds the scheduler's
-in-memory load metrics (which the master then publishes to `XLLM:LOADMETRICS:`
-for non-master nodes). Mapping (pinned to vLLM 0.21):
-
-| vLLM metric | heartbeat field |
-|---|---|
-| `vllm:num_requests_waiting` | `load_metrics.waiting_requests_num` |
-| `vllm:gpu_cache_usage_perc` | `load_metrics.gpu_cache_usage_perc` |
-| `vllm:time_to_first_token_seconds` | `latency_metrics.recent_max_ttft` (ms, interval avg) |
-| `vllm:time_per_output_token_seconds` | `latency_metrics.recent_max_tbt` (ms, interval avg) |
-
-Heartbeat is **metrics-only**: liveness stays with the lease. A `409` (unknown /
-stale incarnation) makes the sidecar re-register; a transient `/metrics` or POST
-failure is logged and skipped — the lease still holds the instance up.
-
-### Heartbeat flags
-
-| flag | default | notes |
-|---|---|---|
-| `--xllm-service-url` | `http://127.0.0.1:9998` | master HTTP base for `/v1/internal/heartbeat` |
-| `--internal-token` | `""` | `X-Internal-Token`; must match master `--internal_api_token`; also `XLLM_INTERNAL_TOKEN` |
-| `--heartbeat-interval` | `3` | seconds between metrics heartbeats |
-| `--metrics-url` | `<vllm-url>/metrics` | vLLM Prometheus endpoint |
-
-## Scope
-
-Registration is lease-based (liveness); heartbeat adds load/latency metrics for
-load-aware routing. The KV-cache event bridge (CacheAwareRouting) and
-disaggregated-PD linking remain out of scope.
-
-
-
-## Internal heartbeat security
-
-The sidecar posts load metrics to `/v1/internal/heartbeat`. Expose this endpoint only on trusted networks. For production deployments, set `--internal_api_token` on the master and pass the same value to the sidecar with `--internal-token` or `XLLM_INTERNAL_TOKEN`.
+CPU verification proves the bounded control logic and loopback HTTP behavior.
+Before `VERIFIED`, run real vLLM-Ascend/NPU conformance, raw-ingress network
+isolation checks, SIGKILL/fate-binding tests, etcd lease-loss/restart injection,
+deadline/cancel resource-release tests and sustained load/capacity validation.
