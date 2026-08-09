@@ -86,6 +86,42 @@ cc_library(
 
 cc_library(
   NAME
+    kv_shadow_index
+  HDRS
+    kv_shadow_index.h
+  SRCS
+    kv_shadow_index.cpp
+  DEPS
+    proto_xllm
+)
+
+cc_library(
+  NAME
+    kv_state_outbox
+  HDRS
+    kv_state_outbox.h
+  SRCS
+    kv_state_outbox.cpp
+  DEPS
+    :provider_contract
+    proto_xllm
+)
+
+cc_library(
+  NAME
+    kv_state_replica
+  HDRS
+    kv_state_replica.h
+  SRCS
+    kv_state_replica.cpp
+  DEPS
+    :kv_shadow_index
+    :provider_contract
+    proto_xllm
+)
+
+cc_library(
+  NAME
     link_reconciler
   HDRS
     link_reconciler.h

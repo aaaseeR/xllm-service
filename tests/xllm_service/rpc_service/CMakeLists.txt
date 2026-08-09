@@ -37,3 +37,25 @@ cc_test(
     GTest::gtest_main
     brpc-static
 )
+
+cc_test(
+  NAME
+    kv_state_stream_client_test
+  SRCS
+    kv_state_stream_client_test.cpp
+  DEPS
+    :kv_state_stream_client
+    GTest::gtest_main
+    brpc-static
+)
+
+cc_test(
+  NAME
+    kv_snapshot_client_test
+  SRCS
+    kv_snapshot_client_test.cpp
+  DEPS
+    :kv_snapshot_client
+    GTest::gtest_main
+    brpc-static
+)

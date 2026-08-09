@@ -20,6 +20,8 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
+#include <future>
 #include <limits>
 #include <unordered_set>
 
@@ -38,6 +40,8 @@ limitations under the License.
 #include "provider/execution_plan_builder.h"
 #include "provider/provider_adapter.h"
 #include "rpc_service/first_event_recovery_client.h"
+#include "rpc_service/kv_snapshot_client.h"
+#include "rpc_service/kv_state_stream_client.h"
 #include "rpc_service/state_stream_client.h"
 #include "scheduler/xllm_chat_parse_bridge.h"
 #include "tokenizer/tokenizer_factory.h"
@@ -74,6 +78,39 @@ xllm_service::provider::ReadinessControllerConfig readiness_config(
   return xllm_service::provider::ReadinessControllerConfig{
       .recovery_hold_ms = options.readiness_recovery_hold_ms(),
   };
+}
+
+xllm_service::provider::KVShadowIndexConfig kv_shadow_config(
+    const xllm_service::Options& options) {
+  return xllm_service::provider::KVShadowIndexConfig{
+      .max_engine_streams = options.kv_shadow_max_engine_streams(),
+      .max_index_entries = options.kv_shadow_max_entries(),
+      .max_index_bytes = options.kv_shadow_max_bytes(),
+      .max_recovery_events_per_engine = options.kv_shadow_max_recovery_events(),
+      .max_recovery_bytes_per_engine = options.kv_shadow_max_recovery_bytes(),
+      .max_snapshot_entries_per_engine =
+          options.kv_shadow_max_snapshot_entries(),
+      .max_snapshot_bytes_per_engine = options.kv_shadow_max_snapshot_bytes(),
+      .event_ttl_ms = options.kv_shadow_event_ttl_ms(),
+      .recovery_timeout_ms = options.kv_shadow_recovery_timeout_ms(),
+  };
+}
+
+bool matches_current_kv_engine(const xllm_service::InstanceMetaInfo& info,
+                               const xllm::proto::KVStreamIdentity& identity) {
+  const xllm::proto::ProviderEngineKey& engine = identity.engine();
+  if (info.name.empty() || info.name != engine.engine_uid() ||
+      info.incarnation_id != engine.incarnation_id() ||
+      info.provider_id != engine.provider_id() ||
+      info.provider_profile_digest != engine.profile_digest() ||
+      !info.provider_descriptor.has_value() ||
+      info.provider_descriptor->model().model_revision() !=
+          identity.model_revision()) {
+    return false;
+  }
+  // K0 intentionally accepts only the conservative profile namespace. K2
+  // replaces this with the canonical tenant/adapter namespace contract.
+  return identity.kv_namespace() == "profile:" + info.provider_profile_digest;
 }
 
 xllm::proto::ExecutionAttemptId execution_attempt(
@@ -273,6 +310,63 @@ Scheduler::Scheduler(const Options& options)
           .max_pending_link_states = options_.engine_registry_max_links(),
       },
       service_incarnation_id_);
+  if (options_.kv_state_max_subscribers() == 0 ||
+      options_.kv_state_max_pending_batches() == 0 ||
+      options_.kv_state_max_pending_events() == 0 ||
+      options_.kv_state_max_pending_bytes() == 0 ||
+      options_.kv_state_max_delivery_batches() == 0 ||
+      options_.kv_state_max_delivery_bytes() == 0 ||
+      options_.kv_state_publish_interval_ms() <= 0 ||
+      options_.kv_state_rpc_timeout_ms() <= 0 ||
+      options_.kv_shadow_max_engine_streams() == 0 ||
+      options_.kv_shadow_max_entries() == 0 ||
+      options_.kv_shadow_max_bytes() == 0 ||
+      options_.kv_shadow_max_recovery_events() == 0 ||
+      options_.kv_shadow_max_recovery_bytes() == 0 ||
+      options_.kv_shadow_max_snapshot_entries() == 0 ||
+      options_.kv_shadow_max_snapshot_bytes() == 0 ||
+      options_.kv_shadow_event_ttl_ms() == 0 ||
+      options_.kv_shadow_recovery_timeout_ms() == 0 ||
+      options_.kv_snapshot_recovery_interval_ms() <= 0 ||
+      options_.kv_snapshot_recovery_batch_size() == 0 ||
+      options_.kv_snapshot_recovery_max_concurrency() == 0 ||
+      options_.kv_snapshot_recovery_max_concurrency() >
+          options_.kv_snapshot_recovery_batch_size() ||
+      options_.kv_snapshot_max_pages_per_recovery() == 0 ||
+      options_.kv_snapshot_page_entries() == 0 ||
+      options_.kv_snapshot_page_bytes() == 0 ||
+      options_.kv_snapshot_page_bytes() >
+          std::numeric_limits<size_t>::max() - 4096 ||
+      options_.kv_snapshot_page_generation_ms() == 0 ||
+      options_.kv_snapshot_rpc_timeout_ms() <= 0) {
+    LOG(FATAL) << "KV State publisher configuration is invalid.";
+  }
+  kv_shadow_index_ =
+      std::make_unique<provider::KVShadowIndex>(kv_shadow_config(options_));
+  kv_state_outbox_ = std::make_unique<provider::KVStateOutbox>(
+      provider::KVStateOutboxConfig{
+          .max_subscribers = options_.kv_state_max_subscribers(),
+          .max_pending_batches_per_subscriber =
+              options_.kv_state_max_pending_batches(),
+          .max_pending_events_per_subscriber =
+              options_.kv_state_max_pending_events(),
+          .max_pending_bytes_per_subscriber =
+              options_.kv_state_max_pending_bytes(),
+          .max_delivery_batches = options_.kv_state_max_delivery_batches(),
+          .max_delivery_bytes = options_.kv_state_max_delivery_bytes(),
+      },
+      service_incarnation_id_);
+  kv_state_replica_ = std::make_unique<provider::KVStateReplica>(
+      provider::KVStateReplicaConfig{
+          .max_engine_batches = options_.kv_state_max_delivery_batches(),
+          .max_serialized_bytes = options_.kv_state_max_delivery_bytes(),
+      },
+      kv_shadow_index_.get());
+  if (!kv_state_replica_->set_master(is_master_service_
+                                         ? service_incarnation_id_
+                                         : observed_master_incarnation)) {
+    LOG(FATAL) << "Failed to initialize KV State replica view.";
+  }
   const provider::ContractResult state_registry_result =
       instance_mgr_->set_engine_state_master(is_master_service_
                                                  ? service_incarnation_id_
@@ -312,6 +406,10 @@ Scheduler::Scheduler(const Options& options)
 
   state_stream_thread_ = std::make_unique<std::thread>(
       &Scheduler::run_state_stream_publisher, this);
+  kv_state_thread_ =
+      std::make_unique<std::thread>(&Scheduler::run_kv_state_publisher, this);
+  kv_snapshot_thread_ =
+      std::make_unique<std::thread>(&Scheduler::run_kv_snapshot_recovery, this);
 
   execution_hold_cleanup_thread_ = std::make_unique<std::thread>(
       &Scheduler::run_execution_hold_cleanup, this);
@@ -324,9 +422,17 @@ Scheduler::~Scheduler() {
   refresh_readiness();
   exited_.store(true, std::memory_order_release);
   state_stream_cv_.notify_all();
+  kv_state_cv_.notify_all();
+  kv_snapshot_cv_.notify_all();
   etcd_client_->stop_watch();
   if (state_stream_thread_ != nullptr && state_stream_thread_->joinable()) {
     state_stream_thread_->join();
+  }
+  if (kv_state_thread_ != nullptr && kv_state_thread_->joinable()) {
+    kv_state_thread_->join();
+  }
+  if (kv_snapshot_thread_ != nullptr && kv_snapshot_thread_->joinable()) {
+    kv_snapshot_thread_->join();
   }
   if (heartbeat_thread_ != nullptr && heartbeat_thread_->joinable()) {
     heartbeat_thread_->join();
@@ -555,6 +661,10 @@ void Scheduler::activate_as_master() {
   }
   state_stream_outbox_->require_full_for_all();
   state_stream_cv_.notify_all();
+  if (!kv_state_replica_->set_master(service_incarnation_id_)) {
+    LOG(ERROR) << "Failed to fence KV State on master activation.";
+  }
+  kv_state_cv_.notify_all();
 }
 
 void Scheduler::deactivate_as_master() {
@@ -565,6 +675,9 @@ void Scheduler::deactivate_as_master() {
   }
   global_kvcache_mgr_->set_as_follower();
   instance_mgr_->set_as_follower();
+  if (!kv_state_replica_->set_master("")) {
+    LOG(ERROR) << "Failed to fence KV State on master deactivation.";
+  }
 }
 
 bool Scheduler::refresh_state_stream_subscribers() {
@@ -588,6 +701,33 @@ bool Scheduler::refresh_state_stream_subscribers() {
       state_stream_outbox_->replace_subscribers(subscribers);
   if (!replaced.ok()) {
     LOG(ERROR) << "Failed to update State Stream subscribers: "
+               << replaced.message();
+    return false;
+  }
+  return true;
+}
+
+bool Scheduler::refresh_kv_state_subscribers() {
+  std::unordered_map<std::string, std::string> service_members;
+  if (!etcd_client_->get_prefix(ETCD_XSERVICE_KEY_PREFIX, &service_members)) {
+    return false;
+  }
+  std::vector<std::string> subscribers;
+  const provider::ContractResult resolved =
+      provider::resolve_state_stream_subscribers(
+          service_members,
+          options_.service_name(),
+          options_.kv_state_max_subscribers(),
+          &subscribers);
+  if (!resolved.ok()) {
+    LOG(ERROR) << "Failed to resolve KV State subscribers: "
+               << resolved.message();
+    return false;
+  }
+  const provider::ContractResult replaced =
+      kv_state_outbox_->replace_subscribers(subscribers);
+  if (!replaced.ok()) {
+    LOG(ERROR) << "Failed to update KV State subscribers: "
                << replaced.message();
     return false;
   }
@@ -748,6 +888,238 @@ void Scheduler::run_state_stream_publisher() {
   }
 }
 
+void Scheduler::run_kv_state_publisher() {
+  uint64_t last_subscriber_refresh_ms = 0;
+  while (!exited_.load(std::memory_order_acquire)) {
+    {
+      std::unique_lock<std::mutex> lock(kv_state_wait_mutex_);
+      kv_state_cv_.wait_for(
+          lock,
+          std::chrono::milliseconds(options_.kv_state_publish_interval_ms()),
+          [this]() { return exited_.load(std::memory_order_acquire); });
+    }
+    if (exited_.load(std::memory_order_acquire) ||
+        !is_master_service_.load(std::memory_order_acquire)) {
+      continue;
+    }
+
+    const uint64_t now_monotonic_ms = monotonic_time_ms();
+    if (last_subscriber_refresh_ms == 0 ||
+        now_monotonic_ms < last_subscriber_refresh_ms ||
+        now_monotonic_ms - last_subscriber_refresh_ms >= 1000) {
+      std::string master_address;
+      std::string master_incarnation;
+      const bool still_master =
+          etcd_client_->get(ETCD_MASTER_SERVICE_KEY, &master_address) &&
+          etcd_client_->get(ETCD_MASTER_SERVICE_INCARNATION_KEY,
+                            &master_incarnation) &&
+          master_address == options_.service_name() &&
+          master_incarnation == service_incarnation_id_;
+      if (!still_master) {
+        deactivate_as_master();
+        instance_mgr_->set_engine_state_master(master_incarnation);
+        kv_state_replica_->set_master(master_incarnation);
+        continue;
+      }
+      refresh_kv_state_subscribers();
+      last_subscriber_refresh_ms = now_monotonic_ms;
+    }
+
+    const std::vector<std::string> ready =
+        kv_state_outbox_->ready_subscribers();
+    std::vector<KVStateStreamPush> pushes;
+    pushes.reserve(ready.size());
+    for (const std::string& subscriber : ready) {
+      KVStateStreamPush push;
+      push.subscriber = subscriber;
+      push.timeout_ms =
+          static_cast<uint64_t>(options_.kv_state_rpc_timeout_ms());
+      if (kv_state_outbox_->begin_delivery(
+              subscriber, now_monotonic_ms, &push.batch)) {
+        pushes.emplace_back(std::move(push));
+      }
+    }
+    const std::vector<KVStateStreamPushResult> results =
+        push_kv_state_stream_batches(pushes);
+    for (size_t index = 0; index < results.size(); ++index) {
+      kv_state_outbox_->complete_delivery(pushes[index].subscriber,
+                                          results[index].ok);
+      if (!results[index].ok) {
+        LOG(WARNING) << "KV State Stream push failed for "
+                     << pushes[index].subscriber << ": "
+                     << results[index].message;
+      }
+    }
+  }
+}
+
+bool Scheduler::recover_kv_snapshot(
+    const xllm::proto::KVStreamIdentity& identity) {
+  const InstanceMetaInfo info =
+      instance_mgr_->get_instance_info(identity.engine().engine_uid());
+  if (!matches_current_kv_engine(info, identity)) {
+    return false;
+  }
+  const std::shared_ptr<brpc::Channel> channel =
+      instance_mgr_->get_channel(identity.engine().engine_uid());
+  if (channel == nullptr) {
+    return false;
+  }
+  const uint64_t started_ms = monotonic_time_ms();
+  if (kv_shadow_index_->begin_recovery(identity, started_ms).code !=
+      provider::KVApplyCode::RECOVERING) {
+    return false;
+  }
+
+  xllm::proto::KVCacheSnapshotRequest request;
+  request.set_contract_version(provider::kProviderContractVersion);
+  *request.mutable_identity() = identity;
+  request.set_max_entries(options_.kv_snapshot_page_entries());
+  request.set_max_bytes(options_.kv_snapshot_page_bytes());
+  request.set_max_generation_time_ms(options_.kv_snapshot_page_generation_ms());
+
+  size_t total_entries = 0;
+  size_t total_bytes = 0;
+  const size_t max_response_bytes =
+      static_cast<size_t>(options_.kv_snapshot_page_bytes()) + 4096;
+  for (size_t page_index = 0;
+       page_index < options_.kv_snapshot_max_pages_per_recovery();
+       ++page_index) {
+    if (exited_.load(std::memory_order_acquire)) {
+      kv_shadow_index_->abort_recovery(identity);
+      return false;
+    }
+    KVSnapshotPageQuery query;
+    query.channel = channel;
+    query.request = request;
+    query.max_response_bytes = max_response_bytes;
+    query.timeout_ms =
+        static_cast<uint64_t>(options_.kv_snapshot_rpc_timeout_ms());
+    const std::vector<KVSnapshotPageResult> queried =
+        query_kv_snapshot_pages({query});
+    if (queried.size() != 1 || !queried[0].ok || !queried[0].page.has_value()) {
+      kv_shadow_index_->abort_recovery(identity);
+      return false;
+    }
+    const xllm::proto::KVCacheSnapshotPage& page = *queried[0].page;
+    if (page.status() != xllm::proto::KV_SNAPSHOT_STATUS_OK ||
+        static_cast<size_t>(page.entries_size()) >
+            options_.kv_shadow_max_snapshot_entries() - total_entries ||
+        page.serialized_bytes() >
+            options_.kv_shadow_max_snapshot_bytes() - total_bytes) {
+      kv_shadow_index_->abort_recovery(identity);
+      return false;
+    }
+    total_entries += static_cast<size_t>(page.entries_size());
+    total_bytes += static_cast<size_t>(page.serialized_bytes());
+    const provider::KVApplyResult applied =
+        kv_shadow_index_->apply_snapshot_page(page, monotonic_time_ms());
+    if (applied.code == provider::KVApplyCode::REJECTED ||
+        applied.code == provider::KVApplyCode::SNAPSHOT_REQUIRED) {
+      kv_shadow_index_->abort_recovery(identity);
+      return false;
+    }
+    if (page.done()) {
+      return applied.code == provider::KVApplyCode::APPLIED;
+    }
+    if (page.next_cursor() <= request.cursor()) {
+      kv_shadow_index_->abort_recovery(identity);
+      return false;
+    }
+    request.set_snapshot_id(page.snapshot_id());
+    request.set_cursor(page.next_cursor());
+  }
+  kv_shadow_index_->abort_recovery(identity);
+  return false;
+}
+
+void Scheduler::run_kv_snapshot_recovery() {
+  std::unordered_map<std::string, uint64_t> retry_after_ms;
+  size_t round_robin_cursor = 0;
+  while (!exited_.load(std::memory_order_acquire)) {
+    {
+      std::unique_lock<std::mutex> lock(kv_snapshot_wait_mutex_);
+      kv_snapshot_cv_.wait_for(
+          lock,
+          std::chrono::milliseconds(
+              options_.kv_snapshot_recovery_interval_ms()),
+          [this]() { return exited_.load(std::memory_order_acquire); });
+    }
+    if (exited_.load(std::memory_order_acquire)) {
+      continue;
+    }
+    const uint64_t now_monotonic_ms = monotonic_time_ms();
+    kv_shadow_index_->expire(now_monotonic_ms);
+    const std::vector<xllm::proto::KVStreamIdentity> identities =
+        kv_shadow_index_->snapshot_required();
+    if (identities.empty()) {
+      retry_after_ms.clear();
+      round_robin_cursor = 0;
+      continue;
+    }
+    std::unordered_set<std::string> current_keys;
+    current_keys.reserve(identities.size());
+    for (const xllm::proto::KVStreamIdentity& identity : identities) {
+      current_keys.emplace(identity.SerializeAsString());
+    }
+    for (auto retry = retry_after_ms.begin(); retry != retry_after_ms.end();) {
+      if (current_keys.find(retry->first) == current_keys.end()) {
+        retry = retry_after_ms.erase(retry);
+      } else {
+        ++retry;
+      }
+    }
+
+    std::vector<xllm::proto::KVStreamIdentity> selected;
+    selected.reserve(options_.kv_snapshot_recovery_batch_size());
+    const size_t start = round_robin_cursor % identities.size();
+    for (size_t offset = 0;
+         offset < identities.size() &&
+         selected.size() < options_.kv_snapshot_recovery_batch_size();
+         ++offset) {
+      const xllm::proto::KVStreamIdentity& identity =
+          identities[(start + offset) % identities.size()];
+      const std::string key = identity.SerializeAsString();
+      const auto retry = retry_after_ms.find(key);
+      if (retry != retry_after_ms.end() && now_monotonic_ms < retry->second) {
+        continue;
+      }
+      selected.emplace_back(identity);
+    }
+    round_robin_cursor =
+        (start + std::max<size_t>(selected.size(), 1)) % identities.size();
+
+    const size_t concurrency = options_.kv_snapshot_recovery_max_concurrency();
+    for (size_t batch_begin = 0; batch_begin < selected.size();
+         batch_begin += concurrency) {
+      const size_t batch_end =
+          std::min(selected.size(), batch_begin + concurrency);
+      std::vector<std::future<bool>> recoveries;
+      recoveries.reserve(batch_end - batch_begin);
+      for (size_t index = batch_begin; index < batch_end; ++index) {
+        recoveries.emplace_back(std::async(
+            std::launch::async, [this, identity = selected[index]]() {
+              return recover_kv_snapshot(identity);
+            }));
+      }
+      for (size_t index = batch_begin; index < batch_end; ++index) {
+        const std::string key = selected[index].SerializeAsString();
+        if (recoveries[index - batch_begin].get()) {
+          retry_after_ms.erase(key);
+          continue;
+        }
+        const size_t jitter_bucket = std::hash<std::string>{}(key) % 3;
+        retry_after_ms.insert_or_assign(
+            key,
+            now_monotonic_ms +
+                static_cast<uint64_t>(
+                    options_.kv_snapshot_recovery_interval_ms()) *
+                    (3 + jitter_bucket));
+      }
+    }
+  }
+}
+
 void Scheduler::update_master_service_heartbeat() {
   while (!exited_) {
     std::this_thread::sleep_for(std::chrono::seconds(kHeartbeatInterval));
@@ -865,6 +1237,67 @@ provider::ContractResult Scheduler::handle_engine_state_batch(
       batch, monotonic_time_ms(), applied);
 }
 
+provider::KVApplyResult Scheduler::handle_kv_event_batch(
+    const xllm::proto::KVEventBatch& batch) {
+  if (exited_.load(std::memory_order_acquire) ||
+      !is_master_service_.load(std::memory_order_acquire)) {
+    return provider::KVApplyResult{
+        .code = provider::KVApplyCode::REJECTED,
+        .reason = "KV events are accepted only by the current master",
+    };
+  }
+  const InstanceMetaInfo info =
+      instance_mgr_->get_instance_info(batch.identity().engine().engine_uid());
+  if (!matches_current_kv_engine(info, batch.identity())) {
+    return provider::KVApplyResult{
+        .code = provider::KVApplyCode::REJECTED,
+        .reason = "KV event identity is not a current registered Engine",
+    };
+  }
+
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
+  const provider::KVApplyResult applied =
+      kv_shadow_index_->apply_event_batch(batch, now_monotonic_ms);
+  if (applied.code == provider::KVApplyCode::REJECTED) {
+    return applied;
+  }
+  const provider::ContractResult queued =
+      kv_state_outbox_->enqueue(batch, now_monotonic_ms);
+  if (!queued.ok()) {
+    // The master must not retain KV credit that it could not replicate. A
+    // later Engine retry or keepalive will drive snapshot recovery without
+    // affecting the independent load plane.
+    kv_shadow_index_->reset_all();
+    return provider::KVApplyResult{
+        .code = provider::KVApplyCode::REJECTED,
+        .reason = queued.message(),
+        .accepted_through_event_seq = applied.accepted_through_event_seq,
+    };
+  }
+  kv_state_cv_.notify_all();
+  if (applied.code == provider::KVApplyCode::SNAPSHOT_REQUIRED) {
+    kv_snapshot_cv_.notify_all();
+  }
+  return applied;
+}
+
+provider::KVApplyResult Scheduler::handle_kv_state_batch(
+    const xllm::proto::KVStateBatch& batch) {
+  if (exited_.load(std::memory_order_acquire) ||
+      is_master_service_.load(std::memory_order_acquire)) {
+    return provider::KVApplyResult{
+        .code = provider::KVApplyCode::REJECTED,
+        .reason = "KV State batches are accepted only by Service replicas",
+    };
+  }
+  const provider::KVApplyResult applied =
+      kv_state_replica_->apply(batch, monotonic_time_ms());
+  if (applied.code == provider::KVApplyCode::SNAPSHOT_REQUIRED) {
+    kv_snapshot_cv_.notify_all();
+  }
+  return applied;
+}
+
 void Scheduler::handle_master_service_watch(const etcd::Response& response,
                                             const uint64_t& prefix_len) {
   static_cast<void>(prefix_len);
@@ -899,6 +1332,7 @@ void Scheduler::handle_master_identity_watch(const etcd::Response& response,
       master_address.empty() || master_incarnation.empty()) {
     deactivate_as_master();
     instance_mgr_->set_engine_state_master("");
+    kv_state_replica_->set_master("");
     return;
   }
   if (master_address == options_.service_name() &&
@@ -912,6 +1346,9 @@ void Scheduler::handle_master_identity_watch(const etcd::Response& response,
   if (!result.ok()) {
     LOG(ERROR) << "Failed to update Engine State Registry master view: "
                << result.message();
+  }
+  if (!kv_state_replica_->set_master(master_incarnation)) {
+    LOG(ERROR) << "Failed to update KV State master view.";
   }
 }
 

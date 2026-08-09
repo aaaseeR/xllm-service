@@ -121,6 +121,58 @@ class Options {
 
   PROPERTY(int32_t, state_stream_rpc_timeout_ms) = 200;
 
+  // The KV observation plane has independent bounds and worker timing so
+  // cache churn or a slow replica cannot delay Engine health/load state.
+  PROPERTY(size_t, kv_state_max_subscribers) = 256;
+
+  PROPERTY(size_t, kv_state_max_pending_batches) = 4096;
+
+  PROPERTY(size_t, kv_state_max_pending_events) = 16384;
+
+  PROPERTY(size_t, kv_state_max_pending_bytes) = 16 * 1024 * 1024;
+
+  PROPERTY(size_t, kv_state_max_delivery_batches) = 64;
+
+  PROPERTY(size_t, kv_state_max_delivery_bytes) = 1024 * 1024;
+
+  PROPERTY(int32_t, kv_state_publish_interval_ms) = 20;
+
+  PROPERTY(int32_t, kv_state_rpc_timeout_ms) = 200;
+
+  PROPERTY(size_t, kv_shadow_max_engine_streams) = 4096;
+
+  PROPERTY(size_t, kv_shadow_max_entries) = 1048576;
+
+  PROPERTY(size_t, kv_shadow_max_bytes) = 512 * 1024 * 1024;
+
+  PROPERTY(size_t, kv_shadow_max_recovery_events) = 8192;
+
+  PROPERTY(size_t, kv_shadow_max_recovery_bytes) = 8 * 1024 * 1024;
+
+  PROPERTY(size_t, kv_shadow_max_snapshot_entries) = 262144;
+
+  PROPERTY(size_t, kv_shadow_max_snapshot_bytes) = 128 * 1024 * 1024;
+
+  PROPERTY(uint64_t, kv_shadow_event_ttl_ms) = 30000;
+
+  PROPERTY(uint64_t, kv_shadow_recovery_timeout_ms) = 30000;
+
+  PROPERTY(int32_t, kv_snapshot_recovery_interval_ms) = 50;
+
+  PROPERTY(size_t, kv_snapshot_recovery_batch_size) = 8;
+
+  PROPERTY(size_t, kv_snapshot_recovery_max_concurrency) = 4;
+
+  PROPERTY(size_t, kv_snapshot_max_pages_per_recovery) = 256;
+
+  PROPERTY(uint32_t, kv_snapshot_page_entries) = 1024;
+
+  PROPERTY(uint64_t, kv_snapshot_page_bytes) = 1024 * 1024;
+
+  PROPERTY(uint64_t, kv_snapshot_page_generation_ms) = 50;
+
+  PROPERTY(int32_t, kv_snapshot_rpc_timeout_ms) = 200;
+
   // scheduler options
   PROPERTY(std::string, load_balance_policy);
 

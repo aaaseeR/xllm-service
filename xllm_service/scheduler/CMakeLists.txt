@@ -61,6 +61,11 @@ cc_library(
     :client_disconnect_monitor
     :deepseek_v4_cpp_chat_template
     :first_event_recovery_client
+    :kv_shadow_index
+    :kv_snapshot_client
+    :kv_state_outbox
+    :kv_state_replica
+    :kv_state_stream_client
     :model_type
     :provider_registry
     :readiness_controller

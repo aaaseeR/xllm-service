@@ -22,17 +22,17 @@ B6-B10 是完整 V2 首个交付版本的后半程开发门，不是独立产品
 通过后才能标记 `CPU_VERIFIED`。最终 `VERIFIED` 还要求对应 NPU、真实 P/D/etcd、
 故障注入和容量门禁通过；`CPU_VERIFIED` 不得改写为生产硬件已验证。
 
-当前总状态：`IN_PROGRESS`。B6 仓库内代码与 CPU 门已完成，平台 branch protection
-和 NPU 保持 pending；B7 正在实现。B7-B10 的范围和 DoD 已冻结，禁止用后续文档
-静默缩小。
+当前总状态：`IN_PROGRESS`。B6、B7 仓库内代码与 CPU 门已完成，平台 branch
+protection、真实 cluster 和 NPU 保持 pending；B8 正在实现。B8-B10 的范围和 DoD
+已冻结，禁止用后续文档静默缩小。
 
 ## 门级范围
 
 | 开发门 | 权威设计范围 | 必须交付的生产能力 | 当前状态 |
 | --- | --- | --- | --- |
 | V2-B6 | 00 §4、02 G-1 测试底座、11 硬件感知边界 | 真正生效的 pin/CPU 合入入口；device-neutral KV/HBM 资源契约；xLLM simulated HBM test backend；容量、block 地址/所有权、内容/checksum、OOM/碎片、并发与故障回收门禁 | CPU_VERIFIED / PLATFORM_AND_NPU_PENDING；见 [SIMULATED_HBM_STATUS.md](./SIMULATED_HBM_STATUS.md) |
-| V2-B7 | 08 V2-K0 | Engine block 真源产生 KV store/remove/clear 事件；独立 KV lane；incarnation/cache epoch/event sequence；有界 shadow index；gap 后分页 snapshot 恢复和对账；只观测不影响路由 | PLANNED |
-| V2-B8 | 08 V2-K1 | 统一候选过滤后的 HBM P/D Prefix + load 联合评分；least-load/top-prefix shortlist；pending-work、survival/residence credit；按 bucket 灰度；UNKNOWN 或恢复中自动 load-only | PLANNED |
+| V2-B7 | 08 V2-K0 | Engine block 真源产生 KV store/remove/clear 事件；独立 KV lane；incarnation/cache epoch/event sequence；有界 shadow index；gap 后分页 snapshot 恢复和对账；只观测不影响路由 | CPU_VERIFIED / NPU_AND_CLUSTER_PENDING；见 [B7_K0_KV_SHADOW_STATUS.md](./B7_K0_KV_SHADOW_STATUS.md) |
+| V2-B8 | 08 V2-K1 | 统一候选过滤后的 HBM P/D Prefix + load 联合评分；least-load/top-prefix shortlist；pending-work、survival/residence credit；按 bucket 灰度；UNKNOWN 或恢复中自动 load-only | IN_PROGRESS |
 | V2-B9 | 09 | 每 Service/ModelPool 有界队列；request/token/byte/tenant 硬上限；priority band、tenant flow 公平和 flow 内 FCFS/EDF；整池饱和门；按 capability 选择 REMOTE_PD、LOCAL_PREFILL_DECODE、PREFILL_ONLY | PLANNED |
 | V2-B10 | 08 V2-K2、完整 09/11、00 §2.1 | 多模型隔离；优先级/公平与 KV 选择联合；可观测低层 shadow credit；双 Provider 最终 conformance；容量/故障/回退矩阵；完整支持矩阵和 V2 代码完成口径 | PLANNED |
 

@@ -42,6 +42,32 @@ target_link_libraries(state_stream_client PRIVATE brpc-static)
 
 cc_library(
   NAME
+  kv_state_stream_client
+  HDRS
+    kv_state_stream_client.h
+  SRCS
+    kv_state_stream_client.cpp
+  DEPS
+    :provider_contract
+    proto::proto_rpc_service
+)
+target_link_libraries(kv_state_stream_client PRIVATE brpc-static)
+
+cc_library(
+  NAME
+  kv_snapshot_client
+  HDRS
+    kv_snapshot_client.h
+  SRCS
+    kv_snapshot_client.cpp
+  DEPS
+    :provider_contract
+    proto_xllm
+)
+target_link_libraries(kv_snapshot_client PRIVATE brpc-static)
+
+cc_library(
+  NAME
   xllm_rpc_service
   HDRS
     service.h
@@ -50,6 +76,7 @@ cc_library(
   DEPS
     :common
     :disagg_generation_adapter
+    :kv_shadow_index
     :scheduler
     absl::random_random
     absl::strings

@@ -25,6 +25,7 @@ limitations under the License.
 #include "common/xllm/output.h"
 #include "common/xllm/status.h"
 #include "completion.pb.h"
+#include "provider/kv_shadow_index.h"
 #include "provider/provider_contract.h"
 #include "xllm_rpc_service.pb.h"
 
@@ -43,6 +44,9 @@ class XllmRpcServiceImpl final {
   provider::ContractResult push_engine_state(
       const xllm::proto::StateBatch& batch,
       bool* applied);
+  provider::KVApplyResult push_kv_events(
+      const xllm::proto::KVEventBatch& batch);
+  provider::KVApplyResult push_kv_state(const xllm::proto::KVStateBatch& batch);
 
   InstanceMetaInfo get_instance_info(const std::string& instance_name);
 
@@ -98,6 +102,16 @@ class XllmRpcService : public proto::XllmRpcService {
                                const xllm::proto::StateBatch* req,
                                proto::Status* resp,
                                google::protobuf::Closure* done) override;
+
+  virtual void PushKVEvents(google::protobuf::RpcController* cntl_base,
+                            const xllm::proto::KVEventBatch* req,
+                            proto::Status* resp,
+                            google::protobuf::Closure* done) override;
+
+  virtual void PushKVState(google::protobuf::RpcController* cntl_base,
+                           const xllm::proto::KVStateBatch* req,
+                           proto::Status* resp,
+                           google::protobuf::Closure* done) override;
 
   virtual void GetInstanceInfo(google::protobuf::RpcController* cntl_base,
                                const proto::InstanceID* req,

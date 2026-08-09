@@ -43,6 +43,16 @@ provider::ContractResult XllmRpcServiceImpl::push_engine_state(
   return scheduler_->handle_engine_state_batch(batch, applied);
 }
 
+provider::KVApplyResult XllmRpcServiceImpl::push_kv_events(
+    const xllm::proto::KVEventBatch& batch) {
+  return scheduler_->handle_kv_event_batch(batch);
+}
+
+provider::KVApplyResult XllmRpcServiceImpl::push_kv_state(
+    const xllm::proto::KVStateBatch& batch) {
+  return scheduler_->handle_kv_state_batch(batch);
+}
+
 InstanceMetaInfo XllmRpcServiceImpl::get_instance_info(
     const std::string& instance_name) {
   return scheduler_->get_instance_info(instance_name);
@@ -133,6 +143,30 @@ void XllmRpcService::PushEngineState(google::protobuf::RpcController* cntl_base,
   } else if (!applied) {
     resp->set_status_msg("stale StateBatch ignored");
   }
+}
+
+void XllmRpcService::PushKVEvents(google::protobuf::RpcController* cntl_base,
+                                  const xllm::proto::KVEventBatch* req,
+                                  proto::Status* resp,
+                                  google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  const provider::KVApplyResult result =
+      xllm_rpc_service_impl_->push_kv_events(*req);
+  resp->set_ok(result.code != provider::KVApplyCode::REJECTED);
+  resp->set_status_msg(result.reason);
+}
+
+void XllmRpcService::PushKVState(google::protobuf::RpcController* cntl_base,
+                                 const xllm::proto::KVStateBatch* req,
+                                 proto::Status* resp,
+                                 google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  const provider::KVApplyResult result =
+      xllm_rpc_service_impl_->push_kv_state(*req);
+  // SNAPSHOT_REQUIRED is an acknowledged fail-closed state, not a transport
+  // retry request. Only malformed or stale-master batches are rejected.
+  resp->set_ok(result.code != provider::KVApplyCode::REJECTED);
+  resp->set_status_msg(result.reason);
 }
 
 void XllmRpcService::GetStaticDecodeList(

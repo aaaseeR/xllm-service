@@ -189,6 +189,8 @@ service XllmRpcService {
   rpc GetInstanceInfo(InstanceID) returns (InstanceMetaInfo) {}
   rpc Heartbeat(HeartbeatRequest) returns (Status) {}
   rpc PushEngineState(xllm.proto.StateBatch) returns (Status) {}
+  rpc PushKVEvents(xllm.proto.KVEventBatch) returns (Status) {}
+  rpc PushKVState(xllm.proto.KVStateBatch) returns (Status) {}
   rpc GetStaticDecodeList(InstanceID) returns (InstanceIDs) {}
   rpc GetStaticPrefillList(InstanceID) returns (InstanceIDs) {}
 

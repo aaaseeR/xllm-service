@@ -42,6 +42,36 @@ cc_test(
 
 cc_test(
   NAME
+    kv_shadow_index_test
+  SRCS
+    kv_shadow_index_test.cpp
+  DEPS
+    :kv_shadow_index
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    kv_state_outbox_test
+  SRCS
+    kv_state_outbox_test.cpp
+  DEPS
+    :kv_state_outbox
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    kv_state_replica_test
+  SRCS
+    kv_state_replica_test.cpp
+  DEPS
+    :kv_state_replica
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     link_reconciler_test
   SRCS
     link_reconciler_test.cpp

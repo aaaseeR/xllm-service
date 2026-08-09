@@ -31,6 +31,9 @@ limitations under the License.
 #include "loadbalance_policy/loadbalance_policy.h"
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
+#include "provider/kv_shadow_index.h"
+#include "provider/kv_state_outbox.h"
+#include "provider/kv_state_replica.h"
 #include "provider/provider_registry.h"
 #include "provider/readiness_controller.h"
 #include "provider/state_stream_outbox.h"
@@ -70,6 +73,11 @@ class Scheduler final {
   provider::ContractResult handle_engine_state_batch(
       const xllm::proto::StateBatch& batch,
       bool* applied);
+
+  provider::KVApplyResult handle_kv_event_batch(
+      const xllm::proto::KVEventBatch& batch);
+  provider::KVApplyResult handle_kv_state_batch(
+      const xllm::proto::KVStateBatch& batch);
 
   void exited();
 
@@ -142,6 +150,10 @@ class Scheduler final {
   void run_state_stream_publisher();
   bool refresh_state_stream_subscribers();
   void try_apply_local_full_state(uint64_t now_monotonic_ms);
+  void run_kv_state_publisher();
+  bool refresh_kv_state_subscribers();
+  void run_kv_snapshot_recovery();
+  bool recover_kv_snapshot(const xllm::proto::KVStreamIdentity& identity);
 
   bool register_current_service();
 
@@ -245,6 +257,16 @@ class Scheduler final {
   std::mutex state_stream_wait_mutex_;
   std::condition_variable state_stream_cv_;
   std::unique_ptr<std::thread> state_stream_thread_;
+
+  std::unique_ptr<provider::KVShadowIndex> kv_shadow_index_;
+  std::unique_ptr<provider::KVStateOutbox> kv_state_outbox_;
+  std::unique_ptr<provider::KVStateReplica> kv_state_replica_;
+  std::mutex kv_state_wait_mutex_;
+  std::condition_variable kv_state_cv_;
+  std::unique_ptr<std::thread> kv_state_thread_;
+  std::mutex kv_snapshot_wait_mutex_;
+  std::condition_variable kv_snapshot_cv_;
+  std::unique_ptr<std::thread> kv_snapshot_thread_;
 
   std::unique_ptr<std::thread> heartbeat_thread_;
 

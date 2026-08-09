@@ -35,6 +35,15 @@ TEST(StateStreamProtocolTest, PushRpcUsesSharedStateBatchType) {
   EXPECT_EQ(method->input_type()->full_name(), "xllm.proto.StateBatch");
   EXPECT_EQ(method->output_type()->full_name(), "xllm_service.proto.Status");
 
+  const google::protobuf::MethodDescriptor* kv_events =
+      service->FindMethodByName("PushKVEvents");
+  const google::protobuf::MethodDescriptor* kv_state =
+      service->FindMethodByName("PushKVState");
+  ASSERT_NE(kv_events, nullptr);
+  ASSERT_NE(kv_state, nullptr);
+  EXPECT_EQ(kv_events->input_type()->full_name(), "xllm.proto.KVEventBatch");
+  EXPECT_EQ(kv_state->input_type()->full_name(), "xllm.proto.KVStateBatch");
+
   const google::protobuf::FieldDescriptor* heartbeat_state =
       proto::HeartbeatRequest::descriptor()->FindFieldByName("engine_state");
   ASSERT_NE(heartbeat_state, nullptr);
