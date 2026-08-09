@@ -19,8 +19,8 @@ limitations under the License.
 
 - Owner：xLLM Service V2
 - 状态：PARTIAL
-- 关联设计/Requirement ID：G3、F64、F65、F67、F78、D13、D15-D17、D41、D52
-- 最近验证基线：xLLM `8c8d68a3`；xllm-service `f475173`
+- 关联设计/Requirement ID：G3、F64、F65、F67、F78、D13、D15-D18、D34、D41、D52
+- 最近验证基线：xLLM `8c8d68a3`；xllm-service `48b6746`
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
@@ -28,13 +28,14 @@ limitations under the License.
 | Provider | Mode | Model/Profile | 支持状态 | 限制与证据 |
 | --- | --- | --- | --- | --- |
 | xLLM Native | `REMOTE_PD/LAYERWISE_PUSH` | contract v1 strict Descriptor | CPU_VERIFIED（Native 生产 + Service 消费核心） | Native P/D 注册真实 Descriptor，heartbeat 发布完整 per-DP EngineState；FULL/DELTA、fencing、TTL、Link READY 门禁通过 |
-| xLLM Native | legacy Descriptor-less | BEST_EFFORT | PARTIAL | 第一个有效 FULL 前保留滚动升级兼容；FULL 后不允许与 strict 单边混配 |
+| xLLM Native | legacy Descriptor-less | BEST_EFFORT | UNSUPPORTED | V2 路由统一 fail closed；完成相应 V2 Descriptor/EngineState producer 后才能加入候选 |
 | vLLM-Ascend | `AGGREGATED` | contract v1 strict Descriptor | PARTIAL | Registry 核心可表达；Provider Agent 尚未发布真实 EngineState |
 
 总体状态保持 PARTIAL：单一协议、xLLM Native 状态生产、权威成员与软状态分离、
 master 聚合与有界异步扇出、权威 master incarnation 分发、接收缓存和真实调度消费
-链路已经闭环；vLLM Agent 状态生产和观测失明迟滞尚未闭环；Link 周期对账的 Service
-侧已经闭环，真实 NPU handshake 故障矩阵待最终环境验证。
+链路已经闭环；`NORMAL/STATE_BLIND/REGISTRY_BLIND` 迟滞和统一候选过滤已完成 CPU
+核心，实际 admission/Query/probe 证据接线及独立 readiness 尚未闭环；Link 周期对账的
+Service 侧已经闭环，vLLM Agent 状态生产和真实 NPU handshake 故障矩阵待最终环境验证。
 
 ## 实现
 
@@ -44,14 +45,25 @@ master 聚合与有界异步扇出、权威 master incarnation 分发、接收�
 - `xllm_service/provider/engine_registry.*` 分离权威 Registry membership 与可丢失的
   State cache。状态更新不能创建或复活成员；同 engine UID 的新 incarnation 原子替换
   旧成员并清除旧状态/link，同时使当前 FULL 失效。
+- `ObservationController` 独立维护 NORMAL、STATE_BLIND、REGISTRY_BLIND。State 失明
+  使用同一 stale ratio 单位的 enter/exit 阈值与时间 hold；Registry 不可见立即进入短
+  宽限。冷副本未接受首个 FULL 时始终 fail closed，恢复 STATE_BLIND 必须接受当前
+  master FULL 并持续满足 exit hold。
+- `EngineRegistry::IsSchedulable` 在 NORMAL 使用 state/heartbeat/link hard TTL；
+  STATE_BLIND 宽限内只使用未被直连失败推翻的最后良好状态，宽限后要求 TTL 内的直接
+  成功证据；REGISTRY_BLIND 只允许短宽限且失败证据立即生效。证据表与成员同生命周期、
+  受 `max_members` 硬上限约束，不刷新负载年龄。
 - Receiver 只接受 Registry 当前 master incarnation 的单调 snapshot；切主后必须先
   FULL，DELTA 才可应用。FULL 必须精确覆盖当前成员，重复项、未知 enum、容量越界、
   Descriptor/compatibility proof 不一致全部 fail closed。
-- `InstanceMgr` 注册和权威删除维护 Registry membership；RPC
+- `InstanceMgr` 注册、incarnation 替换和最终移除维护 Registry membership；RPC
   `PushEngineState(StateBatch)` 经 `Scheduler` 写入缓存。RR、Provider 选择、静态 peer、
   CAR/SLO 指标、request bind、dispatch/retry 前复验和 readiness 均复用同一个
   `IsSchedulable` 事实。严格 Remote PD 额外要求两端可调度且 incarnation-scoped
   `LinkState=READY`。
+- Registry 可见性由启动全前缀读取及一秒周期读取独立维护；master key 缺失或变化只
+  更新 State Stream fencing identity，不再伪造成 REGISTRY_BLIND。切主后旧合法快照
+  可按实际新鲜度继续保守路由，但新 master DELTA 必须等待其 FULL。
 - 建链候选只按不可变 Descriptor 兼容矩阵生成，不能反向依赖 READY；路由候选才消费
   LinkState，避免“未 READY 所以不建链”的循环依赖。
 - heartbeat 可选携带 `EngineState`。master 校验成员 identity 后聚合状态；成员变化使
@@ -82,8 +94,9 @@ master 聚合与有界异步扇出、权威 master incarnation 分发、接收�
   恢复 follower 的 etcd 状态监听；旧 master 停止 State Stream 与 Link 对账发布。
 - 默认容量：4096 members、16384 links；state soft/hard TTL 为 3/10 秒，heartbeat
   hard TTL 与 link hard TTL 为 10 秒；publisher 最多 256 个订阅者、50ms publish tick、
-  1 秒周期 FULL、200ms 单 RPC 超时。无界集合、跨时钟 deadline 和软状态驱逐成员均被
-  禁止。
+  1 秒周期 FULL、200ms 单 RPC 超时。STATE_BLIND enter/exit ratio 为 0.5/0.2、hold 为
+  1/3 秒、宽限 10 秒、直接证据 TTL 3 秒；REGISTRY_BLIND 宽限 3 秒。无界集合、跨时钟
+  deadline 和软状态驱逐成员均被禁止。
 
 ## 需求与测试追踪
 
@@ -97,11 +110,13 @@ master 聚合与有界异步扇出、权威 master incarnation 分发、接收�
 | 并发和容量 | 16 线程 membership upsert、64 线程 outbox update、member/link/batch/subscriber 上限、非法配置 | N/A | N/A | PASS；关键并发用例连续 100 轮 |
 | master 聚合/发布 | 权威 FULL 精确覆盖、publish-age 重基、单在途、latest-map 合并、失败/溢出恢复 | N/A | 待多机压力 | PASS；Registry 10/10、Outbox 6/6 |
 | master identity | 旧地址 key 保持不变、独立 incarnation key、切主后 receiver 先等 FULL | N/A | 待真实 etcd 切主 | PASS（代码与协议）；真实 etcd 故障注入待补 |
+| 观测失明与恢复 | `ObservationControllerTest` 8 个阈值/hold/宽限/冷启动/时钟负向用例；`EngineRegistryTest` 覆盖首 FULL、master change、STATE_BLIND 直接证据、REGISTRY_BLIND 失败与到期、FULL 恢复和 Link 共用门禁 | N/A，无 tensor 逻辑 | 待多机断流/断 Registry | PASS；Controller 8/8、Registry 14/14 |
 | 生产接入 | RPC descriptor 复用 shared StateBatch；Scheduler/InstanceMgr/route 编译链接；BRPC loopback 成功、8 路并发、超时和非法输入 | N/A | 待多副本 loopback | PASS；client 4/4 |
 | xLLM Native 生产 | Descriptor 确定性/非法输入、P/D mode、per-DP 完整/空容量、缺失 capability、snapshot 序号不消耗、32 线程唯一序号；heartbeat field 7 | N/A，无 tensor 数值逻辑 | 待真实 CANN/SOC 版本、NPU block 账本与 P/D heartbeat | PASS；Native 6/6、协议 8/8，并发套件连续 100 轮 |
 
-本批验证：xllm-service Debug 三个生产服务目标编译通过，全量 CPU 测试 263/263；
-EngineRegistry 10/10；StateStreamOutbox 6/6；StateStreamClient BRPC loopback 4/4；
+本批验证：xllm-service Debug 三个生产服务目标编译、动态链接通过，全量 CPU 测试
+275/275；ObservationController 8/8；EngineRegistry 14/14；StateStreamOutbox 6/6；
+StateStreamClient BRPC loopback 4/4；
 LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 8/8。State Stream、
 Link 和 Native producer 的关键并发用例连续 100 轮通过。xLLM 的
 `native_provider_runtime.cpp`、`xservice_client.cpp`、`llm_master.cpp` 和
@@ -117,21 +132,24 @@ Link 和 Native producer 的关键并发用例连续 100 轮通过。xLLM 的
   单在途、有界 latest-map publisher；兼容的 master identity 分发；BRPC 并发扇出；滚动
   升级前置兼容；Link 周期差集、独立状态机、有界重试与 State Stream 发布；master
   降级后停止旧主发布和恢复 follower 监听；xLLM Native strict Descriptor 与真实
-  per-DP heartbeat EngineState 生产。
+  per-DP heartbeat EngineState 生产；三态观测迟滞、直接证据缓存、主身份与 Registry
+  可见性解耦、冷启动/descriptor-less fail closed 和 blind-mode Link 共用门禁。
 - 已知缺口/风险：vLLM Agent 尚未在真实 heartbeat 中生成完整 EngineState；xLLM 的
   NPU 硬件 runtime 版本目前只能发布平台与编译期 Torch 版本，仍需接入实际 CANN/驱动
   和 resolved cache dtype/SOC 身份。Link 状态已由真实 `LinkInstance` 结果生成，但尚未
-  做 NPU 多 P/D 故障矩阵；状态分发指标、`STATE_BLIND/REGISTRY_BLIND` 迟滞尚未实现。
+  做 NPU 多 P/D 故障矩阵；实际 admission/Query/轻量 probe 尚未向 Registry 写入直接
+  成败证据，HTTP/RPC listener 独立存活、`/livez`、`/readyz` 和 readiness recovery
+  hold 尚未实现。
   master identity 已保持旧 etcd 地址 value 不变，但仍需真实 etcd 故障注入覆盖两 key
   事件乱序与 lease 到期。部署必须为 P/D 提供一致、不可变的 `model_id`，避免本地模型
   路径被当作 revision 时产生保守的不兼容。
-- 回滚与兼容：proto 和 RPC 均 additive；第一个当前 FULL 到达前旧 runtime-state 路由
-  行为保持不变。FULL 生效后 strict 路由 fail closed，软状态超时只停止新分配，不执行
-  deregister、unlink 或在飞资源清理。
+- 回滚与兼容：proto 和 RPC 均 additive；V2 首版不保留第一个 FULL 前的旧 runtime-state
+  绕过，缺 Descriptor、缺首个 FULL 或不完整快照均 fail closed。软状态超时只停止新
+  分配，不执行 deregister、unlink 或在飞资源清理。
 - 性能、容量和观测证据：CPU 单测已覆盖有界内存、锁安全、慢订阅者超时、断连合并、
   FULL 恢复与并发调用，不代表生产扇出吞吐；仍需补长时间高频状态 soak 和分发指标。
-- 达到完整 G3 CPU_VERIFIED 仍需完成：vLLM Agent EngineState 生产、真实 etcd 切主故障
-  注入、`STATE_BLIND/REGISTRY_BLIND` 迟滞和 readiness 接入；xLLM 完整 CPU runtime
-  链接还需先修复上述既有 ProcessGroup 编译基线。
+- 达到完整 G3 CPU_VERIFIED 仍需完成：vLLM Agent EngineState 生产、实际直连证据接线、
+  独立 listener/readiness、真实 etcd 切主故障注入；xLLM 完整 CPU runtime 链接还需先
+  修复上述既有 ProcessGroup 编译基线。
 - 达到 VERIFIED 仍需完成：上述 CPU 门禁全部通过，并在 NPU 多 P/D、多 Service、切主、
   heartbeat 丢失、陈旧状态和 link 故障矩阵中验证。
