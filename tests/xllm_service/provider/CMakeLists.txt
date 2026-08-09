@@ -22,6 +22,16 @@ cc_test(
 
 cc_test(
   NAME
+    readiness_controller_test
+  SRCS
+    readiness_controller_test.cpp
+  DEPS
+    :readiness_controller
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     state_stream_outbox_test
   SRCS
     state_stream_outbox_test.cpp

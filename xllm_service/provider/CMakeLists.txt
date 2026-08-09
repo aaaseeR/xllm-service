@@ -63,6 +63,17 @@ cc_library(
 
 cc_library(
   NAME
+    readiness_controller
+  HDRS
+    readiness_controller.h
+  SRCS
+    readiness_controller.cpp
+  DEPS
+    :observation_controller
+)
+
+cc_library(
+  NAME
     state_stream_outbox
   HDRS
     state_stream_outbox.h

@@ -62,6 +62,7 @@ cc_library(
     :first_event_recovery_client
     :model_type
     :provider_registry
+    :readiness_controller
     :state_stream_outbox
     :common
     :etcd_client

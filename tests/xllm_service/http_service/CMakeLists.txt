@@ -2,6 +2,16 @@ include(cc_test)
 
 cc_test(
   NAME
+    health_response_test
+  SRCS
+    health_response_test.cpp
+  DEPS
+    :health_response
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     request_execution_context_test
   SRCS
     request_execution_context_test.cpp

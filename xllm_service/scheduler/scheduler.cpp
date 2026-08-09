@@ -69,6 +69,13 @@ xllm_service::provider::ExecutionHoldCleanupTable::Config execution_hold_config(
   };
 }
 
+xllm_service::provider::ReadinessControllerConfig readiness_config(
+    const xllm_service::Options& options) {
+  return xllm_service::provider::ReadinessControllerConfig{
+      .recovery_hold_ms = options.readiness_recovery_hold_ms(),
+  };
+}
+
 xllm::proto::ExecutionAttemptId execution_attempt(
     const xllm_service::Request& request) {
   xllm::proto::ExecutionAttemptId attempt;
@@ -143,6 +150,7 @@ namespace xllm_service {
 
 Scheduler::Scheduler(const Options& options)
     : options_(options),
+      readiness_controller_(readiness_config(options)),
       service_incarnation_id_(llm::new_uuid_v7()),
       execution_hold_cleanup_table_(
           std::make_unique<provider::ExecutionHoldCleanupTable>(
@@ -151,6 +159,10 @@ Scheduler::Scheduler(const Options& options)
           options.request_deadline_capacity())),
       client_disconnect_monitor_(std::make_shared<ClientDisconnectMonitor>(
           options.request_deadline_capacity())) {
+  if (!readiness_controller_.valid() ||
+      options_.readiness_check_interval_ms() == 0) {
+    LOG(FATAL) << "Invalid readiness configuration.";
+  }
   const std::optional<xllm::FirstEventRetryPolicy> first_event_retry_policy =
       xllm::FirstEventRetryPolicy::from_durations_ms(
           static_cast<uint64_t>(options_.p_first_event_retry_ub_ms()),
@@ -338,6 +350,11 @@ Scheduler::~Scheduler() {
 }
 
 bool Scheduler::schedule(std::shared_ptr<Request> request) {
+  if (!accepting_new_requests_.load(std::memory_order_acquire)) {
+    LOG(WARNING) << "Reject request while Service is not ready, reason="
+                 << provider::readiness_reason_name(readiness_status().reason);
+    return false;
+  }
   if (request->request_deadline_present &&
       (!request->request_deadline.has_value() ||
        request->request_deadline->expired())) {
@@ -826,7 +843,16 @@ bool Scheduler::handle_instance_heartbeat(const proto::HeartbeatRequest* req) {
   global_kvcache_mgr_->record_updated_kvcaches(req->name(), req->cache_event());
   instance_mgr_->record_load_metrics_update(req->name(), req->load_metrics());
   instance_mgr_->update_latency_metrics(req->name(), req->latency_metrics());
+  instance_mgr_->record_direct_engine_evidence(
+      req->name(), req->incarnation_id(), true);
   return true;
+}
+
+bool Scheduler::record_direct_engine_evidence(const std::string& instance_name,
+                                              const std::string& incarnation_id,
+                                              bool success) {
+  return instance_mgr_->record_direct_engine_evidence(
+      instance_name, incarnation_id, success);
 }
 
 provider::ContractResult Scheduler::handle_engine_state_batch(
@@ -1297,7 +1323,10 @@ bool Scheduler::call_attempt_control(
   } else {
     stub.CancelRequest(&controller, &request, &response, nullptr);
   }
-  return !controller.Failed() && response.ok() &&
+  const bool direct_success = !controller.Failed();
+  record_direct_engine_evidence(
+      holder.engine_uid(), holder.incarnation_id(), direct_success);
+  return direct_success && response.ok() &&
          same_attempt_key(response.status().key(), hold.attempt(), holder) &&
          terminal_attempt_state(response.status().state());
 }
@@ -2289,6 +2318,62 @@ void Scheduler::update_token_latency_metrics(
 
 bool Scheduler::has_available_instances() const {
   return instance_mgr_->has_available_instances();
+}
+
+void Scheduler::refresh_readiness() {
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
+  provider::ReadinessInput input;
+  input.has_accepted_full_snapshot =
+      instance_mgr_->has_accepted_engine_state_full_snapshot();
+  input.has_compatible_capacity =
+      instance_mgr_->has_available_instances_at(now_monotonic_ms);
+  input.draining = draining_.load(std::memory_order_acquire);
+  input.observation =
+      instance_mgr_->engine_observation_snapshot(now_monotonic_ms);
+
+  std::string error;
+  std::lock_guard<std::mutex> lock(readiness_mutex_);
+  const std::optional<provider::ReadinessSnapshot> snapshot =
+      readiness_controller_.update(input, now_monotonic_ms, &error);
+  if (!snapshot.has_value()) {
+    readiness_snapshot_ = provider::ReadinessSnapshot{
+        .accepting_new_requests = false,
+        .reason = provider::ReadinessReason::OBSERVATION_UNAVAILABLE,
+        .changed_monotonic_ms = now_monotonic_ms,
+    };
+    accepting_new_requests_.store(false, std::memory_order_release);
+    LOG(ERROR) << "Readiness update failed closed: " << error;
+    return;
+  }
+  const bool changed = snapshot->accepting_new_requests !=
+                           readiness_snapshot_.accepting_new_requests ||
+                       snapshot->reason != readiness_snapshot_.reason;
+  readiness_snapshot_ = *snapshot;
+  accepting_new_requests_.store(snapshot->accepting_new_requests,
+                                std::memory_order_release);
+  if (changed) {
+    LOG(INFO) << "Service readiness changed, accepting_new_requests="
+              << snapshot->accepting_new_requests << ", reason="
+              << provider::readiness_reason_name(snapshot->reason);
+  }
+}
+
+void Scheduler::set_draining(bool draining) {
+  draining_.store(draining, std::memory_order_release);
+}
+
+bool Scheduler::accepting_new_requests() const {
+  return accepting_new_requests_.load(std::memory_order_acquire);
+}
+
+provider::ReadinessSnapshot Scheduler::readiness_status() const {
+  std::lock_guard<std::mutex> lock(readiness_mutex_);
+  return readiness_snapshot_;
+}
+
+void Scheduler::exited() {
+  set_draining(true);
+  exited_.store(true, std::memory_order_release);
 }
 
 }  // namespace xllm_service

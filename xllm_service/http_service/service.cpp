@@ -41,6 +41,7 @@ limitations under the License.
 #include "completion.pb.h"
 #include "http_service/anthropic_adapter.h"
 #include "http_service/chat_json_parser.h"
+#include "http_service/health_response.h"
 #include "http_service/request_execution_context.h"
 #include "observability/request_identity.h"
 #include "provider/canonical_request_builder.h"
@@ -73,6 +74,44 @@ observability::RequestCorrelationInput correlation_input(
   input.trace_id = first_header_value(controller, {"x-trace-id", "trace-id"});
   input.traceparent = first_header_value(controller, {"traceparent"});
   return input;
+}
+
+void reply_json(brpc::Controller* controller,
+                int32_t status_code,
+                const std::string& body) {
+  controller->http_response().set_status_code(status_code);
+  controller->http_response().set_content_type("application/json");
+  controller->response_attachment().append(body);
+}
+
+void reply_service_not_ready(Scheduler* scheduler,
+                             brpc::Controller* controller) {
+  const provider::ReadinessSnapshot readiness = scheduler->readiness_status();
+  const HealthResponse response = make_service_not_ready_response(readiness);
+  reply_json(controller, response.status_code, response.body);
+}
+
+bool require_accepting_new_requests(Scheduler* scheduler,
+                                    brpc::Controller* controller) {
+  if (scheduler->accepting_new_requests()) {
+    return true;
+  }
+  reply_service_not_ready(scheduler, controller);
+  return false;
+}
+
+bool schedule_request(Scheduler* scheduler,
+                      const std::shared_ptr<Request>& request,
+                      brpc::Controller* controller) {
+  if (scheduler->schedule(request)) {
+    return true;
+  }
+  if (!scheduler->accepting_new_requests()) {
+    reply_service_not_ready(scheduler, controller);
+  } else {
+    controller->SetFailed("Schedule request failed!");
+  }
+  return false;
 }
 
 std::string proto_json(const google::protobuf::Message& message) {
@@ -201,12 +240,16 @@ template <typename RequestProto>
 void handle_first_send_request(brpc::Controller* cntl,
                                RequestProto* request_pb,
                                Scheduler* scheduler,
+                               std::string instance_name,
+                               std::string incarnation_id,
                                std::string service_request_id,
                                uint64_t attempt_seq,
                                std::shared_ptr<brpc::Channel> channel) {
   std::unique_ptr<brpc::Controller> cntl_guard(cntl);
   std::unique_ptr<RequestProto> request_guard(request_pb);
   UNUSED_PARAMETER(channel);
+  scheduler->record_direct_engine_evidence(
+      instance_name, incarnation_id, !cntl->Failed());
   if (cntl->Failed()) {
     LOG(ERROR) << "Fail to send stream generation, " << cntl->ErrorText();
     scheduler->handle_attempt_dispatch_failure(
@@ -250,6 +293,8 @@ bool dispatch_native_request(std::shared_ptr<T> call_data,
                         redirect_cntl,
                         request_pb.get(),
                         scheduler,
+                        request.routing.prefill_name,
+                        request.prefill_incarnation_id,
                         request.correlation.request_uid(),
                         request.correlation.attempt_seq(),
                         channel);
@@ -270,20 +315,27 @@ bool dispatch_native_request(std::shared_ptr<T> call_data,
 }
 
 template <typename T>
-class CustomProgressiveReader : public brpc::ProgressiveReader {
+class CustomProgressiveReader final : public brpc::ProgressiveReader {
  public:
   explicit CustomProgressiveReader(brpc::Controller* redirect_cntl,
-                                   std::shared_ptr<T> call_data)
-      : redirect_cntl_(redirect_cntl), call_data_(call_data) {}
+                                   std::shared_ptr<T> call_data,
+                                   Scheduler* scheduler,
+                                   std::string instance_name,
+                                   std::string incarnation_id)
+      : redirect_cntl_(redirect_cntl),
+        call_data_(call_data),
+        scheduler_(scheduler),
+        instance_name_(std::move(instance_name)),
+        incarnation_id_(std::move(incarnation_id)) {}
 
-  virtual ~CustomProgressiveReader() { delete redirect_cntl_; }
+  ~CustomProgressiveReader() override { delete redirect_cntl_; }
 
   // Called when one part was read.
   // Error returned is treated as *permanent* and the socket where the
   // data was read will be closed.
   // A temporary error may be handled by blocking this function, which
   // may block the HTTP parsing on the socket.
-  virtual butil::Status OnReadOnePart(const void* data, size_t length) {
+  butil::Status OnReadOnePart(const void* data, size_t length) override {
     call_data_->write(std::string(static_cast<const char*>(data), length));
     return butil::Status::OK();
   }
@@ -294,11 +346,18 @@ class CustomProgressiveReader : public brpc::ProgressiveReader {
   // - otherwise: socket was broken or OnReadOnePart() failed.
   // This method will be called once and only once. No other methods will
   // be called after. User can release the memory of this object inside.
-  virtual void OnEndOfMessage(const butil::Status& status) { delete this; }
+  void OnEndOfMessage(const butil::Status& status) override {
+    scheduler_->record_direct_engine_evidence(
+        instance_name_, incarnation_id_, status.ok());
+    delete this;
+  }
 
  private:
   brpc::Controller* redirect_cntl_ = nullptr;
   std::shared_ptr<T> call_data_;
+  Scheduler* scheduler_ = nullptr;
+  std::string instance_name_;
+  std::string incarnation_id_;
 };
 
 // Done callback for a streaming vLLM forward: once the response header has
@@ -308,7 +367,16 @@ class CustomProgressiveReader : public brpc::ProgressiveReader {
 template <typename T>
 void handle_vllm_stream_done(brpc::Controller* redirect_cntl,
                              std::shared_ptr<T> call_data,
+                             Scheduler* scheduler,
+                             std::string instance_name,
+                             std::string incarnation_id,
                              std::shared_ptr<brpc::Channel> channel) {
+  UNUSED_PARAMETER(channel);
+  const int32_t status_code = redirect_cntl->http_response().status_code();
+  const bool success =
+      !redirect_cntl->Failed() && status_code >= 200 && status_code < 300;
+  scheduler->record_direct_engine_evidence(
+      instance_name, incarnation_id, success);
   if (redirect_cntl->Failed()) {
     LOG(ERROR) << "Fail to forward to vLLM (stream): "
                << redirect_cntl->ErrorText();
@@ -316,8 +384,8 @@ void handle_vllm_stream_done(brpc::Controller* redirect_cntl,
     delete redirect_cntl;
     return;
   }
-  redirect_cntl->ReadProgressiveAttachmentBy(
-      new CustomProgressiveReader<T>(redirect_cntl, call_data));
+  redirect_cntl->ReadProgressiveAttachmentBy(new CustomProgressiveReader<T>(
+      redirect_cntl, call_data, scheduler, instance_name, incarnation_id));
 }
 
 // Done callback for a non-streaming vLLM forward. Delegates to the shared
@@ -326,7 +394,16 @@ void handle_vllm_stream_done(brpc::Controller* redirect_cntl,
 template <typename T>
 void handle_vllm_non_stream_done(brpc::Controller* redirect_cntl,
                                  std::shared_ptr<T> call_data,
+                                 Scheduler* scheduler,
+                                 std::string instance_name,
+                                 std::string incarnation_id,
                                  std::shared_ptr<brpc::Channel> channel) {
+  UNUSED_PARAMETER(channel);
+  const int32_t status_code = redirect_cntl->http_response().status_code();
+  const bool success =
+      !redirect_cntl->Failed() && status_code >= 200 && status_code < 300;
+  scheduler->record_direct_engine_evidence(
+      instance_name, incarnation_id, success);
   handle_non_stream_response(redirect_cntl, call_data);
 }
 
@@ -338,6 +415,7 @@ template <typename T>
 void handle_vllm(std::shared_ptr<T> call_data,
                  Scheduler* scheduler,
                  const std::string& target_name,
+                 const std::string& target_incarnation_id,
                  const std::string& path,
                  bool is_post,
                  const std::string& body,
@@ -373,12 +451,24 @@ void handle_vllm(std::shared_ptr<T> call_data,
 
   if (stream) {
     redirect_cntl->response_will_be_read_progressively();
-    google::protobuf::Closure* done = brpc::NewCallback(
-        &handle_vllm_stream_done<T>, redirect_cntl, call_data, channel);
+    google::protobuf::Closure* done =
+        brpc::NewCallback(&handle_vllm_stream_done<T>,
+                          redirect_cntl,
+                          call_data,
+                          scheduler,
+                          target_name,
+                          target_incarnation_id,
+                          channel);
     channel->CallMethod(nullptr, redirect_cntl, nullptr, nullptr, done);
   } else {
-    google::protobuf::Closure* done = brpc::NewCallback(
-        &handle_vllm_non_stream_done<T>, redirect_cntl, call_data, channel);
+    google::protobuf::Closure* done =
+        brpc::NewCallback(&handle_vllm_non_stream_done<T>,
+                          redirect_cntl,
+                          call_data,
+                          scheduler,
+                          target_name,
+                          target_incarnation_id,
+                          channel);
     channel->CallMethod(nullptr, redirect_cntl, nullptr, nullptr, done);
   }
 }
@@ -573,6 +663,9 @@ void XllmHttpServiceImpl::get_serving_models(
     cntl->SetFailed("brpc request | respose | controller is null");
     return;
   }
+  if (!require_accepting_new_requests(scheduler_, cntl)) {
+    return;
+  }
   auto arena = response->GetArena();
   auto req_pb =
       google::protobuf::Arena::CreateMessage<::xllm::proto::ModelListRequest>(
@@ -584,8 +677,7 @@ void XllmHttpServiceImpl::get_serving_models(
       cntl, false, done_guard.release(), nullptr, nullptr);
 
   auto service_request = std::make_shared<Request>();
-  if (!scheduler_->schedule(service_request)) {
-    cntl->SetFailed("Schedule request failed!");
+  if (!schedule_request(scheduler_, service_request, cntl)) {
     LOG(ERROR) << "Schedule request failed!";
     return;
   }
@@ -595,6 +687,7 @@ void XllmHttpServiceImpl::get_serving_models(
     handle_vllm(call_data,
                 scheduler_,
                 service_request->routing.prefill_name,
+                service_request->prefill_incarnation_id,
                 "/v1/models",
                 /*is_post=*/false,
                 /*body=*/"",
@@ -625,6 +718,9 @@ void XllmHttpServiceImpl::Completions(
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | respose | controller is null";
     cntl->SetFailed("brpc request | respose | controller is null");
+    return;
+  }
+  if (!require_accepting_new_requests(scheduler_, cntl)) {
     return;
   }
 
@@ -658,8 +754,7 @@ void XllmHttpServiceImpl::Completions(
   if (!req_pb->prompt().empty()) {
     service_request->prompt = req_pb->prompt();
     // select instance for request
-    if (!scheduler_->schedule(service_request)) {
-      cntl->SetFailed("Schedule request failed!");
+    if (!schedule_request(scheduler_, service_request, cntl)) {
       LOG(ERROR) << "Schedule request failed!";
       return;
     }
@@ -680,6 +775,7 @@ void XllmHttpServiceImpl::Completions(
     handle_vllm(call_data,
                 scheduler_,
                 service_request->routing.prefill_name,
+                service_request->prefill_incarnation_id,
                 "/v1/completions",
                 /*is_post=*/true,
                 provider_payload,
@@ -722,6 +818,9 @@ void XllmHttpServiceImpl::ChatCompletions(
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | respose | controller is null";
     cntl->SetFailed("brpc request | respose | controller is null");
+    return;
+  }
+  if (!require_accepting_new_requests(scheduler_, cntl)) {
     return;
   }
 
@@ -803,8 +902,7 @@ void XllmHttpServiceImpl::ChatCompletions(
       service_request->tool_choice = req_pb->tool_choice();
     }
 
-    if (!scheduler_->schedule(service_request)) {
-      cntl->SetFailed("Schedule request failed!");
+    if (!schedule_request(scheduler_, service_request, cntl)) {
       LOG(ERROR) << "Schedule request failed!";
       return;
     }
@@ -825,6 +923,7 @@ void XllmHttpServiceImpl::ChatCompletions(
     handle_vllm(call_data,
                 scheduler_,
                 service_request->routing.prefill_name,
+                service_request->prefill_incarnation_id,
                 "/v1/chat/completions",
                 /*is_post=*/true,
                 provider_payload,
@@ -867,6 +966,9 @@ void XllmHttpServiceImpl::AnthropicMessages(
   if (!request || !response || !controller) {
     LOG(ERROR) << "brpc request | respose | controller is null";
     cntl->SetFailed("brpc request | respose | controller is null");
+    return;
+  }
+  if (!require_accepting_new_requests(scheduler_, cntl)) {
     return;
   }
 
@@ -922,8 +1024,7 @@ void XllmHttpServiceImpl::AnthropicMessages(
     service_request->tool_choice = req_pb->tool_choice();
   }
 
-  if (!scheduler_->schedule(service_request)) {
-    cntl->SetFailed("Schedule request failed!");
+  if (!schedule_request(scheduler_, service_request, cntl)) {
     LOG(ERROR) << "Schedule request failed!";
     return;
   }
@@ -974,6 +1075,9 @@ void XllmHttpServiceImpl::Embeddings(
     cntl->SetFailed("brpc request | respose | controller is null");
     return;
   }
+  if (!require_accepting_new_requests(scheduler_, cntl)) {
+    return;
+  }
 
   cntl->SetFailed("not support Embeddings");
   return;
@@ -992,6 +1096,33 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
                                   ::google::protobuf::Closure* done) {
   ClosureGuard done_guard(done);
   // TODO: implement metrics endpoint
+}
+
+void XllmHttpServiceImpl::Livez(::google::protobuf::RpcController* controller,
+                                const proto::HttpRequest* request,
+                                proto::HttpResponse* response,
+                                ::google::protobuf::Closure* done) {
+  ClosureGuard done_guard(done);
+  brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
+  if (cntl == nullptr || request == nullptr || response == nullptr) {
+    return;
+  }
+  const HealthResponse health = make_liveness_response();
+  reply_json(cntl, health.status_code, health.body);
+}
+
+void XllmHttpServiceImpl::Readyz(::google::protobuf::RpcController* controller,
+                                 const proto::HttpRequest* request,
+                                 proto::HttpResponse* response,
+                                 ::google::protobuf::Closure* done) {
+  ClosureGuard done_guard(done);
+  brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
+  if (cntl == nullptr || request == nullptr || response == nullptr) {
+    return;
+  }
+  const provider::ReadinessSnapshot readiness = scheduler_->readiness_status();
+  const HealthResponse health = make_readiness_response(readiness);
+  reply_json(cntl, health.status_code, health.body);
 }
 
 void XllmHttpServiceImpl::Heartbeat(

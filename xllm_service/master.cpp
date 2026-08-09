@@ -37,30 +37,41 @@ Master::Master(const Options& options) : options_(options) {
 Master::~Master() { stop(); }
 
 bool Master::start() {
-  if (!setup_http_server()) {
+  if (!setup_http_server() || !start_http_server()) {
     return false;
   }
-
-  // 1. start readiness thread to manage http server lifecycle
+  if (!start_rpc_server()) {
+    http_server_.Stop(0);
+    http_server_.Join();
+    http_started_ = false;
+    return false;
+  }
+  scheduler_->refresh_readiness();
   readiness_thread_ = std::make_unique<std::thread>(
       [this]() { manage_http_server_lifecycle(); });
-
-  // 2. start rpc server
-  rpc_server_thread_ =
-      std::make_unique<std::thread>([this]() { start_rpc_server(); });
 
   return true;
 }
 
 void Master::stop() {
-  stopped_.store(true);
+  if (stopped_.exchange(true)) {
+    return;
+  }
+  scheduler_->set_draining(true);
+  scheduler_->refresh_readiness();
 
   if (readiness_thread_ && readiness_thread_->joinable()) {
     readiness_thread_->join();
   }
-
-  if (rpc_server_thread_ && rpc_server_thread_->joinable()) {
-    rpc_server_thread_->join();
+  if (http_started_) {
+    http_server_.Stop(0);
+    http_server_.Join();
+    http_started_ = false;
+  }
+  if (rpc_started_) {
+    rpc_server_.Stop(0);
+    rpc_server_.Join();
+    rpc_started_ = false;
   }
 }
 
@@ -75,6 +86,8 @@ bool Master::setup_http_server() {
                               "/v1/embeddings => Embeddings,"
                               "/v1/models => Models,"
                               "/metrics => Metrics,"
+                              "/livez => Livez,"
+                              "/readyz => Readyz,"
                               "/v1/internal/heartbeat => Heartbeat,") != 0) {
     LOG(FATAL) << "Fail to add http service";
     return false;
@@ -100,39 +113,26 @@ bool Master::setup_http_server() {
   return true;
 }
 
+bool Master::start_http_server() {
+  if (http_server_.Start(http_endpoint_, &http_options_) != 0) {
+    LOG(ERROR) << "Failed to start HTTP server on: " << http_endpoint_;
+    return false;
+  }
+  http_started_ = true;
+  LOG(INFO) << "HTTP server started on: " << http_endpoint_;
+  return true;
+}
+
 void Master::manage_http_server_lifecycle() {
-  bool http_running = false;
   while (!stopped_.load()) {
-    bool has_instances = scheduler_->has_available_instances();
+    scheduler_->refresh_readiness();
 
-    if (has_instances && !http_running) {
-      if (http_server_.Start(http_endpoint_, &http_options_) == 0) {
-        LOG(INFO) << "HTTP server started, instances available, endpoint: "
-                  << http_endpoint_;
-        http_running = true;
-      } else {
-        LOG(ERROR) << "Failed to start HTTP server on: " << http_endpoint_;
-      }
-    } else if (!has_instances && http_running) {
-      LOG(WARNING) << "No available instances, stopping HTTP server.";
-      http_server_.Stop(0);
-      http_server_.Join();
-      http_running = false;
-      LOG(INFO) << "HTTP server stopped, waiting for instances to recover.";
-    }
-
-    // Sleep in small increments to be responsive to `stopped_` signal.
     const auto end_time =
         std::chrono::steady_clock::now() +
-        std::chrono::seconds(FLAGS_readiness_check_interval_s);
+        std::chrono::milliseconds(options_.readiness_check_interval_ms());
     while (!stopped_.load() && std::chrono::steady_clock::now() < end_time) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-  }
-
-  if (http_running) {
-    http_server_.Stop(0);
-    http_server_.Join();
   }
 }
 
@@ -167,9 +167,7 @@ bool Master::start_rpc_server() {
   }
 
   LOG(INFO) << "Xllm rpc server started on: " << endpoint;
-
-  // Wait until Ctrl-C is pressed, then Stop() and Join() the server.
-  rpc_server_.RunUntilAskedToQuit();
+  rpc_started_ = true;
   return true;
 }
 
@@ -177,8 +175,8 @@ bool Master::start_rpc_server() {
 
 static std::atomic<uint32_t> g_signal_received{0};
 void shutdown_handler(int signal) {
-  LOG(WARNING) << "Received signal " << signal << ", stopping master...";
-  exit(1);
+  g_signal_received.store(static_cast<uint32_t>(signal),
+                          std::memory_order_relaxed);
 }
 
 int main(int argc, char* argv[]) {
@@ -226,11 +224,7 @@ int main(int argc, char* argv[]) {
       .xxh3_128bits_seed(FLAGS_xxh3_128bits_seed)
       .service_name(xllm_service::utils::get_local_ip() + ":" +
                     std::to_string(FLAGS_rpc_server_port))
-      .detect_disconnected_instance_interval(
-          FLAGS_detect_disconnected_instance_interval)
       .instance_delete_probe_timeout_ms(FLAGS_instance_delete_probe_timeout_ms)
-      .instance_delete_probe_attempts(FLAGS_instance_delete_probe_attempts)
-      .lease_lost_heartbeat_timeout_ms(FLAGS_lease_lost_heartbeat_timeout_ms)
       .output_reorder_max_events(FLAGS_output_reorder_max_events)
       .output_reorder_max_bytes(FLAGS_output_reorder_max_bytes)
       .request_watchdog_interval_ms(FLAGS_request_watchdog_interval_ms)

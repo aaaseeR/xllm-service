@@ -61,19 +61,15 @@ class Options {
 
   PROPERTY(std::string, etcd_namespace);
 
-  PROPERTY(int32_t, detect_disconnected_instance_interval) = 15;
-
   PROPERTY(int32_t, instance_delete_probe_timeout_ms) = 1000;
-
-  PROPERTY(int32_t, instance_delete_probe_attempts) = 2;
-
-  PROPERTY(int32_t, lease_lost_heartbeat_timeout_ms) = 3000;
 
   // V2 immutable Engine Registry and State Stream cache bounds. These are
   // injected into InstanceMgr and do not create new global FLAGS dependencies.
   PROPERTY(size_t, engine_registry_max_members) = 4096;
 
   PROPERTY(size_t, engine_registry_max_links) = 16384;
+
+  PROPERTY(size_t, engine_registry_event_history_capacity) = 8192;
 
   PROPERTY(uint64_t, engine_state_soft_ttl_ms) = 3000;
 
@@ -84,6 +80,10 @@ class Options {
   PROPERTY(uint64_t, engine_link_hard_ttl_ms) = 10000;
 
   PROPERTY(uint64_t, engine_direct_evidence_ttl_ms) = 3000;
+
+  PROPERTY(uint64_t, engine_direct_probe_timeout_ms) = 200;
+
+  PROPERTY(size_t, engine_direct_probe_batch_size) = 16;
 
   PROPERTY(double, state_blind_enter_ratio) = 0.5;
 
@@ -96,6 +96,10 @@ class Options {
   PROPERTY(uint64_t, state_blind_grace_ms) = 10000;
 
   PROPERTY(uint64_t, registry_blind_grace_ms) = 3000;
+
+  PROPERTY(uint64_t, readiness_recovery_hold_ms) = 3000;
+
+  PROPERTY(uint64_t, readiness_check_interval_ms) = 200;
 
   PROPERTY(uint64_t, engine_link_retry_initial_ms) = 1000;
 

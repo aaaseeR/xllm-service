@@ -904,6 +904,11 @@ bool EngineRegistry::registry_known() const {
   return registry_known_;
 }
 
+bool EngineRegistry::has_accepted_full_snapshot() const {
+  std::shared_lock lock(mutex_);
+  return has_accepted_full_snapshot_;
+}
+
 bool EngineRegistry::has_current_full_snapshot() const {
   std::shared_lock lock(mutex_);
   return registry_known_ &&

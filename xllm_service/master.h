@@ -27,7 +27,7 @@ limitations under the License.
 
 namespace xllm_service {
 
-class Master {
+class Master final {
  public:
   explicit Master(const Options& options);
   ~Master();
@@ -37,6 +37,7 @@ class Master {
 
  private:
   bool setup_http_server();
+  bool start_http_server();
   void manage_http_server_lifecycle();
   bool start_rpc_server();
 
@@ -52,6 +53,7 @@ class Master {
   brpc::Server http_server_;
   std::unique_ptr<std::thread> readiness_thread_;
   std::atomic<bool> stopped_{false};
+  bool http_started_ = false;
   brpc::ServerOptions http_options_;
   butil::EndPoint http_endpoint_;
 
@@ -59,7 +61,7 @@ class Master {
   std::string rpc_server_address_;
   std::unique_ptr<xllm_service::XllmRpcService> rpc_service_;
   brpc::Server rpc_server_;
-  std::unique_ptr<std::thread> rpc_server_thread_;
+  bool rpc_started_ = false;
 };
 
 }  // namespace xllm_service

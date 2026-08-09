@@ -18,7 +18,10 @@ limitations under the License.
 #include <brpc/channel.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -74,6 +77,9 @@ class InstanceMgr final {
       const std::shared_ptr<Request>& request) const;
   bool record_instance_heartbeat(const std::string& instance_name,
                                  const std::string& incarnation_id);
+  bool record_direct_engine_evidence(const std::string& instance_name,
+                                     const std::string& incarnation_id,
+                                     bool success);
   void record_load_metrics_update(const std::string& instance_name,
                                   const proto::LoadMetrics& load_metrics);
   bool upload_load_metrics();
@@ -100,6 +106,9 @@ class InstanceMgr final {
       uint64_t publish_monotonic_ms,
       xllm::proto::StateBatch* batch) const;
   bool has_current_engine_state_full_snapshot() const;
+  bool has_accepted_engine_state_full_snapshot() const;
+  std::optional<provider::ObservationSnapshot> engine_observation_snapshot(
+      uint64_t receiver_monotonic_ms) const;
 
   void require_provider_link_recheck();
 
@@ -123,6 +132,7 @@ class InstanceMgr final {
   // - two MIX instances with complementary current_type (one PREFILL, one
   // DECODE)
   bool has_available_instances() const;
+  bool has_available_instances_at(uint64_t now_monotonic_ms) const;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(InstanceMgr);
@@ -133,17 +143,14 @@ class InstanceMgr final {
   bool init_brpc_channel(const std::string& target_uri,
                          const InstanceMetaInfo& info,
                          std::shared_ptr<brpc::Channel>* out_channel);
-  bool probe_instance_health(const std::string& instance_name);
+  bool probe_direct_engine_health(const std::string& instance_name) const;
+  void probe_state_blind_engines(uint64_t now_monotonic_ms);
   void reconcile_instance_states();
   void reconcile_provider_links();
   void publish_link_state(const xllm::proto::LinkState& state,
                           uint64_t now_monotonic_ms);
   void refresh_instance_registration(const std::string& name,
                                      const InstanceMetaInfo& info);
-  void mark_instance_suspect(const std::string& name,
-                             const std::string& incarnation_id);
-  void clear_suspect_instance(const std::string& name,
-                              const std::string& incarnation_id = "");
   // use etcd as ServiceDiscovery
   void update_instance_metainfo(const etcd::Response& response,
                                 const uint64_t& prefix_len);
@@ -204,19 +211,27 @@ class InstanceMgr final {
 
   std::shared_ptr<EtcdClient> etcd_client_;
 
+  struct RegistryEventRecord {
+    int64_t revision = 0;
+    std::optional<std::string> deleted_incarnation_id;
+  };
+
+  // Serializes membership watch effects. The watch callback can be delivered
+  // by several prefix workers, so revision acceptance and its side effects
+  // must be one ordered operation.
+  std::mutex registry_event_mutex_;
+  std::unordered_map<std::string, RegistryEventRecord> registry_event_history_;
+  std::atomic_bool registry_event_history_exhausted_ = false;
+
   // L1 — cluster topology & channels
   mutable std::shared_mutex cluster_mutex_;
   std::unordered_map<std::string, InstanceMetaInfo> instances_;
-  struct SuspectInstanceInfo {
-    std::string incarnation_id;
-    uint64_t enter_ts_ms = 0;
-  };
-  std::unordered_map<std::string, SuspectInstanceInfo> suspect_instances_;
   std::vector<std::string> prefill_index_;
   std::vector<std::string> decode_index_;
   uint64_t next_prefill_index_ = 0;
   uint64_t next_decode_index_ = 0;
   uint64_t next_provider_index_ = 0;
+  size_t next_direct_probe_index_ = 0;
   std::unordered_map<std::string, std::shared_ptr<brpc::Channel>>
       cached_channels_;
   provider::EngineRegistry engine_registry_;

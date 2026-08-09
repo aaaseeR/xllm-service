@@ -24,6 +24,7 @@ limitations under the License.
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -55,7 +56,6 @@ std::string ETCD_ALL_KEYS_PREFIX = "XLLM:";
 std::string ETCD_LOADMETRICS_PREFIX = "XLLM:LOADMETRICS:";
 
 constexpr char kHealthPath[] = "/health";
-constexpr int64_t kDeleteProbeRetryBackoffMs = 100;
 
 uint64_t current_time_ms() {
   return static_cast<uint64_t>(
@@ -113,7 +113,7 @@ bool is_instance_schedulable(
     const xllm_service::InstanceMetaInfo& info,
     const xllm_service::provider::EngineRegistry& registry,
     uint64_t now_monotonic_ms) {
-  if (info.runtime_state == InstanceRuntimeState::SUSPECT) {
+  if (info.runtime_state != InstanceRuntimeState::ACTIVE) {
     return false;
   }
   if (!info.provider_descriptor.has_value()) {
@@ -317,7 +317,11 @@ InstanceMgr::InstanceMgr(const Options& options,
       options_.engine_link_ready_recheck_ms() == 0 ||
       options_.engine_link_ready_recheck_ms() >=
           options_.engine_link_hard_ttl_ms() ||
-      options_.engine_link_reconcile_batch_size() == 0) {
+      options_.engine_link_reconcile_batch_size() == 0 ||
+      options_.engine_direct_probe_timeout_ms() == 0 ||
+      options_.engine_direct_probe_batch_size() == 0 ||
+      options_.engine_registry_event_history_capacity() <
+          options_.engine_registry_max_members()) {
     LOG(FATAL) << "Provider Link reconciler configuration is invalid.";
   }
   auto handle_instance_metainfo =
@@ -685,6 +689,15 @@ bool InstanceMgr::has_current_engine_state_full_snapshot() const {
   return engine_registry_.has_current_full_snapshot();
 }
 
+bool InstanceMgr::has_accepted_engine_state_full_snapshot() const {
+  return engine_registry_.has_accepted_full_snapshot();
+}
+
+std::optional<provider::ObservationSnapshot>
+InstanceMgr::engine_observation_snapshot(uint64_t receiver_monotonic_ms) const {
+  return engine_registry_.observation_snapshot(receiver_monotonic_ms);
+}
+
 void InstanceMgr::set_as_master() {
   is_master_service_.store(true, std::memory_order_release);
   etcd_client_->remove_watch(ETCD_LOADMETRICS_PREFIX);
@@ -872,16 +885,43 @@ bool InstanceMgr::record_instance_heartbeat(const std::string& instance_name,
                  << ", heartbeat incarnation_id: " << incarnation_id;
     return false;
   }
+  if (it->second.runtime_state != InstanceRuntimeState::ACTIVE) {
+    LOG(WARNING) << "Ignore heartbeat from fenced instance: " << instance_name
+                 << ", incarnation_id: " << incarnation_id;
+    return false;
+  }
 
   it->second.latest_timestamp = current_time_ms();
-  if (it->second.runtime_state == InstanceRuntimeState::SUSPECT) {
-    // A recovered suspect instance first goes back to LEASE_LOST and must
-    // keep heartbeating before becoming fully active again via registration.
-    clear_suspect_instance(instance_name, incarnation_id);
-    it->second.runtime_state = InstanceRuntimeState::LEASE_LOST;
-    LOG(WARNING) << "Heartbeat recovered for suspect instance, move to "
-                 << "lease lost state: " << instance_name
-                 << ", incarnation_id: " << incarnation_id;
+  return true;
+}
+
+bool InstanceMgr::record_direct_engine_evidence(
+    const std::string& instance_name,
+    const std::string& incarnation_id,
+    bool success) {
+  std::optional<xllm::proto::ProviderDescriptor> descriptor;
+  {
+    std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+    const auto instance = instances_.find(instance_name);
+    if (instance == instances_.end() ||
+        instance->second.incarnation_id != incarnation_id ||
+        instance->second.runtime_state != InstanceRuntimeState::ACTIVE ||
+        !instance->second.provider_descriptor.has_value()) {
+      return false;
+    }
+    descriptor = instance->second.provider_descriptor;
+  }
+
+  const provider::ContractResult result =
+      engine_registry_.record_direct_evidence(
+          provider::make_provider_engine_key(*descriptor),
+          success,
+          monotonic_time_ms());
+  if (!result.ok()) {
+    LOG(WARNING) << "Failed to record direct Engine evidence, instance="
+                 << instance_name << ", incarnation_id=" << incarnation_id
+                 << ", success=" << success << ", error=" << result.message();
+    return false;
   }
   return true;
 }
@@ -917,45 +957,73 @@ bool InstanceMgr::init_brpc_channel(
   return true;
 }
 
-bool InstanceMgr::probe_instance_health(const std::string& instance_name) {
-  const int attempts = std::max(1, options_.instance_delete_probe_attempts());
-  const int timeout_ms =
-      std::max(1, options_.instance_delete_probe_timeout_ms());
+bool InstanceMgr::probe_direct_engine_health(
+    const std::string& instance_name) const {
   const std::string url = "http://" + instance_name + kHealthPath;
-
-  for (int attempt = 1; attempt <= attempts; ++attempt) {
-    brpc::Channel channel;
-    brpc::ChannelOptions options;
-    options.protocol = "http";
-    options.timeout_ms = timeout_ms;
-    options.connect_timeout_ms = timeout_ms;
-    options.max_retry = 0;
-    if (channel.Init(url.c_str(), "", &options) != 0) {
-      LOG(WARNING) << "Failed to initialize health probe channel, instance: "
-                   << instance_name << ", attempt: " << attempt << "/"
-                   << attempts;
-    } else {
-      brpc::Controller cntl;
-      cntl.http_request().uri() = url;
-      cntl.http_request().set_method(brpc::HTTP_METHOD_GET);
-      channel.CallMethod(nullptr, &cntl, nullptr, nullptr, nullptr);
-      if (!cntl.Failed() && cntl.http_response().status_code() == 200) {
-        return true;
-      }
-      LOG(WARNING) << "Health probe failed, instance: " << instance_name
-                   << ", attempt: " << attempt << "/" << attempts << ", error: "
-                   << (cntl.Failed() ? cntl.ErrorText()
-                                     : std::to_string(
-                                           cntl.http_response().status_code()));
-    }
-
-    if (attempt < attempts) {
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(kDeleteProbeRetryBackoffMs));
-    }
+  const int32_t timeout_ms = static_cast<int32_t>(std::min<uint64_t>(
+      options_.engine_direct_probe_timeout_ms(),
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max())));
+  if (timeout_ms <= 0) {
+    return false;
   }
 
-  return false;
+  brpc::Channel channel;
+  brpc::ChannelOptions options;
+  options.protocol = "http";
+  options.timeout_ms = timeout_ms;
+  options.connect_timeout_ms = timeout_ms;
+  options.max_retry = 0;
+  if (channel.Init(instance_name.c_str(), "", &options) != 0) {
+    return false;
+  }
+
+  brpc::Controller controller;
+  controller.http_request().uri() = url;
+  controller.http_request().set_method(brpc::HTTP_METHOD_GET);
+  channel.CallMethod(nullptr, &controller, nullptr, nullptr, nullptr);
+  return !controller.Failed() &&
+         controller.http_response().status_code() == 200;
+}
+
+void InstanceMgr::probe_state_blind_engines(uint64_t now_monotonic_ms) {
+  const std::optional<provider::ObservationSnapshot> observation =
+      engine_registry_.observation_snapshot(now_monotonic_ms);
+  if (!observation.has_value() ||
+      observation->mode != provider::ObservationMode::STATE_BLIND) {
+    return;
+  }
+
+  std::vector<std::pair<std::string, std::string>> candidates;
+  {
+    std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+    candidates.reserve(instances_.size());
+    for (const auto& [instance_name, info] : instances_) {
+      if (info.runtime_state == InstanceRuntimeState::ACTIVE &&
+          info.provider_descriptor.has_value()) {
+        candidates.emplace_back(instance_name, info.incarnation_id);
+      }
+    }
+  }
+  if (candidates.empty()) {
+    return;
+  }
+  std::sort(candidates.begin(), candidates.end());
+
+  const size_t batch_size =
+      std::min(options_.engine_direct_probe_batch_size(), candidates.size());
+  if (batch_size == 0) {
+    return;
+  }
+  next_direct_probe_index_ %= candidates.size();
+  for (size_t offset = 0; offset < batch_size; ++offset) {
+    const size_t index =
+        (next_direct_probe_index_ + offset) % candidates.size();
+    const bool success = probe_direct_engine_health(candidates[index].first);
+    record_direct_engine_evidence(
+        candidates[index].first, candidates[index].second, success);
+  }
+  next_direct_probe_index_ =
+      (next_direct_probe_index_ + batch_size) % candidates.size();
 }
 
 void InstanceMgr::update_instance_metainfo(const etcd::Response& response,
@@ -967,11 +1035,50 @@ void InstanceMgr::update_instance_metainfo(const etcd::Response& response,
   threadpool_.schedule([this,
                         response = std::move(response),
                         prefix_len = std::move(prefix_len)] {
-    if (exited_) return;
+    std::lock_guard<std::mutex> event_lock(registry_event_mutex_);
+    if (exited_) {
+      return;
+    }
     for (const auto& event : response.events()) {
       const std::string instance_name = get_event_key_suffix(event, prefix_len);
       if (instance_name.empty()) {
         continue;
+      }
+      const int64_t revision = get_event_revision(event);
+      if (revision <= 0) {
+        LOG(ERROR) << "Ignore Registry event without a valid revision, "
+                   << "instance=" << instance_name;
+        engine_registry_.set_registry_visibility(false);
+        continue;
+      }
+
+      std::unordered_map<std::string, RegistryEventRecord>::iterator
+          event_record = registry_event_history_.find(instance_name);
+      if (event_record != registry_event_history_.end() &&
+          revision <= event_record->second.revision) {
+        LOG(INFO) << "Ignore stale Registry event, instance=" << instance_name
+                  << ", revision=" << revision
+                  << ", latest_revision=" << event_record->second.revision;
+        continue;
+      }
+      if (event_record == registry_event_history_.end()) {
+        if (registry_event_history_exhausted_.load(std::memory_order_acquire) ||
+            registry_event_history_.size() >=
+                options_.engine_registry_event_history_capacity()) {
+          registry_event_history_exhausted_.store(true,
+                                                  std::memory_order_release);
+          engine_registry_.set_registry_visibility(false);
+          LOG(ERROR) << "Registry event history capacity exhausted; fail "
+                        "closed in REGISTRY_BLIND, capacity="
+                     << options_.engine_registry_event_history_capacity();
+          continue;
+        }
+        event_record = registry_event_history_
+                           .emplace(instance_name,
+                                    RegistryEventRecord{.revision = revision})
+                           .first;
+      } else {
+        event_record->second.revision = revision;
       }
 
       if (event.event_type() == etcd::Event::EventType::PUT) {
@@ -981,6 +1088,16 @@ void InstanceMgr::update_instance_metainfo(const etcd::Response& response,
           LOG(ERROR) << "Parse instance json failed: " << json_str;
           continue;
         }
+        if (event_record->second.deleted_incarnation_id ==
+            metainfo.incarnation_id) {
+          LOG(WARNING) << "Reject Registry PUT that attempts to restore a "
+                          "deleted incarnation, instance="
+                       << instance_name
+                       << ", incarnation_id=" << metainfo.incarnation_id
+                       << ", revision=" << revision;
+          continue;
+        }
+        event_record->second.deleted_incarnation_id.reset();
 
         std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
         auto existing_it = instances_.find(instance_name);
@@ -995,7 +1112,6 @@ void InstanceMgr::update_instance_metainfo(const etcd::Response& response,
         if (existing_it->second.incarnation_id == metainfo.incarnation_id) {
           const auto previous_state = existing_it->second.runtime_state;
           refresh_instance_registration(instance_name, metainfo);
-          clear_suspect_instance(instance_name, metainfo.incarnation_id);
           if (previous_state != InstanceRuntimeState::ACTIVE) {
             LOG(INFO) << "Instance registration restored, back to active: "
                       << instance_name
@@ -1032,6 +1148,9 @@ void InstanceMgr::update_instance_metainfo(const etcd::Response& response,
           deleted_info.parse_from_json(deleted_value)) {
         deleted_incarnation_id = deleted_info.incarnation_id;
       }
+      if (!deleted_incarnation_id.empty()) {
+        event_record->second.deleted_incarnation_id = deleted_incarnation_id;
+      }
       std::string tracked_incarnation_id;
       {
         std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
@@ -1051,32 +1170,14 @@ void InstanceMgr::update_instance_metainfo(const etcd::Response& response,
         }
         tracked_incarnation_id = existing_it->second.incarnation_id;
       }
+      event_record->second.deleted_incarnation_id = tracked_incarnation_id;
 
-      // Keep delete handling event-driven: use this event, one health probe,
-      // and later heartbeats or PUT events to drive recovery.
-      const bool probe_success = probe_instance_health(instance_name);
-
-      std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
-      auto existing_it = instances_.find(instance_name);
-      if (existing_it == instances_.end() ||
-          existing_it->second.incarnation_id != tracked_incarnation_id) {
-        continue;
-      }
-
-      if (probe_success) {
-        // Keep the instance in service temporarily and wait for heartbeats.
-        clear_suspect_instance(instance_name, tracked_incarnation_id);
-        existing_it->second.runtime_state = InstanceRuntimeState::LEASE_LOST;
-        existing_it->second.latest_timestamp = current_time_ms();
-        LOG(WARNING) << "Instance lease deleted, probe succeeded, enter "
-                     << "lease lost state: " << instance_name
-                     << ", incarnation_id: " << tracked_incarnation_id;
-        continue;
-      }
-
-      mark_instance_suspect(instance_name, tracked_incarnation_id);
-      LOG(WARNING) << "Instance lease deleted, probe failed, enter suspect "
-                   << "state: " << instance_name
+      // A watch DELETE is authoritative membership loss. Close the dispatch
+      // gate immediately; health probes and heartbeats are not membership
+      // proof and cannot restore the deleted incarnation.
+      deregister_instance(instance_name, tracked_incarnation_id);
+      LOG(WARNING) << "Instance membership deleted, fenced incarnation: "
+                   << instance_name
                    << ", incarnation_id: " << tracked_incarnation_id;
     }
   });
@@ -1137,11 +1238,6 @@ void InstanceMgr::update_latency_metrics(
 }
 
 void InstanceMgr::reconcile_instance_states() {
-  const auto suspect_interval_ms =
-      std::max<int64_t>(1, options_.detect_disconnected_instance_interval()) *
-      1000;
-  const auto heartbeat_timeout_ms =
-      std::max<int64_t>(1, options_.lease_lost_heartbeat_timeout_ms());
   while (!exited_) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
@@ -1152,6 +1248,8 @@ void InstanceMgr::reconcile_instance_states() {
       const bool prefix_known = etcd_client_->get_prefix(prefix, &probe);
       registry_known = registry_known && prefix_known;
     }
+    registry_known = registry_known && !registry_event_history_exhausted_.load(
+                                           std::memory_order_acquire);
     const provider::ContractResult visibility_result =
         engine_registry_.set_registry_visibility(registry_known);
     if (!visibility_result.ok()) {
@@ -1159,58 +1257,7 @@ void InstanceMgr::reconcile_instance_states() {
                  << visibility_result.message();
     }
 
-    std::vector<std::pair<std::string, std::string>> to_deregister;
-
-    {
-      std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
-      if (exited_) {
-        return;
-      }
-
-      const uint64_t now_ms = current_time_ms();
-      for (auto& [instance_name, info] : instances_) {
-        // LEASE_LOST is a grace period after etcd delete but before hard
-        // eviction.
-        if (info.runtime_state != InstanceRuntimeState::LEASE_LOST) {
-          continue;
-        }
-        if (now_ms - info.latest_timestamp < heartbeat_timeout_ms) {
-          continue;
-        }
-        mark_instance_suspect(instance_name, info.incarnation_id);
-        LOG(WARNING)
-            << "Lease lost instance heartbeat timed out, enter suspect "
-            << "state: " << instance_name
-            << ", incarnation_id: " << info.incarnation_id;
-      }
-
-      for (auto it = suspect_instances_.begin();
-           it != suspect_instances_.end();) {
-        const std::string instance_name = it->first;
-        const std::string incarnation_id = it->second.incarnation_id;
-        const uint64_t enter_ts_ms = it->second.enter_ts_ms;
-        ++it;
-
-        if (now_ms - enter_ts_ms < suspect_interval_ms) {
-          continue;
-        }
-
-        auto inst_it = instances_.find(instance_name);
-        if (inst_it == instances_.end() ||
-            inst_it->second.incarnation_id != incarnation_id) {
-          suspect_instances_.erase(instance_name);
-          continue;
-        }
-
-        LOG(WARNING) << "Suspect window expired, deregister instance: "
-                     << instance_name << ", incarnation_id: " << incarnation_id;
-        to_deregister.emplace_back(instance_name, incarnation_id);
-      }
-    }
-
-    for (const auto& p : to_deregister) {
-      deregister_instance(p.first, p.second);
-    }
+    probe_state_blind_engines(monotonic_time_ms());
     reconcile_provider_links();
   }
 }
@@ -1351,30 +1398,6 @@ void InstanceMgr::refresh_instance_registration(const std::string& name,
   it->second.current_type = current_type;
   it->second.latest_timestamp = current_time_ms();
   it->second.runtime_state = InstanceRuntimeState::ACTIVE;
-}
-
-void InstanceMgr::mark_instance_suspect(const std::string& name,
-                                        const std::string& incarnation_id) {
-  SuspectInstanceInfo info;
-  info.incarnation_id = incarnation_id;
-  info.enter_ts_ms = current_time_ms();
-  suspect_instances_[name] = std::move(info);
-  auto it = instances_.find(name);
-  if (it != instances_.end() && it->second.incarnation_id == incarnation_id) {
-    it->second.runtime_state = InstanceRuntimeState::SUSPECT;
-  }
-}
-
-void InstanceMgr::clear_suspect_instance(const std::string& name,
-                                         const std::string& incarnation_id) {
-  auto it = suspect_instances_.find(name);
-  if (it == suspect_instances_.end()) {
-    return;
-  }
-  if (!incarnation_id.empty() && it->second.incarnation_id != incarnation_id) {
-    return;
-  }
-  suspect_instances_.erase(it);
 }
 
 void InstanceMgr::update_request_metrics(std::shared_ptr<Request> request,
@@ -1871,20 +1894,7 @@ void InstanceMgr::deregister_instance(
     }
 
     info = it->second;
-    clear_suspect_instance(name, info.incarnation_id);
     gather_unlink_operations(name, info, &unlink_ops);
-  }
-
-  for (const auto& op : unlink_ops) {
-    call_unlink_instance(op.first, op.second);
-  }
-
-  {
-    std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
-    auto it = instances_.find(name);
-    if (it == instances_.end()) {
-      return;
-    }
     // Close the dispatch gate before notifying Scheduler. The instance and
     // channel remain available until active attempts have converged, but no
     // request bound earlier may enter dispatch while deregistration is in
@@ -1899,13 +1909,18 @@ void InstanceMgr::deregister_instance(
     scheduler_->notify_engine_registry_membership_changed();
   }
 
+  for (const auto& op : unlink_ops) {
+    call_unlink_instance(op.first, op.second);
+  }
+
   scheduler_->clear_requests_on_failed_instance(
       name, info.incarnation_id, get_cleanup_type(info));
 
   {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
     auto it = instances_.find(name);
-    if (it == instances_.end()) {
+    if (it == instances_.end() ||
+        it->second.incarnation_id != info.incarnation_id) {
       return;
     }
     remove_instance_resources(name);
@@ -2111,8 +2126,11 @@ void InstanceMgr::remove_instance_from_index(const std::string& name,
 }
 
 bool InstanceMgr::has_available_instances() const {
+  return has_available_instances_at(monotonic_time_ms());
+}
+
+bool InstanceMgr::has_available_instances_at(uint64_t now_monotonic_ms) const {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
-  const uint64_t now_monotonic_ms = monotonic_time_ms();
   std::vector<provider::ProviderRouteCandidate> prefill_candidates =
       make_route_candidates(
           instances_, prefill_index_, engine_registry_, now_monotonic_ms);

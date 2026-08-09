@@ -46,6 +46,16 @@ std::string get_event_value(const etcd::Event& event) {
   return "";
 }
 
+int64_t get_event_revision(const etcd::Event& event) {
+  if (event.has_kv()) {
+    return event.kv().modified_index();
+  }
+  if (event.has_prev_kv()) {
+    return event.prev_kv().modified_index();
+  }
+  return 0;
+}
+
 std::string get_event_key_suffix(const etcd::Event& event,
                                  uint64_t prefix_len) {
   const auto key = get_event_key(event);

@@ -94,7 +94,8 @@ DEFINE_string(load_balance_policy,
 
 DEFINE_int32(detect_disconnected_instance_interval,
              15,
-             "The interval that server detect the disconnected instance.");
+             "Deprecated V1 compatibility flag; ignored by V2 membership "
+             "fencing.");
 
 DEFINE_int32(instance_delete_probe_timeout_ms,
              1000,
@@ -103,13 +104,13 @@ DEFINE_int32(instance_delete_probe_timeout_ms,
 
 DEFINE_int32(instance_delete_probe_attempts,
              2,
-             "The total number of health probe attempts after an instance "
-             "lease delete event.");
+             "Deprecated V1 compatibility flag; V2 never probes to override "
+             "an authoritative membership delete.");
 
 DEFINE_int32(lease_lost_heartbeat_timeout_ms,
              3000,
-             "Heartbeat silence timeout in milliseconds before a "
-             "LEASE_LOST instance enters SUSPECT.");
+             "Deprecated V1 compatibility flag; V2 fences an authoritative "
+             "membership delete immediately.");
 
 DEFINE_uint64(output_reorder_max_events,
               64,

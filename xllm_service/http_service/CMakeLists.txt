@@ -72,8 +72,20 @@ target_link_libraries(anthropic_stream_encoder PUBLIC brpc-static leveldb::level
 
 cc_library(
   NAME
+    health_response
+  HDRS
+    health_response.h
+  SRCS
+    health_response.cpp
+  DEPS
+    :readiness_controller
+)
+
+cc_library(
+  NAME
   xllm_http_service
   HDRS
+    health_response.h
     request_execution_context.h
     service.h
     request_tracer.h
@@ -85,6 +97,7 @@ cc_library(
     :canonical_request_builder
     :chat_json_parser
     :common
+    :health_response
     :request_identity
     :request
     :scheduler

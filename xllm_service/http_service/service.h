@@ -36,10 +36,10 @@ class Scheduler;
 class InstanceMgr;
 class ClosureGuard;
 
-class XllmHttpServiceImpl : public proto::XllmHttpService {
+class XllmHttpServiceImpl final : public proto::XllmHttpService {
  public:
   XllmHttpServiceImpl(const Options& options, Scheduler* scheduler);
-  ~XllmHttpServiceImpl();
+  ~XllmHttpServiceImpl() override;
 
   void Hello(::google::protobuf::RpcController* controller,
              const proto::HttpHelloRequest* request,
@@ -75,6 +75,16 @@ class XllmHttpServiceImpl : public proto::XllmHttpService {
                const proto::HttpRequest* request,
                proto::HttpResponse* response,
                ::google::protobuf::Closure* done) override;
+
+  void Livez(::google::protobuf::RpcController* controller,
+             const proto::HttpRequest* request,
+             proto::HttpResponse* response,
+             ::google::protobuf::Closure* done) override;
+
+  void Readyz(::google::protobuf::RpcController* controller,
+              const proto::HttpRequest* request,
+              proto::HttpResponse* response,
+              ::google::protobuf::Closure* done) override;
 
   // Internal heartbeat from non-brpc backends (vLLM sidecar): JSON body of
   // proto::HeartbeatRequest carrying LoadMetrics/LatencyMetrics.

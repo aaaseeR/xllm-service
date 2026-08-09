@@ -33,6 +33,8 @@ std::string get_event_key(const etcd::Event& event);
 
 std::string get_event_value(const etcd::Event& event);
 
+int64_t get_event_revision(const etcd::Event& event);
+
 std::string get_event_key_suffix(const etcd::Event& event, uint64_t prefix_len);
 
 class EtcdClient {

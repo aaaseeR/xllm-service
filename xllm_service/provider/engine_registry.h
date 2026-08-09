@@ -100,6 +100,7 @@ class EngineRegistry final {
       uint64_t receiver_monotonic_ms) const;
 
   bool registry_known() const;
+  bool has_accepted_full_snapshot() const;
   bool has_current_full_snapshot() const;
   size_t member_count() const;
   size_t state_count() const;

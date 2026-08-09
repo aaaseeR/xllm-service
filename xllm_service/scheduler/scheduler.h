@@ -31,6 +31,7 @@ limitations under the License.
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
 #include "provider/provider_registry.h"
+#include "provider/readiness_controller.h"
 #include "provider/state_stream_outbox.h"
 #include "request/client_disconnect_monitor.h"
 #include "request/request.h"
@@ -61,11 +62,15 @@ class Scheduler final {
 
   bool handle_instance_heartbeat(const proto::HeartbeatRequest* req);
 
+  bool record_direct_engine_evidence(const std::string& instance_name,
+                                     const std::string& incarnation_id,
+                                     bool success);
+
   provider::ContractResult handle_engine_state_batch(
       const xllm::proto::StateBatch& batch,
       bool* applied);
 
-  void exited() { exited_.store(true, std::memory_order_release); }
+  void exited();
 
   // Called by InstanceMgr only after an authoritative strict membership
   // change. It invalidates subscriber baselines but does not publish soft
@@ -78,6 +83,11 @@ class Scheduler final {
 
   // Returns true if at least one valid instance group is available.
   bool has_available_instances() const;
+
+  void refresh_readiness();
+  void set_draining(bool draining);
+  bool accepting_new_requests() const;
+  provider::ReadinessSnapshot readiness_status() const;
 
   // register new requests from http service
   // keep http callback util request finished.
@@ -171,6 +181,12 @@ class Scheduler final {
 
  private:
   Options options_;
+
+  mutable std::mutex readiness_mutex_;
+  provider::ReadinessController readiness_controller_;
+  provider::ReadinessSnapshot readiness_snapshot_;
+  std::atomic_bool accepting_new_requests_ = false;
+  std::atomic_bool draining_ = false;
 
   std::string service_incarnation_id_;
 
