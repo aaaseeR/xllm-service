@@ -34,6 +34,14 @@ TEST(StateStreamProtocolTest, PushRpcUsesSharedStateBatchType) {
   ASSERT_NE(method, nullptr);
   EXPECT_EQ(method->input_type()->full_name(), "xllm.proto.StateBatch");
   EXPECT_EQ(method->output_type()->full_name(), "xllm_service.proto.Status");
+
+  const google::protobuf::FieldDescriptor* heartbeat_state =
+      proto::HeartbeatRequest::descriptor()->FindFieldByName("engine_state");
+  ASSERT_NE(heartbeat_state, nullptr);
+  EXPECT_EQ(heartbeat_state->number(), 7);
+  EXPECT_TRUE(heartbeat_state->has_presence());
+  EXPECT_EQ(heartbeat_state->message_type()->full_name(),
+            "xllm.proto.EngineState");
 }
 
 proto::DisaggStreamGeneration make_generation(int32_t num_prompt_tokens,

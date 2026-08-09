@@ -83,6 +83,14 @@ class Options {
 
   PROPERTY(uint64_t, engine_link_hard_ttl_ms) = 10000;
 
+  PROPERTY(size_t, state_stream_max_subscribers) = 256;
+
+  PROPERTY(int32_t, state_stream_full_interval_ms) = 1000;
+
+  PROPERTY(int32_t, state_stream_publish_interval_ms) = 50;
+
+  PROPERTY(int32_t, state_stream_rpc_timeout_ms) = 200;
+
   // scheduler options
   PROPERTY(std::string, load_balance_policy);
 

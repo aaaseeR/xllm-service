@@ -62,6 +62,7 @@ cc_library(
     :first_event_recovery_client
     :model_type
     :provider_registry
+    :state_stream_outbox
     :common
     :etcd_client
     :execution_hold
@@ -70,6 +71,7 @@ cc_library(
     :managers
     :request
     :request_deadline_queue
+    :state_stream_client
     :xllm_chat_parse_runtime
     cpprest
     etcd-cpp-api

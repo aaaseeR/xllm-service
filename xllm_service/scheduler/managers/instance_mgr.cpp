@@ -608,6 +608,35 @@ provider::ContractResult InstanceMgr::apply_engine_state_batch(
       batch, receiver_monotonic_ms, applied);
 }
 
+provider::ContractResult InstanceMgr::record_engine_state(
+    const xllm::proto::EngineState& state,
+    uint64_t receiver_monotonic_ms,
+    bool* applied) {
+  return engine_registry_.record_engine_state(
+      state, receiver_monotonic_ms, applied);
+}
+
+provider::ContractResult InstanceMgr::record_link_state(
+    const xllm::proto::LinkState& state,
+    uint64_t receiver_monotonic_ms,
+    bool* applied) {
+  return engine_registry_.record_link_state(
+      state, receiver_monotonic_ms, applied);
+}
+
+provider::ContractResult InstanceMgr::build_full_state_batch(
+    const std::string& master_incarnation,
+    uint64_t snapshot_seq,
+    uint64_t publish_monotonic_ms,
+    xllm::proto::StateBatch* batch) const {
+  return engine_registry_.build_full_state_batch(
+      master_incarnation, snapshot_seq, publish_monotonic_ms, batch);
+}
+
+bool InstanceMgr::has_current_engine_state_full_snapshot() const {
+  return engine_registry_.has_current_full_snapshot();
+}
+
 void InstanceMgr::set_as_master() {
   is_master_service_ = true;
   etcd_client_->remove_watch(ETCD_LOADMETRICS_PREFIX);
@@ -1595,6 +1624,9 @@ bool InstanceMgr::register_instance(const std::string& name,
     add_instance_to_index(name, info);
     instances_.insert(std::make_pair(name, info));
   }
+  if (registry_member_installed) {
+    scheduler_->notify_engine_registry_membership_changed();
+  }
   return true;
 }
 
@@ -1646,6 +1678,7 @@ void InstanceMgr::deregister_instance(
   if (info.provider_descriptor.has_value()) {
     engine_registry_.remove_member(
         provider::make_provider_engine_key(*info.provider_descriptor));
+    scheduler_->notify_engine_registry_membership_changed();
   }
 
   scheduler_->clear_requests_on_failed_instance(

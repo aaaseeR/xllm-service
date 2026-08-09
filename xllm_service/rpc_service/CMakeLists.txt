@@ -29,6 +29,19 @@ target_link_libraries(first_event_recovery_client PRIVATE brpc-static)
 
 cc_library(
   NAME
+  state_stream_client
+  HDRS
+    state_stream_client.h
+  SRCS
+    state_stream_client.cpp
+  DEPS
+    :provider_contract
+    proto::proto_rpc_service
+)
+target_link_libraries(state_stream_client PRIVATE brpc-static)
+
+cc_library(
+  NAME
   xllm_rpc_service
   HDRS
     service.h

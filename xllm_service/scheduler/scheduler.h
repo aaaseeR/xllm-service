@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <thread>
 
@@ -30,6 +31,7 @@ limitations under the License.
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
 #include "provider/provider_registry.h"
+#include "provider/state_stream_outbox.h"
 #include "request/client_disconnect_monitor.h"
 #include "request/request.h"
 #include "request/request_deadline_queue.h"
@@ -63,7 +65,12 @@ class Scheduler final {
       const xllm::proto::StateBatch& batch,
       bool* applied);
 
-  void exited() { exited_ = true; }
+  void exited() { exited_.store(true, std::memory_order_release); }
+
+  // Called by InstanceMgr only after an authoritative strict membership
+  // change. It invalidates subscriber baselines but does not publish soft
+  // state as Registry truth.
+  void notify_engine_registry_membership_changed();
 
   // Returns true if at least one valid instance group is available.
   bool has_available_instances() const;
@@ -108,10 +115,18 @@ class Scheduler final {
 
   void update_master_service_heartbeat();
 
+  void activate_as_master();
+  void run_state_stream_publisher();
+  bool refresh_state_stream_subscribers();
+  void try_apply_local_full_state(uint64_t now_monotonic_ms);
+
   bool register_current_service();
 
   void handle_master_service_watch(const etcd::Response& response,
                                    const uint64_t& prefix_len);
+
+  void handle_master_identity_watch(const etcd::Response& response,
+                                    const uint64_t& prefix_len);
 
   void handle_xservice_watch(const etcd::Response& response,
                              const uint64_t& prefix_len);
@@ -175,9 +190,9 @@ class Scheduler final {
   std::unordered_map<std::string, std::weak_ptr<Request>>
       failed_prefill_recovery_watchlist_;
 
-  bool exited_ = false;
+  std::atomic_bool exited_ = false;
 
-  bool is_master_service_ = false;
+  std::atomic_bool is_master_service_ = false;
 
   TokenizerArgs tokenizer_args_;
 
@@ -197,6 +212,12 @@ class Scheduler final {
   // Append-only cache of immutable Provider/profile Adapters. Request-scoped
   // data is supplied separately to RequestCodec::encode().
   provider::ProviderAdapterRegistry provider_adapter_registry_;
+
+  std::unique_ptr<provider::StateStreamOutbox> state_stream_outbox_;
+  std::atomic<uint64_t> next_state_stream_snapshot_seq_ = 1;
+  std::mutex state_stream_wait_mutex_;
+  std::condition_variable state_stream_cv_;
+  std::unique_ptr<std::thread> state_stream_thread_;
 
   std::unique_ptr<std::thread> heartbeat_thread_;
 

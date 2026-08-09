@@ -350,6 +350,77 @@ TEST(EngineRegistryTest, LinkProofLifecycleAndTtlFailClosed) {
                                       112));
 }
 
+TEST(EngineRegistryTest, MasterIngestionBuildsRebasedAuthoritativeFull) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor prefill = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderDescriptor decode = make_descriptor(
+      xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
+  ASSERT_TRUE(registry.upsert_member(prefill).ok());
+  ASSERT_TRUE(registry.upsert_member(decode).ok());
+  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+
+  bool applied = false;
+  xllm::proto::EngineState prefill_state =
+      make_state(prefill, 2, xllm::proto::ENGINE_LIFECYCLE_READY, 2, 3);
+  ASSERT_TRUE(registry.record_engine_state(prefill_state, 100, &applied).ok());
+  EXPECT_TRUE(applied);
+  prefill_state.set_state_seq(1);
+  ASSERT_TRUE(registry.record_engine_state(prefill_state, 101, &applied).ok());
+  EXPECT_FALSE(applied);
+  ASSERT_TRUE(
+      registry.record_engine_state(make_state(decode, 1), 100, &applied).ok());
+  EXPECT_TRUE(applied);
+  ASSERT_TRUE(
+      registry
+          .record_link_state(
+              make_link(
+                  prefill, decode, 1, xllm::proto::LINK_LIFECYCLE_READY, 4),
+              100,
+              &applied)
+          .ok());
+  EXPECT_TRUE(applied);
+
+  xllm::proto::StateBatch full;
+  ASSERT_TRUE(registry.build_full_state_batch("master", 1, 110, &full).ok());
+  ASSERT_EQ(full.engine_states_size(), 2);
+  ASSERT_EQ(full.link_states_size(), 1);
+  const xllm::proto::EngineState* rebased_prefill = nullptr;
+  for (const xllm::proto::EngineState& state : full.engine_states()) {
+    if (state.engine_uid() == "p") {
+      rebased_prefill = &state;
+    }
+  }
+  ASSERT_NE(rebased_prefill, nullptr);
+  EXPECT_EQ(rebased_prefill->state_seq(), 2u);
+  EXPECT_EQ(rebased_prefill->state_age_ms_at_publish(), 12u);
+  EXPECT_EQ(rebased_prefill->heartbeat_age_ms_at_publish(), 13u);
+  EXPECT_EQ(full.link_states(0).age_ms_at_publish(), 14u);
+
+  ASSERT_TRUE(registry.apply_state_batch(full, 110, &applied).ok());
+  EXPECT_TRUE(applied);
+  EXPECT_TRUE(registry.has_current_full_snapshot());
+}
+
+TEST(EngineRegistryTest, MasterFullWaitsForEveryMemberObservation) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor prefill = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderDescriptor decode = make_descriptor(
+      xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
+  ASSERT_TRUE(registry.upsert_member(prefill).ok());
+  ASSERT_TRUE(registry.upsert_member(decode).ok());
+  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+  bool applied = false;
+  ASSERT_TRUE(
+      registry.record_engine_state(make_state(prefill, 1), 100, &applied).ok());
+
+  xllm::proto::StateBatch full;
+  EXPECT_EQ(registry.build_full_state_batch("master", 1, 100, &full).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
+  EXPECT_TRUE(full.engine_states().empty());
+}
+
 TEST(EngineRegistryTest, CapacityAndInvalidConfigurationFailClosed) {
   EngineRegistryConfig config = test_config();
   config.max_members = 1;

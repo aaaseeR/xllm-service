@@ -83,6 +83,20 @@ class InstanceMgr final {
       const xllm::proto::StateBatch& batch,
       uint64_t receiver_monotonic_ms,
       bool* applied);
+  provider::ContractResult record_engine_state(
+      const xllm::proto::EngineState& state,
+      uint64_t receiver_monotonic_ms,
+      bool* applied);
+  provider::ContractResult record_link_state(
+      const xllm::proto::LinkState& state,
+      uint64_t receiver_monotonic_ms,
+      bool* applied);
+  provider::ContractResult build_full_state_batch(
+      const std::string& master_incarnation,
+      uint64_t snapshot_seq,
+      uint64_t publish_monotonic_ms,
+      xllm::proto::StateBatch* batch) const;
+  bool has_current_engine_state_full_snapshot() const;
 
   // update the recent token latency metrics for the corresponding instance
   void update_latency_metrics(const std::string& instance_name,

@@ -60,6 +60,18 @@ class EngineRegistry final {
   // new FULL before any DELTA or scheduling decision can be accepted.
   ContractResult set_registry_view(bool registry_known,
                                    std::string master_incarnation);
+  // Master-side ingestion. These methods update only soft observations for an
+  // existing Registry member and report whether a newer sequence was stored.
+  ContractResult record_engine_state(const xllm::proto::EngineState& state,
+                                     uint64_t receiver_monotonic_ms,
+                                     bool* applied);
+  ContractResult record_link_state(const xllm::proto::LinkState& state,
+                                   uint64_t receiver_monotonic_ms,
+                                   bool* applied);
+  ContractResult build_full_state_batch(const std::string& master_incarnation,
+                                        uint64_t snapshot_seq,
+                                        uint64_t publish_monotonic_ms,
+                                        xllm::proto::StateBatch* batch) const;
   ContractResult apply_state_batch(const xllm::proto::StateBatch& batch,
                                    uint64_t receiver_monotonic_ms,
                                    bool* applied);

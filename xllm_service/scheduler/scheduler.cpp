@@ -38,6 +38,7 @@ limitations under the License.
 #include "provider/execution_plan_builder.h"
 #include "provider/provider_adapter.h"
 #include "rpc_service/first_event_recovery_client.h"
+#include "rpc_service/state_stream_client.h"
 #include "scheduler/xllm_chat_parse_bridge.h"
 #include "tokenizer/tokenizer_factory.h"
 
@@ -239,18 +240,36 @@ Scheduler::Scheduler(const Options& options)
                                    std::placeholders::_2);
   etcd_client_->add_watch(ETCD_XSERVICE_KEY_PREFIX, handle_xservice);
 
+  std::string observed_master_incarnation;
   if (!etcd_client_->get(ETCD_MASTER_SERVICE_KEY, nullptr)) {
-    is_master_service_ = etcd_client_->set(
-        ETCD_MASTER_SERVICE_KEY, options_.service_name(), kHeartbeatInterval);
+    is_master_service_ = etcd_client_->elect_master(
+        options_.service_name(), service_incarnation_id_, kHeartbeatInterval);
     LOG(INFO) << "Set current service as master!";
+  } else {
+    etcd_client_->get(ETCD_MASTER_SERVICE_INCARNATION_KEY,
+                      &observed_master_incarnation);
   }
 
   instance_mgr_ = std::make_shared<InstanceMgr>(
       options, etcd_client_, is_master_service_, this);
+  if (options_.state_stream_max_subscribers() == 0 ||
+      options_.state_stream_full_interval_ms() <= 0 ||
+      options_.state_stream_publish_interval_ms() <= 0 ||
+      options_.state_stream_rpc_timeout_ms() <= 0) {
+    LOG(FATAL) << "State Stream publisher configuration is invalid.";
+  }
+  state_stream_outbox_ = std::make_unique<provider::StateStreamOutbox>(
+      provider::StateStreamOutboxConfig{
+          .max_subscribers = options_.state_stream_max_subscribers(),
+          .max_pending_engine_states = options_.engine_registry_max_members(),
+          .max_pending_link_states = options_.engine_registry_max_links(),
+      },
+      service_incarnation_id_);
   const provider::ContractResult state_registry_result =
       instance_mgr_->set_engine_state_registry_view(
-          is_master_service_,
-          is_master_service_ ? service_incarnation_id_ : "");
+          is_master_service_ || !observed_master_incarnation.empty(),
+          is_master_service_ ? service_incarnation_id_
+                             : observed_master_incarnation);
   if (!state_registry_result.ok()) {
     LOG(FATAL) << "Failed to initialize Engine State Registry view: "
                << state_registry_result.message();
@@ -268,16 +287,24 @@ Scheduler::Scheduler(const Options& options)
     lb_policy_ = std::make_unique<RoundRobin>(instance_mgr_);
   }
 
+  auto handle_master = std::bind(&Scheduler::handle_master_service_watch,
+                                 this,
+                                 std::placeholders::_1,
+                                 std::placeholders::_2);
+  etcd_client_->add_watch(ETCD_MASTER_SERVICE_KEY, handle_master);
+  auto handle_master_identity =
+      std::bind(&Scheduler::handle_master_identity_watch,
+                this,
+                std::placeholders::_1,
+                std::placeholders::_2);
+  etcd_client_->add_watch(
+      ETCD_MASTER_SERVICE_INCARNATION_KEY, handle_master_identity, false);
   if (is_master_service_) {
-    heartbeat_thread_ = std::make_unique<std::thread>(
-        &Scheduler::update_master_service_heartbeat, this);
-  } else {
-    auto handle_master = std::bind(&Scheduler::handle_master_service_watch,
-                                   this,
-                                   std::placeholders::_1,
-                                   std::placeholders::_2);
-    etcd_client_->add_watch(ETCD_MASTER_SERVICE_KEY, handle_master);
+    activate_as_master();
   }
+
+  state_stream_thread_ = std::make_unique<std::thread>(
+      &Scheduler::run_state_stream_publisher, this);
 
   execution_hold_cleanup_thread_ = std::make_unique<std::thread>(
       &Scheduler::run_execution_hold_cleanup, this);
@@ -286,6 +313,15 @@ Scheduler::Scheduler(const Options& options)
 }
 
 Scheduler::~Scheduler() {
+  exited_.store(true, std::memory_order_release);
+  state_stream_cv_.notify_all();
+  etcd_client_->stop_watch();
+  if (state_stream_thread_ != nullptr && state_stream_thread_->joinable()) {
+    state_stream_thread_->join();
+  }
+  if (heartbeat_thread_ != nullptr && heartbeat_thread_->joinable()) {
+    heartbeat_thread_->join();
+  }
   client_disconnect_monitor_->close();
   {
     std::lock_guard<std::mutex> lock(execution_hold_cleanup_wait_mutex_);
@@ -300,7 +336,6 @@ Scheduler::~Scheduler() {
       request_watchdog_thread_->joinable()) {
     request_watchdog_thread_->join();
   }
-  etcd_client_->stop_watch();
 }
 
 bool Scheduler::schedule(std::shared_ptr<Request> request) {
@@ -486,9 +521,191 @@ std::shared_ptr<brpc::Channel> Scheduler::get_channel(
   return instance_mgr_->get_channel(target_name);
 }
 
+void Scheduler::activate_as_master() {
+  const bool was_master =
+      is_master_service_.exchange(true, std::memory_order_acq_rel);
+  if (!was_master) {
+    global_kvcache_mgr_->set_as_master();
+    instance_mgr_->set_as_master();
+  }
+  const provider::ContractResult state_registry_result =
+      instance_mgr_->set_engine_state_registry_view(true,
+                                                    service_incarnation_id_);
+  if (!state_registry_result.ok()) {
+    LOG(ERROR) << "Failed to activate Engine State Registry master: "
+               << state_registry_result.message();
+  }
+  if (heartbeat_thread_ == nullptr) {
+    heartbeat_thread_ = std::make_unique<std::thread>(
+        &Scheduler::update_master_service_heartbeat, this);
+  }
+  state_stream_outbox_->require_full_for_all();
+  state_stream_cv_.notify_all();
+}
+
+bool Scheduler::refresh_state_stream_subscribers() {
+  std::unordered_map<std::string, std::string> service_members;
+  if (!etcd_client_->get_prefix(ETCD_XSERVICE_KEY_PREFIX, &service_members)) {
+    return false;
+  }
+  std::vector<std::string> subscribers;
+  const provider::ContractResult resolved =
+      provider::resolve_state_stream_subscribers(
+          service_members,
+          options_.service_name(),
+          options_.state_stream_max_subscribers(),
+          &subscribers);
+  if (!resolved.ok()) {
+    LOG(ERROR) << "Failed to resolve State Stream subscribers: "
+               << resolved.message();
+    return false;
+  }
+  const provider::ContractResult replaced =
+      state_stream_outbox_->replace_subscribers(subscribers);
+  if (!replaced.ok()) {
+    LOG(ERROR) << "Failed to update State Stream subscribers: "
+               << replaced.message();
+    return false;
+  }
+  return true;
+}
+
+void Scheduler::try_apply_local_full_state(uint64_t now_monotonic_ms) {
+  if (!is_master_service_.load(std::memory_order_acquire)) {
+    return;
+  }
+  if (instance_mgr_->has_current_engine_state_full_snapshot()) {
+    return;
+  }
+  const uint64_t snapshot_seq =
+      next_state_stream_snapshot_seq_.fetch_add(1, std::memory_order_relaxed);
+  if (snapshot_seq == 0) {
+    LOG(FATAL) << "State Stream snapshot sequence exhausted.";
+  }
+  xllm::proto::StateBatch full;
+  const provider::ContractResult built = instance_mgr_->build_full_state_batch(
+      service_incarnation_id_, snapshot_seq, now_monotonic_ms, &full);
+  if (!built.ok()) {
+    return;
+  }
+  bool applied = false;
+  const provider::ContractResult result =
+      instance_mgr_->apply_engine_state_batch(full, now_monotonic_ms, &applied);
+  if (!result.ok()) {
+    LOG(ERROR) << "Failed to activate local State Stream FULL: "
+               << result.message();
+  }
+}
+
+void Scheduler::notify_engine_registry_membership_changed() {
+  if (state_stream_outbox_ == nullptr) {
+    return;
+  }
+  state_stream_outbox_->require_full_for_all();
+  try_apply_local_full_state(monotonic_time_ms());
+  state_stream_cv_.notify_all();
+}
+
+void Scheduler::run_state_stream_publisher() {
+  uint64_t last_subscriber_refresh_ms = 0;
+  uint64_t last_periodic_full_ms = 0;
+  while (!exited_.load(std::memory_order_acquire)) {
+    {
+      std::unique_lock lock(state_stream_wait_mutex_);
+      state_stream_cv_.wait_for(
+          lock,
+          std::chrono::milliseconds(
+              options_.state_stream_publish_interval_ms()),
+          [this]() { return exited_.load(std::memory_order_acquire); });
+    }
+    if (exited_.load(std::memory_order_acquire) ||
+        !is_master_service_.load(std::memory_order_acquire)) {
+      continue;
+    }
+
+    const uint64_t now_monotonic_ms = monotonic_time_ms();
+    if (last_subscriber_refresh_ms == 0 ||
+        now_monotonic_ms - last_subscriber_refresh_ms >= 1000) {
+      std::string master_address;
+      std::string master_incarnation;
+      const bool still_master =
+          etcd_client_->get(ETCD_MASTER_SERVICE_KEY, &master_address) &&
+          etcd_client_->get(ETCD_MASTER_SERVICE_INCARNATION_KEY,
+                            &master_incarnation) &&
+          master_address == options_.service_name() &&
+          master_incarnation == service_incarnation_id_;
+      if (!still_master) {
+        is_master_service_.store(false, std::memory_order_release);
+        instance_mgr_->set_engine_state_registry_view(false, "");
+        continue;
+      }
+      refresh_state_stream_subscribers();
+      last_subscriber_refresh_ms = now_monotonic_ms;
+    }
+    if (last_periodic_full_ms == 0 ||
+        now_monotonic_ms - last_periodic_full_ms >=
+            static_cast<uint64_t>(options_.state_stream_full_interval_ms())) {
+      state_stream_outbox_->require_full_for_all();
+      last_periodic_full_ms = now_monotonic_ms;
+    }
+
+    const std::vector<std::string> ready =
+        state_stream_outbox_->ready_subscribers();
+    if (ready.empty()) {
+      continue;
+    }
+    xllm::proto::StateBatch authoritative_full;
+    const provider::ContractResult full_result =
+        instance_mgr_->build_full_state_batch(
+            service_incarnation_id_, 1, now_monotonic_ms, &authoritative_full);
+
+    std::vector<StateStreamPush> pushes;
+    pushes.reserve(ready.size());
+    for (const std::string& subscriber : ready) {
+      StateStreamPush push;
+      push.subscriber = subscriber;
+      push.timeout_ms =
+          static_cast<uint64_t>(options_.state_stream_rpc_timeout_ms());
+      const uint64_t snapshot_seq = next_state_stream_snapshot_seq_.fetch_add(
+          1, std::memory_order_relaxed);
+      if (snapshot_seq == 0) {
+        LOG(FATAL) << "State Stream snapshot sequence exhausted.";
+      }
+      if (!state_stream_outbox_->begin_delivery(subscriber,
+                                                authoritative_full,
+                                                snapshot_seq,
+                                                now_monotonic_ms,
+                                                &push.batch)) {
+        continue;
+      }
+      pushes.emplace_back(std::move(push));
+    }
+
+    const std::vector<StateStreamPushResult> results =
+        push_state_stream_batches(pushes);
+    for (size_t index = 0; index < results.size(); ++index) {
+      state_stream_outbox_->complete_delivery(pushes[index].subscriber,
+                                              results[index].ok);
+      if (!results[index].ok) {
+        LOG(WARNING) << "State Stream push failed for "
+                     << pushes[index].subscriber << ": "
+                     << results[index].message;
+      }
+    }
+    static_cast<void>(full_result);
+  }
+}
+
 void Scheduler::update_master_service_heartbeat() {
   while (!exited_) {
     std::this_thread::sleep_for(std::chrono::seconds(kHeartbeatInterval));
+
+    if (exited_.load(std::memory_order_acquire)) {
+      break;
+    }
+    if (!is_master_service_.load(std::memory_order_acquire)) {
+      continue;
+    }
 
     global_kvcache_mgr_->upload_kvcache();
 
@@ -535,6 +752,40 @@ bool Scheduler::handle_instance_heartbeat(const proto::HeartbeatRequest* req) {
                                                 req->incarnation_id())) {
     return false;
   }
+  if (req->has_engine_state()) {
+    if (!is_master_service_.load(std::memory_order_acquire) ||
+        req->engine_state().engine_uid() != req->name() ||
+        req->engine_state().incarnation_id() != req->incarnation_id()) {
+      return false;
+    }
+    const uint64_t now_monotonic_ms = monotonic_time_ms();
+    bool applied = false;
+    const provider::ContractResult recorded =
+        instance_mgr_->record_engine_state(
+            req->engine_state(), now_monotonic_ms, &applied);
+    if (!recorded.ok()) {
+      LOG(ERROR) << "Rejected EngineState from " << req->name() << ": "
+                 << recorded.message();
+      return false;
+    }
+    if (applied) {
+      xllm::proto::StateBatch delta;
+      delta.set_contract_version(provider::kProviderContractVersion);
+      delta.set_master_incarnation(service_incarnation_id_);
+      delta.set_snapshot_seq(1);
+      delta.set_kind(xllm::proto::STATE_BATCH_KIND_DELTA);
+      *delta.add_engine_states() = req->engine_state();
+      const provider::ContractResult queued =
+          state_stream_outbox_->enqueue_delta(delta, now_monotonic_ms);
+      if (!queued.ok()) {
+        LOG(ERROR) << "Failed to enqueue EngineState from " << req->name()
+                   << ": " << queued.message();
+        return false;
+      }
+      try_apply_local_full_state(now_monotonic_ms);
+      state_stream_cv_.notify_all();
+    }
+  }
   global_kvcache_mgr_->record_updated_kvcaches(req->name(), req->cache_event());
   instance_mgr_->record_load_metrics_update(req->name(), req->load_metrics());
   instance_mgr_->update_latency_metrics(req->name(), req->latency_metrics());
@@ -555,27 +806,51 @@ provider::ContractResult Scheduler::handle_engine_state_batch(
 
 void Scheduler::handle_master_service_watch(const etcd::Response& response,
                                             const uint64_t& prefix_len) {
+  static_cast<void>(prefix_len);
+  if (exited_ || response.events().empty()) {
+    return;
+  }
+  const bool master_deleted = std::any_of(
+      response.events().begin(),
+      response.events().end(),
+      [](const etcd::Event& event) {
+        return event.event_type() == etcd::Event::EventType::DELETE_;
+      });
+  if (master_deleted && etcd_client_->elect_master(options_.service_name(),
+                                                   service_incarnation_id_,
+                                                   kHeartbeatInterval)) {
+    activate_as_master();
+  }
+}
+
+void Scheduler::handle_master_identity_watch(const etcd::Response& response,
+                                             const uint64_t& prefix_len) {
+  static_cast<void>(prefix_len);
   if (exited_ || response.events().empty()) {
     return;
   }
 
-  if (etcd_client_->set(ETCD_MASTER_SERVICE_KEY,
-                        options_.service_name(),
-                        kHeartbeatInterval)) {
-    is_master_service_ = true;
-
-    heartbeat_thread_ = std::make_unique<std::thread>(
-        &Scheduler::update_master_service_heartbeat, this);
-
-    global_kvcache_mgr_->set_as_master();
-    instance_mgr_->set_as_master();
-    const provider::ContractResult state_registry_result =
-        instance_mgr_->set_engine_state_registry_view(true,
-                                                      service_incarnation_id_);
-    if (!state_registry_result.ok()) {
-      LOG(ERROR) << "Failed to activate Engine State Registry master: "
-                 << state_registry_result.message();
-    }
+  std::string master_address;
+  std::string master_incarnation;
+  if (!etcd_client_->get(ETCD_MASTER_SERVICE_KEY, &master_address) ||
+      !etcd_client_->get(ETCD_MASTER_SERVICE_INCARNATION_KEY,
+                         &master_incarnation) ||
+      master_address.empty() || master_incarnation.empty()) {
+    is_master_service_.store(false, std::memory_order_release);
+    instance_mgr_->set_engine_state_registry_view(false, "");
+    return;
+  }
+  if (master_address == options_.service_name() &&
+      master_incarnation == service_incarnation_id_) {
+    activate_as_master();
+    return;
+  }
+  is_master_service_.store(false, std::memory_order_release);
+  const provider::ContractResult result =
+      instance_mgr_->set_engine_state_registry_view(true, master_incarnation);
+  if (!result.ok()) {
+    LOG(ERROR) << "Failed to update Engine State Registry master view: "
+               << result.message();
   }
 }
 

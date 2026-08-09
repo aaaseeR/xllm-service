@@ -119,6 +119,31 @@ bool EtcdClient::set(const std::string& key,
   }
 }
 
+bool EtcdClient::elect_master(const std::string& service_name,
+                              const std::string& master_incarnation,
+                              int ttl) {
+  if (service_name.empty() || master_incarnation.empty() || ttl <= 0) {
+    return false;
+  }
+  auto keep_alive = std::make_shared<etcd::KeepAlive>(client_, ttl);
+  etcdv3::Transaction transaction;
+  transaction.add_compare_create(namespaced_key(ETCD_MASTER_SERVICE_KEY), 0);
+  transaction.add_success_put(namespaced_key(ETCD_MASTER_SERVICE_KEY),
+                              service_name,
+                              keep_alive->Lease());
+  transaction.add_success_put(
+      namespaced_key(ETCD_MASTER_SERVICE_INCARNATION_KEY),
+      master_incarnation,
+      keep_alive->Lease());
+  etcd::Response response = client_.txn(transaction);
+  if (response.is_ok()) {
+    keep_alives_.emplace_back(std::move(keep_alive));
+    return true;
+  }
+  keep_alive->Cancel();
+  return false;
+}
+
 bool EtcdClient::set(const std::string& key_prefix,
                      const XXH3KeyCacheMap& values) {
   bool rt = true;

@@ -33,6 +33,10 @@ limitations under the License.
 namespace xllm_service {
 
 constexpr const char* ETCD_MASTER_SERVICE_KEY = "XLLM:SERVICE:MASTER";
+// Stored outside XLLM:SERVICE: so legacy Engine member enumeration and the
+// pure-address MASTER value remain wire compatible.
+constexpr const char* ETCD_MASTER_SERVICE_INCARNATION_KEY =
+    "XLLM:STATE:MASTER_INCARNATION";
 constexpr const char* ETCD_XSERVICE_KEY_PREFIX = "XLLM:SERVICE:";
 constexpr const char* ETCD_MASTER_SERVICE_NAME = "MASTER";
 

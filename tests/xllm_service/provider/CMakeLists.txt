@@ -12,6 +12,16 @@ cc_test(
 
 cc_test(
   NAME
+    state_stream_outbox_test
+  SRCS
+    state_stream_outbox_test.cpp
+  DEPS
+    :state_stream_outbox
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     provider_contract_test
   SRCS
     provider_contract_test.cpp

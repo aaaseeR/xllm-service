@@ -26,3 +26,14 @@ cc_test(
     brpc-static
     proto_xllm
 )
+
+cc_test(
+  NAME
+    state_stream_client_test
+  SRCS
+    state_stream_client_test.cpp
+  DEPS
+    :state_stream_client
+    GTest::gtest_main
+    brpc-static
+)

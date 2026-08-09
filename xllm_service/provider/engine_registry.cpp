@@ -216,6 +216,149 @@ ContractResult EngineRegistry::set_registry_view(
   return ContractResult::success();
 }
 
+ContractResult EngineRegistry::record_engine_state(
+    const xllm::proto::EngineState& state,
+    uint64_t receiver_monotonic_ms,
+    bool* applied) {
+  if (applied == nullptr) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+                "EngineState applied output must not be null");
+  }
+  *applied = false;
+  if (!config_valid_) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "Engine Registry configuration is invalid");
+  }
+  xllm::proto::ProviderEngineKey wire_key;
+  wire_key.set_provider_id(state.provider_id());
+  wire_key.set_profile_digest(state.profile_digest());
+  wire_key.set_engine_uid(state.engine_uid());
+  wire_key.set_incarnation_id(state.incarnation_id());
+  const std::optional<EngineKey> key = to_engine_key(wire_key);
+  if (!key.has_value() || !state.has_heartbeat_age_ms_at_publish() ||
+      !state.has_state_age_ms_at_publish()) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+                "EngineState identity and publish ages are required");
+  }
+
+  std::unique_lock lock(mutex_);
+  const auto member = members_.find(key.value());
+  if (member == members_.end() ||
+      member->second.identity().engine_uid() != state.engine_uid()) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+                "EngineState does not match a current Registry member");
+  }
+  ContractResult validation = validate_engine_state(member->second, state);
+  if (!validation.ok()) {
+    return validation;
+  }
+  const auto existing = states_.find(key.value());
+  if (existing != states_.end() &&
+      state.state_seq() <= existing->second.state.state_seq()) {
+    return ContractResult::success();
+  }
+  states_.insert_or_assign(key.value(),
+                           CachedEngineState{
+                               .state = state,
+                               .received_monotonic_ms = receiver_monotonic_ms,
+                           });
+  *applied = true;
+  return ContractResult::success();
+}
+
+ContractResult EngineRegistry::record_link_state(
+    const xllm::proto::LinkState& state,
+    uint64_t receiver_monotonic_ms,
+    bool* applied) {
+  if (applied == nullptr) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+                "LinkState applied output must not be null");
+  }
+  *applied = false;
+  if (!config_valid_) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "Engine Registry configuration is invalid");
+  }
+  std::unique_lock lock(mutex_);
+  ContractResult validation = validate_link_state_locked(state);
+  if (!validation.ok()) {
+    return validation;
+  }
+  const LinkKey key{
+      .prefill = to_engine_key(state.prefill()).value(),
+      .decode = to_engine_key(state.decode()).value(),
+  };
+  const auto existing = links_.find(key);
+  if (existing != links_.end() &&
+      state.state_seq() <= existing->second.state.state_seq()) {
+    return ContractResult::success();
+  }
+  links_.insert_or_assign(key,
+                          CachedLinkState{
+                              .state = state,
+                              .received_monotonic_ms = receiver_monotonic_ms,
+                          });
+  *applied = true;
+  return ContractResult::success();
+}
+
+ContractResult EngineRegistry::build_full_state_batch(
+    const std::string& master_incarnation,
+    uint64_t snapshot_seq,
+    uint64_t publish_monotonic_ms,
+    xllm::proto::StateBatch* batch) const {
+  if (batch == nullptr || master_incarnation.empty() || snapshot_seq == 0) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+                "StateBatch output, master, and sequence are required");
+  }
+  batch->Clear();
+  if (!config_valid_) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "Engine Registry configuration is invalid");
+  }
+  std::shared_lock lock(mutex_);
+  if (!registry_known_ || master_incarnation != master_incarnation_) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+                "StateBatch master is not the Registry current master");
+  }
+  if (states_.size() != members_.size()) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "StateBatch FULL cannot cover every Registry member");
+  }
+  batch->set_contract_version(kProviderContractVersion);
+  batch->set_master_incarnation(master_incarnation);
+  batch->set_snapshot_seq(snapshot_seq);
+  batch->set_kind(xllm::proto::STATE_BATCH_KIND_FULL);
+  for (const auto& [key, member] : members_) {
+    const auto state = states_.find(key);
+    if (state == states_.end() ||
+        state->second.state.engine_uid() != member.identity().engine_uid()) {
+      batch->Clear();
+      return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                  "StateBatch FULL member observation is missing");
+    }
+    xllm::proto::EngineState* output = batch->add_engine_states();
+    *output = state->second.state;
+    output->set_heartbeat_age_ms_at_publish(
+        effective_age_ms(output->heartbeat_age_ms_at_publish(),
+                         state->second.received_monotonic_ms,
+                         publish_monotonic_ms));
+    output->set_state_age_ms_at_publish(
+        effective_age_ms(output->state_age_ms_at_publish(),
+                         state->second.received_monotonic_ms,
+                         publish_monotonic_ms));
+  }
+  for (const auto& [key, state] : links_) {
+    static_cast<void>(key);
+    xllm::proto::LinkState* output = batch->add_link_states();
+    *output = state.state;
+    output->set_age_ms_at_publish(effective_age_ms(output->age_ms_at_publish(),
+                                                   state.received_monotonic_ms,
+                                                   publish_monotonic_ms));
+  }
+  return ContractResult::success();
+}
+
 ContractResult EngineRegistry::validate_link_state_locked(
     const xllm::proto::LinkState& state) const {
   const std::optional<EngineKey> prefill_key = to_engine_key(state.prefill());

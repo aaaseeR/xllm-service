@@ -82,6 +82,12 @@ class EtcdClient {
   // create key-value with lease and transaction
   bool set(const std::string& key, const std::string& value, const int ttl);
 
+  // Atomically publishes the legacy pure-address master value and the V2
+  // master incarnation under the same lease.
+  bool elect_master(const std::string& service_name,
+                    const std::string& master_incarnation,
+                    int ttl);
+
   bool rm(const std::string& key);
 
   bool rm(const std::string& key_prefix,

@@ -100,6 +100,7 @@ message HeartbeatRequest {
   LoadMetrics load_metrics = 3;
   LatencyMetrics latency_metrics = 4;
   string incarnation_id = 6;
+  optional xllm.proto.EngineState engine_state = 7;
 }
 
 message InstanceID {

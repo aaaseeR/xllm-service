@@ -53,6 +53,18 @@ cc_library(
 
 cc_library(
   NAME
+    state_stream_outbox
+  HDRS
+    state_stream_outbox.h
+  SRCS
+    state_stream_outbox.cpp
+  DEPS
+    :provider_contract
+    proto_xllm
+)
+
+cc_library(
+  NAME
     provider_route_selector
   HDRS
     provider_route_selector.h
