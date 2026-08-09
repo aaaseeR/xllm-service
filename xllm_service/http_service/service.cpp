@@ -43,6 +43,7 @@ limitations under the License.
 #include "http_service/chat_json_parser.h"
 #include "http_service/health_response.h"
 #include "http_service/request_execution_context.h"
+#include "http_service/sse_terminal_marker.h"
 #include "observability/request_identity.h"
 #include "provider/canonical_request_builder.h"
 #include "scheduler/scheduler.h"
@@ -340,6 +341,7 @@ class CustomProgressiveReader final : public brpc::ProgressiveReader {
   // A temporary error may be handled by blocking this function, which
   // may block the HTTP parsing on the socket.
   butil::Status OnReadOnePart(const void* data, size_t length) override {
+    terminal_marker_.observe(data, length);
     call_data_->write(std::string(static_cast<const char*>(data), length));
     return butil::Status::OK();
   }
@@ -351,16 +353,20 @@ class CustomProgressiveReader final : public brpc::ProgressiveReader {
   // This method will be called once and only once. No other methods will
   // be called after. User can release the memory of this object inside.
   void OnEndOfMessage(const butil::Status& status) override {
+    const bool semantic_terminal = terminal_marker_.terminal_at_end();
     scheduler_->record_direct_engine_evidence(
-        instance_name_, incarnation_id_, status.ok() && backend_success_);
+        instance_name_,
+        incarnation_id_,
+        status.ok() && backend_success_ && semantic_terminal);
     bool terminal_resolved = true;
-    if (status.ok() && backend_success_ && request_ != nullptr) {
+    if (status.ok() && backend_success_ && semantic_terminal &&
+        request_ != nullptr) {
       terminal_resolved = scheduler_->resolve_terminal_execution_hold(request_);
     }
     if (request_ != nullptr) {
-      scheduler_->finish_request(
-          request_->correlation.request_uid(),
-          !status.ok() || !backend_success_ || !terminal_resolved);
+      scheduler_->finish_request(request_->correlation.request_uid(),
+                                 !status.ok() || !backend_success_ ||
+                                     !semantic_terminal || !terminal_resolved);
     }
     delete this;
   }
@@ -373,6 +379,7 @@ class CustomProgressiveReader final : public brpc::ProgressiveReader {
   std::string incarnation_id_;
   bool backend_success_ = false;
   std::shared_ptr<Request> request_;
+  SseTerminalMarker terminal_marker_;
 };
 
 // Done callback for a streaming vLLM forward: once the response header has

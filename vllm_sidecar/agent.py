@@ -16,13 +16,14 @@
 
 from __future__ import annotations
 
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import math
+import socket
 import threading
 from urllib.parse import urlsplit
-
-import requests
 
 from .attempts import AttemptKey, AttemptLedger, AttemptResult
 
@@ -45,22 +46,86 @@ _HOP_HEADERS = {
 }
 
 
+class _CancelableHttpConnection:
+    def __init__(self, connection: http.client.HTTPConnection) -> None:
+        self._connection = connection
+        self._lock = threading.Lock()
+        self._cancelled = False
+
+    @property
+    def connection(self) -> http.client.HTTPConnection:
+        return self._connection
+
+    def request(
+        self, method: str, path: str, body: bytes | None, headers: dict[str, str]
+    ) -> bool:
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._connection.request(method, path, body=body, headers=headers)
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            connection_socket = self._connection.sock
+            if connection_socket is not None:
+                try:
+                    connection_socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            self._connection.close()
+
+
 class AgentRuntime:
     def __init__(
         self,
         listen_address: str,
         upstream_url: str,
         max_attempt_records: int = 8192,
+        max_cancel_fences: int = 8192,
         terminal_ttl_seconds: float = 60.0,
+        negative_fence_ttl_seconds: float = 60.0,
+        max_inflight_requests: int = 256,
         connect_timeout_seconds: float = 1.0,
+        ingress_timeout_seconds: float = 5.0,
     ) -> None:
         host, port = _split_address(listen_address)
-        if connect_timeout_seconds <= 0:
-            raise ValueError("connect timeout must be positive")
+        if (
+            type(max_inflight_requests) is not int
+            or max_inflight_requests <= 0
+            or not math.isfinite(connect_timeout_seconds)
+            or connect_timeout_seconds <= 0
+            or not math.isfinite(ingress_timeout_seconds)
+            or ingress_timeout_seconds <= 0
+        ):
+            raise ValueError("Agent concurrency and timeouts must be positive")
         self._listen_address = listen_address
-        self._upstream_url = upstream_url.rstrip("/")
+        upstream = urlsplit(upstream_url)
+        if (
+            upstream.scheme not in ("http", "https")
+            or upstream.hostname is None
+            or upstream.username is not None
+            or upstream.password is not None
+            or upstream.query
+            or upstream.fragment
+        ):
+            raise ValueError("upstream URL must be an HTTP(S) base URL")
+        self._upstream_scheme = upstream.scheme
+        self._upstream_host = upstream.hostname
+        self._upstream_port = upstream.port or (
+            443 if upstream.scheme == "https" else 80
+        )
+        self._upstream_path = upstream.path.rstrip("/")
         self._connect_timeout = connect_timeout_seconds
-        self._ledger = AttemptLedger(max_attempt_records, terminal_ttl_seconds)
+        self._ingress_timeout = ingress_timeout_seconds
+        self._inflight = threading.BoundedSemaphore(max_inflight_requests)
+        self._ledger = AttemptLedger(
+            max_attempt_records,
+            terminal_ttl_seconds,
+            max_cancel_fences,
+            negative_fence_ttl_seconds,
+        )
         self._server = ThreadingHTTPServer((host, port), self._handler_type())
         self._server.daemon_threads = True
         self._thread: threading.Thread | None = None
@@ -120,6 +185,10 @@ class AgentRuntime:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
+            def setup(self) -> None:
+                super().setup()
+                self.connection.settimeout(runtime._ingress_timeout)
+
             def do_GET(self) -> None:
                 runtime._handle(self)
 
@@ -169,7 +238,13 @@ class AgentRuntime:
         if not self._ledger.accepting():
             self._write_json(handler, 503, {"error": "agent is fenced"})
             return
-        self._proxy(handler, path, None, None, None)
+        if not self._inflight.acquire(blocking=False):
+            self._write_json(handler, 503, {"error": "Agent concurrency limit"})
+            return
+        try:
+            self._proxy(handler, path, None, None, None)
+        finally:
+            self._inflight.release()
 
     def _attempt_control(
         self, handler: BaseHTTPRequestHandler, cancel: bool
@@ -200,6 +275,17 @@ class AgentRuntime:
         if result.reason == "ADMISSION_REASON_STALE_INCARNATION":
             self._write_json(handler, 409, {"error": "stale incarnation"})
             return
+        if result.reason == "ADMISSION_REASON_CANCEL_FENCE_CAPACITY":
+            self._write_json(
+                handler,
+                503,
+                _attempt_json(
+                    result,
+                    AttemptKey(request_uid, attempt_seq),
+                    incarnation_id,
+                ),
+            )
+            return
         self._write_json(
             handler,
             200,
@@ -214,39 +300,49 @@ class AgentRuntime:
         if handler.command != "POST":
             self._write_json(handler, 405, {"error": "method not allowed"})
             return
-        request_uid = handler.headers.get("X-Request-UID", "")
-        incarnation_id = handler.headers.get("X-Incarnation-ID", "")
+        if not self._inflight.acquire(blocking=False):
+            self._write_json(handler, 503, {"error": "Agent concurrency limit"})
+            return
         try:
-            attempt_seq = int(handler.headers.get("X-Attempt-Seq", ""))
-            remaining_ms = int(handler.headers.get("X-Remaining-Deadline-Ms", ""))
-        except ValueError:
-            self._write_json(handler, 400, {"error": "invalid V2 attempt headers"})
-            return
-        result = self._ledger.begin(
-            request_uid, attempt_seq, incarnation_id, remaining_ms
-        )
-        if not result.accepted:
-            if result.reason == "ADMISSION_REASON_INVALID_REQUEST":
-                status = 400
-            elif (
-                result.replayed
-                or result.reason == "ADMISSION_REASON_STALE_INCARNATION"
-            ):
-                status = 409
-            else:
-                status = 503
-            self._write_json(
-                handler,
-                status,
-                _attempt_json(
-                    result,
-                    AttemptKey(request_uid, attempt_seq),
-                    incarnation_id,
-                ),
+            request_uid = handler.headers.get("X-Request-UID", "")
+            incarnation_id = handler.headers.get("X-Incarnation-ID", "")
+            try:
+                attempt_seq = int(handler.headers.get("X-Attempt-Seq", ""))
+                remaining_ms = int(
+                    handler.headers.get("X-Remaining-Deadline-Ms", "")
+                )
+            except ValueError:
+                self._write_json(
+                    handler, 400, {"error": "invalid V2 attempt headers"}
+                )
+                return
+            result = self._ledger.begin(
+                request_uid, attempt_seq, incarnation_id, remaining_ms
             )
-            return
-        key = AttemptKey(request_uid, attempt_seq)
-        self._proxy(handler, path, key, incarnation_id, remaining_ms)
+            if not result.accepted:
+                if result.reason == "ADMISSION_REASON_INVALID_REQUEST":
+                    status = 400
+                elif (
+                    result.replayed
+                    or result.reason == "ADMISSION_REASON_STALE_INCARNATION"
+                ):
+                    status = 409
+                else:
+                    status = 503
+                self._write_json(
+                    handler,
+                    status,
+                    _attempt_json(
+                        result,
+                        AttemptKey(request_uid, attempt_seq),
+                        incarnation_id,
+                    ),
+                )
+                return
+            key = AttemptKey(request_uid, attempt_seq)
+            self._proxy(handler, path, key, incarnation_id, remaining_ms)
+        finally:
+            self._inflight.release()
 
     def _proxy(
         self,
@@ -267,6 +363,16 @@ class AgentRuntime:
                 )
             return
         body = _inject_request_id(raw_body, path, key)
+        if body is None:
+            if key is not None:
+                self._ledger.finish(
+                    key,
+                    incarnation_id or "",
+                    "ATTEMPT_LIFECYCLE_STATE_FAILED",
+                    "ADMISSION_REASON_INVALID_REQUEST",
+                )
+            self._write_json(handler, 400, {"error": "invalid inference JSON"})
+            return
         headers = {
             name: value
             for name, value in handler.headers.items()
@@ -277,17 +383,40 @@ class AgentRuntime:
             headers["Content-Length"] = str(len(body))
         headers["Accept-Encoding"] = "identity"
         read_timeout = max(0.001, (remaining_ms or 30000) / 1000.0)
+        upstream: _CancelableHttpConnection | None = None
         try:
-            response = requests.request(
-                handler.command,
-                self._upstream_url + handler.path,
-                headers=headers,
-                data=body if body else None,
-                stream=True,
-                timeout=(self._connect_timeout, read_timeout),
-                allow_redirects=False,
+            connection_type = (
+                http.client.HTTPSConnection
+                if self._upstream_scheme == "https"
+                else http.client.HTTPConnection
             )
-        except requests.RequestException as error:
+            connection = connection_type(
+                self._upstream_host,
+                self._upstream_port,
+                timeout=min(self._connect_timeout, read_timeout),
+            )
+            connection.connect()
+            if connection.sock is not None:
+                connection.sock.settimeout(read_timeout)
+            upstream = _CancelableHttpConnection(connection)
+            if key is not None and not self._ledger.attach(
+                key, incarnation_id or "", upstream
+            ):
+                upstream.close()
+                self._write_json(handler, 409, {"error": "attempt was cancelled"})
+                return
+            if not upstream.request(
+                handler.command,
+                self._upstream_path + handler.path,
+                body if body else None,
+                headers,
+            ):
+                self._write_json(handler, 409, {"error": "attempt was cancelled"})
+                return
+            response = connection.getresponse()
+        except (OSError, http.client.HTTPException) as error:
+            if upstream is not None:
+                upstream.close()
             if key is not None:
                 self._ledger.reap_expired()
                 current = self._ledger.query(
@@ -322,16 +451,9 @@ class AgentRuntime:
                 )
             self._write_json(handler, 502, {"error": f"upstream failed: {error}"})
             return
-
-        if key is not None and not self._ledger.attach(
-            key, incarnation_id or "", response
-        ):
-            response.close()
-            self._write_json(handler, 409, {"error": "attempt was cancelled"})
-            return
         try:
-            handler.send_response(response.status_code)
-            for name, value in response.headers.items():
+            handler.send_response(response.status)
+            for name, value in response.getheaders():
                 if name.lower() not in _HOP_HEADERS and name.lower() not in (
                     "content-length",
                     "content-encoding",
@@ -339,13 +461,14 @@ class AgentRuntime:
                     handler.send_header(name, value)
             handler.send_header("Connection", "close")
             handler.end_headers()
-            for chunk in response.iter_content(chunk_size=16384):
+            while True:
+                chunk = response.read(16384)
                 if not chunk:
-                    continue
+                    break
                 handler.wfile.write(chunk)
                 handler.wfile.flush()
             if key is not None:
-                if 200 <= response.status_code < 300:
+                if 200 <= response.status < 300:
                     self._ledger.finish(
                         key,
                         incarnation_id or "",
@@ -359,13 +482,15 @@ class AgentRuntime:
                         "ATTEMPT_LIFECYCLE_STATE_FAILED",
                         "ADMISSION_REASON_INTERNAL_ERROR",
                     )
-        except (BrokenPipeError, ConnectionResetError, requests.RequestException):
+        except (OSError, ValueError, http.client.HTTPException):
             if key is not None:
                 self._ledger.cancel(
                     key.request_uid, key.attempt_seq, incarnation_id or ""
                 )
         finally:
             response.close()
+            if upstream is not None:
+                upstream.close()
             handler.close_connection = True
 
     @staticmethod
@@ -378,7 +503,22 @@ class AgentRuntime:
         if length < 0 or length > 64 * 1024 * 1024:
             AgentRuntime._write_json(handler, 413, {"error": "request body too large"})
             return None
-        return handler.rfile.read(length) if length else b""
+        if not length:
+            return b""
+        try:
+            body = handler.rfile.read(length)
+        except OSError:
+            try:
+                AgentRuntime._write_json(
+                    handler, 408, {"error": "request body timeout"}
+                )
+            except OSError:
+                handler.close_connection = True
+            return None
+        if len(body) != length:
+            AgentRuntime._write_json(handler, 400, {"error": "incomplete body"})
+            return None
+        return body
 
     @staticmethod
     def _read_json(handler: BaseHTTPRequestHandler) -> dict | None:
@@ -443,14 +583,14 @@ def _attempt_json(
 
 def _inject_request_id(
     body: bytes, path: str, key: AttemptKey | None
-) -> bytes:
+) -> bytes | None:
     if key is None or path not in _INFERENCE_PATHS:
         return body
     try:
         payload = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return body
+        return None
     if not isinstance(payload, dict):
-        return body
+        return None
     payload["request_id"] = f"xllm-{key.request_uid}-{key.attempt_seq}"
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")

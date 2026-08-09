@@ -64,8 +64,16 @@ class Sidecar:
                 listen_address=agent_listen,
                 upstream_url=args.vllm_url,
                 max_attempt_records=getattr(args, "max_attempt_records", 8192),
+                max_cancel_fences=getattr(args, "max_cancel_fences", 8192),
                 terminal_ttl_seconds=getattr(args, "attempt_terminal_ttl", 60.0),
+                negative_fence_ttl_seconds=getattr(
+                    args, "negative_fence_ttl", 60.0
+                ),
+                max_inflight_requests=getattr(
+                    args, "agent_max_inflight_requests", 256
+                ),
                 connect_timeout_seconds=getattr(args, "agent_connect_timeout", 1.0),
+                ingress_timeout_seconds=getattr(args, "agent_ingress_timeout", 5.0),
             )
             if agent_listen.endswith(":0") and args.register_addr == agent_listen:
                 args.register_addr = self._agent.listen_address
@@ -290,7 +298,11 @@ class Sidecar:
                 "incarnation_id": self._incarnation_id,
                 "state_seq": self._state_seq,
                 "observed_at_unix_ms": int(time.time() * 1000),
-                "lifecycle": "ENGINE_LIFECYCLE_READY",
+                "lifecycle": (
+                    "ENGINE_LIFECYCLE_READY"
+                    if self._agent is None or self._agent.ledger.accepting()
+                    else "ENGINE_LIFECYCLE_DRAINING"
+                ),
                 "ownership": "ENGINE_OWNERSHIP_OWNED",
                 "shallow_health": "HEALTH_STATUS_HEALTHY",
                 "deep_health": "HEALTH_STATUS_UNKNOWN",
@@ -367,8 +379,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="strict Agent host:port; must equal --register-addr",
     )
     p.add_argument("--max-attempt-records", type=int, default=8192)
+    p.add_argument("--max-cancel-fences", type=int, default=8192)
     p.add_argument("--attempt-terminal-ttl", type=float, default=60.0)
+    p.add_argument("--negative-fence-ttl", type=float, default=60.0)
+    p.add_argument("--agent-max-inflight-requests", type=int, default=256)
     p.add_argument("--agent-connect-timeout", type=float, default=1.0)
+    p.add_argument("--agent-ingress-timeout", type=float, default=5.0)
     p.add_argument("--backend-type", default="vllm")
     p.add_argument(
         "--instance-type",

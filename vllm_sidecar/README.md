@@ -82,6 +82,13 @@ python -m vllm_sidecar.sidecar \
 instead of `0.0.0.0`; the strict equality requirement prevents accidentally
 registering the raw vLLM port.
 
+`--max-attempt-records` and `--max-cancel-fences` are independent capacities.
+`--negative-fence-ttl` must cover the complete hard lifetime of an old Submit;
+when the fence pool reaches capacity, the Agent publishes `DRAINING` and stops
+new inference admission until it falls to the low watermark. Configure
+`--agent-max-inflight-requests` to bound concurrent upstream proxies and
+`--agent-ingress-timeout` to bound incomplete request-body reads.
+
 ### Strict inference contract
 
 xllm-service sends these headers on Chat/Completion traffic:
@@ -104,7 +111,8 @@ POST /v1/internal/attempt/cancel
 Only a terminal Query result whose `request_uid`, `attempt_seq` and
 `incarnation_id` exactly match the queried attempt, or an acknowledged Cancel
 fence for that identity, allows xllm-service to release an unresolved
-aggregated execution hold.
+aggregated execution hold. A response with `accepted=false`, including cancel
+fence capacity exhaustion, is never a convergence proof.
 
 Strict mode proxies only `/v1/chat/completions`, `/v1/completions`, and the
 read-only `/v1/models`. Other vLLM paths, including `/v1/messages`,

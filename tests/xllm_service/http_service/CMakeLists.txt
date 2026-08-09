@@ -2,6 +2,15 @@ include(cc_test)
 
 cc_test(
   NAME
+    sse_terminal_marker_test
+  SRCS
+    sse_terminal_marker_test.cpp
+  DEPS
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     health_response_test
   SRCS
     health_response_test.cpp

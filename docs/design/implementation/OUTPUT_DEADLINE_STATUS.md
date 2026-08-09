@@ -166,7 +166,7 @@ xLLM local/prefill-only mode、统一 Gateway/profile 策略和 NPU 故障矩阵
 | G2 首输出前 attempt 替换 | 8 项 fake monotonic budget 覆盖次数、首输出、deadline、累计 device time、时钟回退、禁用和非法配置；production 接线覆盖旧 hold Cancel fence、递增 attempt、重选 P/D、sequencer/hold 重建、旧 attempt fencing 和 attempt-scoped dispatch failure | N/A，纯控制/RPC | 待真实两组 P/D 故障注入 | PASS（CPU 核心与生产接线）；完整 Scheduler loopback 待补 |
 | G2 主动客户端断连 | 5 项覆盖预留容量、幂等有界通知、弱引用回收、并发 exactly-once 和 close；brpc callback 接入 request watchdog 同一终止路径 | N/A，纯控制 | 待真实客户端断流与 KV 回收 | PASS（CPU 核心与生产接线） |
 | G2 Service 关键竞态稳定性 | 首事件 loopback、断连、重试预算、delivery wire 和 pre-dispatch hold 回滚共 22 项各重复 100 轮，共 2200 次 | N/A | N/A | PASS |
-| 双仓回归 | xLLM 默认 CPU 六目标 96/96，另有 output queue 14/14、protocol 14/14；Service 289/289；vLLM Agent/sidecar 44/44；Service 三个生产二进制 build/link verify | Torch CPU queue/所有权测试通过 | N/A | PASS |
+| 双仓回归 | xLLM 默认 CPU 六目标 96/96，另有 output queue 14/14、protocol 14/14；Service 293/293；vLLM Agent/sidecar 47/47；Service 三个生产二进制 build/link verify | Torch CPU queue/所有权测试通过 | N/A | PASS |
 
 ## 完善情况
 

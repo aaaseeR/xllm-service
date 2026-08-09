@@ -17,9 +17,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import threading
 import time
-from typing import Protocol
+from typing import Callable, Protocol
 
 
 _MAX_IDENTITY_BYTES = 256
@@ -55,6 +56,7 @@ class AttemptRecord:
     state: str
     reason: str
     deadline: float
+    capacity_kind: str
     terminal_at: float | None = None
     upstream: Closable | None = field(default=None, repr=False)
 
@@ -72,16 +74,35 @@ class AttemptLedger:
         self,
         max_records: int = 8192,
         terminal_ttl_seconds: float = 60.0,
-        clock=time.monotonic,
+        max_cancel_fences: int | None = None,
+        negative_fence_ttl_seconds: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if max_records <= 0 or terminal_ttl_seconds <= 0:
+        if max_cancel_fences is None:
+            max_cancel_fences = max_records
+        if (
+            type(max_records) is not int
+            or max_records <= 0
+            or type(max_cancel_fences) is not int
+            or max_cancel_fences <= 0
+            or not math.isfinite(terminal_ttl_seconds)
+            or terminal_ttl_seconds <= 0
+            or not math.isfinite(negative_fence_ttl_seconds)
+            or negative_fence_ttl_seconds <= 0
+        ):
             raise ValueError("attempt ledger limits must be positive")
         self._max_records = max_records
+        self._max_cancel_fences = max_cancel_fences
         self._terminal_ttl = terminal_ttl_seconds
+        self._negative_fence_ttl = negative_fence_ttl_seconds
         self._clock = clock
         self._lock = threading.Lock()
         self._records: dict[AttemptKey, AttemptRecord] = {}
+        self._attempt_records = 0
+        self._cancel_fences = 0
         self._incarnation_id = ""
+        self._activation_enabled = False
+        self._negative_fence_pressure = False
         self._accepting = False
 
     def activate(self, incarnation_id: str) -> None:
@@ -92,12 +113,17 @@ class AttemptLedger:
             if incarnation_id != self._incarnation_id:
                 to_close = self._fence_locked("ADMISSION_REASON_STALE_INCARNATION")
                 self._records.clear()
+                self._attempt_records = 0
+                self._cancel_fences = 0
+                self._negative_fence_pressure = False
                 self._incarnation_id = incarnation_id
-            self._accepting = True
+            self._activation_enabled = True
+            self._accepting = not self._negative_fence_pressure
         self._close_all(to_close)
 
     def fence(self, reason: str = "ADMISSION_REASON_ENGINE_DRAINING") -> None:
         with self._lock:
+            self._activation_enabled = False
             to_close = self._fence_locked(reason)
         self._close_all(to_close)
 
@@ -176,7 +202,7 @@ class AttemptLedger:
                     "ATTEMPT_LIFECYCLE_STATE_FAILED",
                     "ADMISSION_REASON_ENGINE_DRAINING",
                 )
-            if len(self._records) >= self._max_records:
+            if self._attempt_records >= self._max_records:
                 return AttemptResult(
                     False,
                     False,
@@ -189,7 +215,9 @@ class AttemptLedger:
                 state="ATTEMPT_LIFECYCLE_STATE_GENERATION_COMMITTED",
                 reason="ADMISSION_REASON_NONE",
                 deadline=now + remaining_deadline_ms / 1000.0,
+                capacity_kind="attempt",
             )
+            self._attempt_records += 1
             return AttemptResult(
                 True,
                 False,
@@ -256,7 +284,9 @@ class AttemptLedger:
                 )
             record = self._records.get(key)
             if record is None:
-                if len(self._records) >= self._max_records:
+                if self._cancel_fences >= self._max_cancel_fences:
+                    self._negative_fence_pressure = True
+                    self._accepting = False
                     return AttemptResult(
                         False,
                         False,
@@ -269,9 +299,14 @@ class AttemptLedger:
                     state="ATTEMPT_LIFECYCLE_STATE_CANCELLED_BEFORE_CREATE",
                     reason="ADMISSION_REASON_CANCELLED_BEFORE_CREATE",
                     deadline=now,
+                    capacity_kind="cancel_fence",
                     terminal_at=now,
                 )
                 self._records[key] = record
+                self._cancel_fences += 1
+                if self._cancel_fences >= self._max_cancel_fences:
+                    self._negative_fence_pressure = True
+                    self._accepting = False
             elif record.terminal_at is None:
                 record.state = "ATTEMPT_LIFECYCLE_STATE_CANCELLED"
                 record.reason = "ADMISSION_REASON_CANCELLED"
@@ -338,11 +373,31 @@ class AttemptLedger:
             key
             for key, record in self._records.items()
             if record.terminal_at is not None
-            and now - record.terminal_at >= self._terminal_ttl
+            and now - record.terminal_at
+            >= (
+                self._negative_fence_ttl
+                if record.capacity_kind == "cancel_fence"
+                else self._terminal_ttl
+            )
         ]
         for key in expired:
-            del self._records[key]
+            record = self._records.pop(key)
+            if record.capacity_kind == "cancel_fence":
+                self._cancel_fences -= 1
+            else:
+                self._attempt_records -= 1
+        low_watermark = self._max_cancel_fences // 2
+        if (
+            self._negative_fence_pressure
+            and self._cancel_fences <= low_watermark
+        ):
+            self._negative_fence_pressure = False
+            self._accepting = self._activation_enabled
 
     def size(self) -> int:
         with self._lock:
             return len(self._records)
+
+    def capacity_sizes(self) -> tuple[int, int]:
+        with self._lock:
+            return self._attempt_records, self._cancel_fences

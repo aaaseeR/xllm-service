@@ -1812,3 +1812,19 @@ V2.5 Store 和 V3 Placement 的边界不变。本轮只改变交付组合与完�
 输出，避免复用对象泄漏旧 payload/plan；ExecutionPlan 的 primary role 必须与用于构建
 计划的 Descriptor 身份一致；Python Descriptor 的整数事实拒绝 `bool`、负数和 wire
 宽度溢出。CPU 门禁结果为 service 289/289、Agent/sidecar 44/44。
+
+### 34.2 第二轮：并发、生命周期与资源收敛（2026-08-09）
+
+本轮发现并关闭一个高危 false-fence ACK：Agent 原先让普通 attempt/tombstone 与
+`CANCELLED_BEFORE_CREATE` 共用容量，容量耗尽时返回 `FAILED`，Service 又把该状态当成
+终态证明，可能在否定 fence 实际未安装时释放 hold。现在两类记录使用独立容量与 TTL；
+negative-fence 池满稳定返回 503/`accepted=false`，Service parser 只有在完整身份匹配且
+`accepted=true` 时才承认 terminal proof。池压会停止新准入、发布 `DRAINING`，降到
+low watermark 后才恢复。
+
+同时把 Agent 数据面并发改为有界 semaphore，并为 ingress body 增加硬 timeout 与完整
+长度检查。上游 transport 改为持有可取消的 HTTP connection，Cancel、deadline 或 fence
+可在 vLLM 尚未返回响应头时 shutdown socket；对应 loopback 测试要求 500 ms 内收敛，
+不再靠测试释放上游。Service 流式路径增加常量内存 SSE terminal 识别，只有跨任意分片
+观察到行级 `data: [DONE]` 才把干净 HTTP EOF 当作成功终态。CPU 门禁结果为 service
+293/293、Agent/sidecar 47/47。

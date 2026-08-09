@@ -89,7 +89,10 @@ limitations under the License.
   Service 在 Agent HTTP dispatch 前安装单 holder hold，成功响应头确认
   GenerationCommit；正常终态、Agent Query terminal 或 Cancel fence 才能释放。失败、
   断连和 deadline 使用同一 Cancel/detach 路径。Agent ledger 对同 key exactly-once，
-  未知 Cancel 安装有界 `CANCELLED_BEFORE_CREATE` tombstone。
+  未知 Cancel 安装有界 `CANCELLED_BEFORE_CREATE` fence。Agent 的普通 attempt 与
+  negative fence 使用独立容量和 TTL；fence 池满不返回伪 ACK，而是停止新准入并在
+  EngineState 发布 `DRAINING`。可取消 HTTP connection 在 Cancel/deadline/fence 时
+  shutdown socket，即使 vLLM 尚未返回响应头也能在 CPU loopback 上立即解除代理持有。
 - Service detached cleanup worker：默认每秒从 cleanup 表按 round-robin 取最多 8 条
   unresolved record，每个 RPC 使用 100 ms timeout；对每个未收敛 holder 先 Query，
   Query 只有返回精确 attempt/incarnation 的终态才作为证明，否则再发送 Cancel，且只
@@ -130,7 +133,7 @@ limitations under the License.
 | 内存/未定义行为 | GCC 13 ASan+UBSan 定向运行 Engine 17 项与 Service hold 19 项 | N/A | N/A | PASS；Clang sanitizer runtime 未随 ARM64 镜像安装 |
 | deadline 约束 reservation/调度 | optional wire、fake monotonic、Service 有界并发索引；D admission/reservation cap、P 三个边界和六类 Engine 调度路径生产 TU 以 `-Werror` 编译 | 公共测试目标使用 Torch CPU；无 tensor 数值变化 | 待真实 KV/transfer | PASS（CPU 核心与生产编译）；loopback 待补 |
 | G1/G2 exact 首事件保留与恢复 | xLLM adapter/protocol/4 MiB/field 24；Service Query state、D/P incarnation、attempt、seq、payload 和 index fail-closed；7 项真实 brpc loopback 覆盖并发、timeout、D restart 和 live race | adapter 目标链接 Torch CPU；无 tensor 数值变化 | 待 P/D 数据面故障注入 | PASS（CPU loopback） |
-| 双仓回归 | xLLM 默认六目标 96/96，另有 queue 14/14、protocol 14/14；Service 289/289；vLLM Agent/sidecar 44/44；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | N/A | PASS |
+| 双仓回归 | xLLM 默认六目标 96/96，另有 queue 14/14、protocol 14/14；Service 293/293；vLLM Agent/sidecar 47/47；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | N/A | PASS |
 
 ## 完善情况
 

@@ -352,6 +352,7 @@ def test_strict_agent_registers_descriptor_and_publishes_engine_state(
             provider_config=str(config_path),
             agent_listen="127.0.0.1:0",
             register_addr="127.0.0.1:0",
+            max_cancel_fences=1,
         )
     )
     sc._agent.start()
@@ -408,6 +409,15 @@ def test_strict_agent_registers_descriptor_and_publishes_engine_state(
         assert state["state_quality"] == "STATE_QUALITY_FULL"
         assert state["profile_digest"] == meta["provider_profile_digest"]
         assert state["per_dp"][0]["admission_credit"] == 61
+
+        fence = sc._agent.ledger.cancel(
+            "capacity-pressure", 0, sc._incarnation_id
+        )
+        assert fence.accepted
+        sc._send_heartbeat()
+        assert captured["body"]["engine_state"]["lifecycle"] == (
+            "ENGINE_LIFECYCLE_DRAINING"
+        )
     finally:
         sc._deregister()
         sc._agent.stop()

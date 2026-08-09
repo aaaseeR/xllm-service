@@ -42,10 +42,10 @@ class FakeAgentService final : public proto::XllmHttpService {
     brpc_controller->http_response().set_status_code(200);
     if (last_path_.find("/query") != std::string::npos) {
       brpc_controller->response_attachment().append(
-          R"({"request_uid":"request-1","attempt_seq":7,"incarnation_id":"incarnation-1","state":"ATTEMPT_LIFECYCLE_STATE_DONE"})");
+          R"({"accepted":true,"request_uid":"request-1","attempt_seq":7,"incarnation_id":"incarnation-1","state":"ATTEMPT_LIFECYCLE_STATE_DONE"})");
     } else {
       brpc_controller->response_attachment().append(
-          R"({"request_uid":"request-1","attempt_seq":7,"incarnation_id":"incarnation-1","state":"ATTEMPT_LIFECYCLE_STATE_CANCELLED_BEFORE_CREATE"})");
+          R"({"accepted":true,"request_uid":"request-1","attempt_seq":7,"incarnation_id":"incarnation-1","state":"ATTEMPT_LIFECYCLE_STATE_CANCELLED_BEFORE_CREATE"})");
     }
   }
 
@@ -57,12 +57,13 @@ class FakeAgentService final : public proto::XllmHttpService {
   std::string last_body_;
 };
 
-std::string agent_response(
-    const std::string& state,
-    const std::string& request_uid = "request-1",
-    uint64_t attempt_seq = 7,
-    const std::string& incarnation_id = "incarnation-1") {
-  return "{\"request_uid\":\"" + request_uid +
+std::string agent_response(const std::string& state,
+                           const std::string& request_uid = "request-1",
+                           uint64_t attempt_seq = 7,
+                           const std::string& incarnation_id = "incarnation-1",
+                           bool accepted = true) {
+  return "{\"accepted\":" + std::string(accepted ? "true" : "false") +
+         ",\"request_uid\":\"" + request_uid +
          "\",\"attempt_seq\":" + std::to_string(attempt_seq) +
          ",\"incarnation_id\":\"" + incarnation_id + "\",\"state\":\"" + state +
          "\"}";
@@ -142,6 +143,7 @@ TEST(AttemptControlClientTest, MalformedOrFailedResponseNeverProvesTerminal) {
       "[]",
       "{}",
       "{\"state\":1}",
+      R"({"request_uid":"request-1","attempt_seq":7,"incarnation_id":"incarnation-1","state":"ATTEMPT_LIFECYCLE_STATE_DONE"})",
       "{\"state\":\"ATTEMPT_LIFECYCLE_STATE_NEW_UNKNOWN\"}",
   };
   for (const std::string& body : invalid_bodies) {
@@ -177,6 +179,22 @@ TEST(AttemptControlClientTest, MalformedOrFailedResponseNeverProvesTerminal) {
     EXPECT_EQ(mismatch.state, xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED)
         << body;
   }
+}
+
+TEST(AttemptControlClientTest, RejectedCancelCannotProveFenceInstallation) {
+  const AttemptControlResult rejected = parse_vllm_agent_attempt_response(
+      200,
+      agent_response("ATTEMPT_LIFECYCLE_STATE_FAILED",
+                     "request-1",
+                     7,
+                     "incarnation-1",
+                     false),
+      "request-1",
+      7,
+      "incarnation-1");
+  EXPECT_TRUE(rejected.direct_success);
+  EXPECT_FALSE(rejected.terminal_proof);
+  EXPECT_EQ(rejected.state, xllm::proto::ATTEMPT_LIFECYCLE_STATE_FAILED);
 }
 
 TEST(AttemptControlClientTest, BindsSubmitHeadersToExactIncarnation) {

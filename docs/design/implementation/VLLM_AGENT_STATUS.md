@@ -41,9 +41,11 @@ limitations under the License.
   `X-Remaining-Deadline-Ms`，并向 vLLM 注入稳定 request ID。Submit、Attach、Finish、
   Query 和 Cancel 均在同一个 ledger 临界区校验 incarnation，旧进程请求不能修改新
   incarnation 复用的 attempt key。健康、lease 或 incarnation 失效会立即 fence 新 ingress。
-- `vllm_sidecar/attempts.py` 使用 incarnation-scoped、有 record/terminal TTL 硬上限的
-  ledger。Submit exactly-once；未知 Cancel 安装 `CANCELLED_BEFORE_CREATE`；Query
-  `ABSENT` 不构成终态证明；deadline、Cancel、fence 和断连关闭持有的 upstream。
+- `vllm_sidecar/attempts.py` 使用 incarnation-scoped ledger。普通 attempt/tombstone
+  与 `CANCELLED_BEFORE_CREATE` 否定 fence 使用独立容量和 TTL；fence 池压停止新准入，
+  降到 low watermark 后才恢复。Query `ABSENT` 与 `accepted=false` 都不构成终态证明。
+  deadline、Cancel、fence 和断连通过可取消 HTTP connection 立即 shutdown 持有的
+  upstream，不再等待响应头到达。
 - `vllm_sidecar/metrics.py` 保留 vLLM DP label，发布 running/waiting/deferred、KV ratio
   和 admission credit。多 DP 缺失时状态为 `PARTIAL`；KV ratio 取逐 DP/legacy 最大值，
   禁止把比例相加。
@@ -55,8 +57,8 @@ limitations under the License.
   已知为 terminal 时才形成 terminal proof；错误 HTTP、身份错配、malformed JSON、
   未知 enum 和非终态全部 fail closed。
 - Scheduler 在 HTTP dispatch 前安装 `AGGREGATED_EXECUTION` hold；响应头确认
-  GenerationCommit，流/非流终态收敛 hold，失败/断连则 Cancel 或把同一 cleanup token
-  转入有界后台表。
+  GenerationCommit，非流终态或流式 `data: [DONE]` 精确终止才收敛 hold；失败、缺失
+  SSE terminal 或断连则 Cancel 或把同一 cleanup token 转入有界后台表。
 
 ## 需求与测试追踪
 
@@ -64,11 +66,11 @@ limitations under the License.
 | --- | --- | --- | --- |
 | strict Descriptor/Profile | 必填字段、非法 topology、raw ingress、身份交叉校验、digest 确定性 | 真实部署 facts 校验 | PASS / PENDING |
 | Submit exactly-once | 64 路同 key 并发仅一个成功；duplicate/tombstone/capacity | 真实高并发 vLLM | PASS / PENDING |
-| Query/Cancel/fence | lifecycle、Cancel-before-create、stale incarnation、旧 incarnation 与复用 key 的 ABA、Cancel 与未知 Submit 竞态 | SIGKILL、lease 分区 | PASS / PENDING |
+| Query/Cancel/fence | lifecycle、Cancel-before-create、独立 fence 容量/TTL/low watermark、false ACK 防御、stale incarnation、旧 incarnation 与复用 key 的 ABA、Cancel 与未知 Submit 竞态 | SIGKILL、lease 分区 | PASS / PENDING |
 | local deadline | fake clock ledger 与延迟 upstream loopback；超时返回 terminal `EXPIRED` | NPU abort 到资源释放时延 | PASS / PENDING |
-| HTTP proxy | Chat/Completion payload/request ID、未知推理路径防旁路、health/livez、成功/重复/错误、流终态基础路径 | 真实 SSE/客户端断流；Anthropic 尚未开放 | PASS / PENDING |
-| EngineState | per-DP label、缺 rank `PARTIAL`、ratio 聚合、state sequence/identity | 真实 vLLM-Ascend metrics | PASS / PENDING |
-| Service hold | aggregated commit/terminal invariant；Agent 精确身份 terminal/malformed response parser；Submit header 绑定目标 incarnation；全量 289/289 | Submit ACK 丢失一万次 | PASS / PENDING |
+| HTTP proxy | Chat/Completion payload/request ID、未知推理路径防旁路、inflight 上限、body timeout、Cancel/deadline 在响应头前 shutdown socket、成功/重复/错误 | 真实 SSE/客户端断流；Anthropic 尚未开放 | PASS / PENDING |
+| EngineState | per-DP label、缺 rank `PARTIAL`、ratio 聚合、state sequence/identity、fence pressure 发布 `DRAINING` | 真实 vLLM-Ascend metrics | PASS / PENDING |
+| Service hold | aggregated commit/terminal invariant；Agent 精确身份/accepted terminal parser；Submit header 绑定目标 incarnation；SSE `[DONE]` 跨分片门禁；全量 293/293 | Submit ACK 丢失一万次 | PASS / PENDING |
 
 ## 完善情况
 

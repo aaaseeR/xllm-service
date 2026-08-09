@@ -205,6 +205,7 @@ AttemptControlResult parse_vllm_agent_attempt_response(
       !response.at("attempt_seq").is_number_unsigned() ||
       !response.contains("incarnation_id") ||
       !response.at("incarnation_id").is_string() ||
+      !response.contains("accepted") || !response.at("accepted").is_boolean() ||
       response.at("request_uid").get<std::string>() != expected_request_uid ||
       response.at("attempt_seq").get<uint64_t>() != expected_attempt_seq ||
       response.at("incarnation_id").get<std::string>() !=
@@ -218,7 +219,8 @@ AttemptControlResult parse_vllm_agent_attempt_response(
   }
   result.direct_success = true;
   result.state = *state;
-  result.terminal_proof = terminal_state(*state);
+  result.terminal_proof =
+      response.at("accepted").get<bool>() && terminal_state(*state);
   return result;
 }
 

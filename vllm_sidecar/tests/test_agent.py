@@ -187,6 +187,22 @@ def test_agent_proxy_attempt_query_cancel_and_fencing() -> None:
             timeout=2.0,
         )
         assert missing_incarnation.status_code == 400
+        invalid_json = requests.post(
+            base + "/v1/completions",
+            data=b"{",
+            headers={
+                "Content-Type": "application/json",
+                "X-Request-UID": "invalid-json",
+                "X-Attempt-Seq": "0",
+                "X-Incarnation-ID": "inc-1",
+                "X-Remaining-Deadline-Ms": "2000",
+            },
+            timeout=2.0,
+        )
+        assert invalid_json.status_code == 400
+        assert agent.ledger.query("invalid-json", 0, "inc-1").state == (
+            "ATTEMPT_LIFECYCLE_STATE_FAILED"
+        )
         unsupported = requests.post(
             base + "/v1/messages",
             json={"model": "m", "messages": []},
@@ -246,8 +262,7 @@ def test_cancel_wins_while_submit_result_is_unknown() -> None:
                 base, "/v1/internal/attempt/cancel", "cancel-race", 3
             )
             assert cancel.json()["state"] == "ATTEMPT_LIFECYCLE_STATE_CANCELLED"
-            DelayedUpstreamHandler.release.set()
-            assert submission.result(timeout=2.0).status_code == 409
+            assert submission.result(timeout=0.5).status_code == 409
 
         duplicate = requests.post(
             base + "/v1/chat/completions",
@@ -308,8 +323,7 @@ def test_local_deadline_fences_delayed_upstream_acceptance() -> None:
                     break
                 time.sleep(0.01)
             assert state == "ATTEMPT_LIFECYCLE_STATE_EXPIRED"
-            DelayedUpstreamHandler.release.set()
-            response = submission.result(timeout=2.0)
+            response = submission.result(timeout=0.5)
             assert response.status_code == 504
             assert response.json()["state"] == "ATTEMPT_LIFECYCLE_STATE_EXPIRED"
     finally:
@@ -318,3 +332,93 @@ def test_local_deadline_fences_delayed_upstream_acceptance() -> None:
         upstream.shutdown()
         upstream.server_close()
         upstream_thread.join(timeout=2.0)
+
+
+def test_agent_bounds_inflight_proxy_requests() -> None:
+    DelayedUpstreamHandler.received.clear()
+    DelayedUpstreamHandler.release.clear()
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), DelayedUpstreamHandler)
+    upstream.daemon_threads = True
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+
+    agent = AgentRuntime(
+        "127.0.0.1:0",
+        f"http://127.0.0.1:{upstream.server_address[1]}",
+        max_inflight_requests=1,
+    )
+    agent.start()
+    agent.activate("inc-1")
+    base = "http://" + agent.listen_address
+    headers = {
+        "X-Attempt-Seq": "0",
+        "X-Incarnation-ID": "inc-1",
+        "X-Remaining-Deadline-Ms": "2000",
+    }
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(
+                requests.post,
+                base + "/v1/completions",
+                json={"model": "m", "prompt": "p"},
+                headers={**headers, "X-Request-UID": "inflight-1"},
+                timeout=2.0,
+            )
+            assert DelayedUpstreamHandler.received.wait(timeout=1.0)
+            rejected = requests.post(
+                base + "/v1/completions",
+                json={"model": "m", "prompt": "p"},
+                headers={**headers, "X-Request-UID": "inflight-2"},
+                timeout=2.0,
+            )
+            assert rejected.status_code == 503
+            assert agent.ledger.query("inflight-2", 0, "inc-1").state == (
+                "ATTEMPT_LIFECYCLE_STATE_ABSENT"
+            )
+            DelayedUpstreamHandler.release.set()
+            assert first.result(timeout=2.0).status_code == 200
+    finally:
+        DelayedUpstreamHandler.release.set()
+        agent.stop()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=2.0)
+
+
+def test_cancel_fence_capacity_never_returns_false_ack() -> None:
+    agent = AgentRuntime(
+        "127.0.0.1:0",
+        "http://127.0.0.1:1",
+        max_cancel_fences=1,
+        negative_fence_ttl_seconds=0.1,
+    )
+    agent.start()
+    agent.activate("inc-1")
+    base = "http://" + agent.listen_address
+    try:
+        installed = _post_attempt(
+            base, "/v1/internal/attempt/cancel", "fence-1", 0
+        )
+        assert installed.status_code == 200
+        assert installed.json()["accepted"] is True
+        assert requests.get(base + "/health", timeout=2.0).status_code == 503
+
+        rejected = _post_attempt(
+            base, "/v1/internal/attempt/cancel", "fence-2", 0
+        )
+        assert rejected.status_code == 503
+        assert rejected.json()["accepted"] is False
+
+        deadline = time.monotonic() + 1.0
+        health = 503
+        while time.monotonic() < deadline:
+            health = requests.get(base + "/health", timeout=2.0).status_code
+            if health == 200:
+                break
+            time.sleep(0.01)
+        assert health == 200
+        assert _post_attempt(
+            base, "/v1/internal/attempt/cancel", "fence-2", 0
+        ).status_code == 200
+    finally:
+        agent.stop()

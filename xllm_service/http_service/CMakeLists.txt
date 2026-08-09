@@ -87,6 +87,7 @@ cc_library(
   HDRS
     health_response.h
     request_execution_context.h
+    sse_terminal_marker.h
     service.h
     request_tracer.h
   SRCS
