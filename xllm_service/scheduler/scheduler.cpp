@@ -528,6 +528,7 @@ void Scheduler::activate_as_master() {
     global_kvcache_mgr_->set_as_master();
     instance_mgr_->set_as_master();
   }
+  instance_mgr_->require_provider_link_recheck();
   const provider::ContractResult state_registry_result =
       instance_mgr_->set_engine_state_registry_view(true,
                                                     service_incarnation_id_);
@@ -541,6 +542,16 @@ void Scheduler::activate_as_master() {
   }
   state_stream_outbox_->require_full_for_all();
   state_stream_cv_.notify_all();
+}
+
+void Scheduler::deactivate_as_master() {
+  const bool was_master =
+      is_master_service_.exchange(false, std::memory_order_acq_rel);
+  if (!was_master) {
+    return;
+  }
+  global_kvcache_mgr_->set_as_follower();
+  instance_mgr_->set_as_follower();
 }
 
 bool Scheduler::refresh_state_stream_subscribers() {
@@ -572,6 +583,9 @@ bool Scheduler::refresh_state_stream_subscribers() {
 
 void Scheduler::try_apply_local_full_state(uint64_t now_monotonic_ms) {
   if (!is_master_service_.load(std::memory_order_acquire)) {
+    return;
+  }
+  if (state_stream_outbox_ == nullptr) {
     return;
   }
   if (instance_mgr_->has_current_engine_state_full_snapshot()) {
@@ -606,6 +620,31 @@ void Scheduler::notify_engine_registry_membership_changed() {
   state_stream_cv_.notify_all();
 }
 
+void Scheduler::notify_engine_link_state_changed(
+    const xllm::proto::LinkState& state,
+    uint64_t received_monotonic_ms) {
+  if (!is_master_service_.load(std::memory_order_acquire)) {
+    return;
+  }
+  if (state_stream_outbox_ == nullptr) {
+    return;
+  }
+  xllm::proto::StateBatch delta;
+  delta.set_contract_version(provider::kProviderContractVersion);
+  delta.set_master_incarnation(service_incarnation_id_);
+  delta.set_snapshot_seq(1);
+  delta.set_kind(xllm::proto::STATE_BATCH_KIND_DELTA);
+  *delta.add_link_states() = state;
+  const provider::ContractResult queued =
+      state_stream_outbox_->enqueue_delta(delta, received_monotonic_ms);
+  if (!queued.ok()) {
+    LOG(ERROR) << "Failed to enqueue Provider Link state: " << queued.message();
+    return;
+  }
+  try_apply_local_full_state(received_monotonic_ms);
+  state_stream_cv_.notify_all();
+}
+
 void Scheduler::run_state_stream_publisher() {
   uint64_t last_subscriber_refresh_ms = 0;
   uint64_t last_periodic_full_ms = 0;
@@ -635,7 +674,7 @@ void Scheduler::run_state_stream_publisher() {
           master_address == options_.service_name() &&
           master_incarnation == service_incarnation_id_;
       if (!still_master) {
-        is_master_service_.store(false, std::memory_order_release);
+        deactivate_as_master();
         instance_mgr_->set_engine_state_registry_view(false, "");
         continue;
       }
@@ -836,7 +875,7 @@ void Scheduler::handle_master_identity_watch(const etcd::Response& response,
       !etcd_client_->get(ETCD_MASTER_SERVICE_INCARNATION_KEY,
                          &master_incarnation) ||
       master_address.empty() || master_incarnation.empty()) {
-    is_master_service_.store(false, std::memory_order_release);
+    deactivate_as_master();
     instance_mgr_->set_engine_state_registry_view(false, "");
     return;
   }
@@ -845,7 +884,7 @@ void Scheduler::handle_master_identity_watch(const etcd::Response& response,
     activate_as_master();
     return;
   }
-  is_master_service_.store(false, std::memory_order_release);
+  deactivate_as_master();
   const provider::ContractResult result =
       instance_mgr_->set_engine_state_registry_view(true, master_incarnation);
   if (!result.ok()) {

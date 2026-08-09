@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
 #include <shared_mutex>
 #include <thread>
 
@@ -43,6 +44,7 @@ class GlobalKVCacheMgr final {
   bool upload_kvcache();
 
   void set_as_master();
+  void set_as_follower();
 
  private:
   DISALLOW_COPY_AND_ASSIGN(GlobalKVCacheMgr);

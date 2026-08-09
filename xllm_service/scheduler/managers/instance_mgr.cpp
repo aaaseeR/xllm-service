@@ -81,6 +81,24 @@ xllm_service::provider::EngineRegistryConfig engine_registry_config(
   };
 }
 
+xllm_service::provider::LinkReconcilerConfig link_reconciler_config(
+    const xllm_service::Options& options) {
+  return xllm_service::provider::LinkReconcilerConfig{
+      .max_links = options.engine_registry_max_links(),
+      .retry_initial_ms = options.engine_link_retry_initial_ms(),
+      .retry_max_ms = options.engine_link_retry_max_ms(),
+      .ready_recheck_ms = options.engine_link_ready_recheck_ms(),
+  };
+}
+
+bool same_provider_engine_key(const xllm::proto::ProviderEngineKey& left,
+                              const xllm::proto::ProviderEngineKey& right) {
+  return left.provider_id() == right.provider_id() &&
+         left.profile_digest() == right.profile_digest() &&
+         left.engine_uid() == right.engine_uid() &&
+         left.incarnation_id() == right.incarnation_id();
+}
+
 bool is_instance_schedulable(
     const xllm_service::InstanceMetaInfo& info,
     const xllm_service::provider::EngineRegistry& registry,
@@ -284,7 +302,17 @@ InstanceMgr::InstanceMgr(const Options& options,
       is_master_service_(is_master_service),
       etcd_client_(etcd_client),
       engine_registry_(engine_registry_config(options)),
+      link_reconciler_(link_reconciler_config(options)),
       scheduler_(scheduler) {
+  if (options_.engine_link_retry_initial_ms() == 0 ||
+      options_.engine_link_retry_max_ms() <
+          options_.engine_link_retry_initial_ms() ||
+      options_.engine_link_ready_recheck_ms() == 0 ||
+      options_.engine_link_ready_recheck_ms() >=
+          options_.engine_link_hard_ttl_ms() ||
+      options_.engine_link_reconcile_batch_size() == 0) {
+    LOG(FATAL) << "Provider Link reconciler configuration is invalid.";
+  }
   auto handle_instance_metainfo =
       std::bind(&InstanceMgr::update_instance_metainfo,
                 this,
@@ -342,7 +370,7 @@ void InstanceMgr::init() {
 }
 
 InstanceMgr::~InstanceMgr() {
-  exited_ = true;
+  exited_.store(true, std::memory_order_release);
   if (state_reconcile_thread_ && state_reconcile_thread_->joinable()) {
     state_reconcile_thread_->join();
   }
@@ -638,8 +666,25 @@ bool InstanceMgr::has_current_engine_state_full_snapshot() const {
 }
 
 void InstanceMgr::set_as_master() {
-  is_master_service_ = true;
+  is_master_service_.store(true, std::memory_order_release);
   etcd_client_->remove_watch(ETCD_LOADMETRICS_PREFIX);
+}
+
+void InstanceMgr::set_as_follower() {
+  const bool was_master =
+      is_master_service_.exchange(false, std::memory_order_acq_rel);
+  if (!was_master) {
+    return;
+  }
+  auto handle_load_metrics = std::bind(&InstanceMgr::update_load_metrics,
+                                       this,
+                                       std::placeholders::_1,
+                                       std::placeholders::_2);
+  etcd_client_->add_watch(ETCD_LOADMETRICS_PREFIX, handle_load_metrics);
+}
+
+void InstanceMgr::require_provider_link_recheck() {
+  link_reconciler_.require_recheck();
 }
 
 std::shared_ptr<brpc::Channel> InstanceMgr::get_channel(
@@ -1131,6 +1176,127 @@ void InstanceMgr::reconcile_instance_states() {
     for (const auto& p : to_deregister) {
       deregister_instance(p.first, p.second);
     }
+    reconcile_provider_links();
+  }
+}
+
+void InstanceMgr::publish_link_state(const xllm::proto::LinkState& state,
+                                     uint64_t now_monotonic_ms) {
+  bool applied = false;
+  const provider::ContractResult recorded =
+      engine_registry_.record_link_state(state, now_monotonic_ms, &applied);
+  if (!recorded.ok()) {
+    LOG(WARNING) << "Discard Provider Link state: " << recorded.message();
+    return;
+  }
+  if (applied) {
+    scheduler_->notify_engine_link_state_changed(state, now_monotonic_ms);
+  }
+}
+
+void InstanceMgr::reconcile_provider_links() {
+  if (!is_master_service_.load(std::memory_order_acquire)) {
+    return;
+  }
+
+  std::vector<provider::DesiredProviderLink> desired;
+  {
+    std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+    desired.reserve(std::min(options_.engine_registry_max_links(),
+                             prefill_index_.size() * decode_index_.size()));
+    for (const std::string& prefill_name : prefill_index_) {
+      const auto prefill = instances_.find(prefill_name);
+      if (prefill == instances_.end() ||
+          !prefill->second.provider_descriptor.has_value() ||
+          get_engine_role(prefill->second) !=
+              xllm::proto::ENGINE_ROLE_PREFILL) {
+        continue;
+      }
+      for (const std::string& decode_name : decode_index_) {
+        const auto decode = instances_.find(decode_name);
+        if (decode == instances_.end() ||
+            !decode->second.provider_descriptor.has_value() ||
+            get_engine_role(decode->second) !=
+                xllm::proto::ENGINE_ROLE_DECODE) {
+          continue;
+        }
+        std::string compatibility_proof;
+        if (!provider::validate_remote_pd_compatibility(
+                 *prefill->second.provider_descriptor,
+                 *decode->second.provider_descriptor,
+                 &compatibility_proof)
+                 .ok()) {
+          continue;
+        }
+        desired.emplace_back(provider::DesiredProviderLink{
+            .prefill = *prefill->second.provider_descriptor,
+            .decode = *decode->second.provider_descriptor,
+        });
+        if (desired.size() > options_.engine_registry_max_links()) {
+          LOG(ERROR) << "Desired Provider Link set exceeds configured "
+                        "capacity.";
+          return;
+        }
+      }
+    }
+  }
+
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
+  std::vector<xllm::proto::LinkState> state_changes;
+  const provider::ContractResult replaced = link_reconciler_.replace_desired(
+      desired, now_monotonic_ms, &state_changes);
+  if (!replaced.ok()) {
+    LOG(ERROR) << "Failed to reconcile desired Provider Links: "
+               << replaced.message();
+    return;
+  }
+  for (const xllm::proto::LinkState& state : state_changes) {
+    publish_link_state(state, now_monotonic_ms);
+  }
+
+  const std::vector<provider::ProviderLinkAttempt> attempts =
+      link_reconciler_.begin_due_attempts(
+          now_monotonic_ms, options_.engine_link_reconcile_batch_size());
+  for (const provider::ProviderLinkAttempt& attempt : attempts) {
+    std::string target_rpc_address;
+    InstanceMetaInfo prefill_info;
+    bool pair_is_current = false;
+    {
+      std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+      const auto prefill = instances_.find(attempt.prefill.engine_uid());
+      const auto decode = instances_.find(attempt.decode.engine_uid());
+      if (prefill != instances_.end() && decode != instances_.end() &&
+          prefill->second.provider_descriptor.has_value() &&
+          decode->second.provider_descriptor.has_value() &&
+          same_provider_engine_key(provider::make_provider_engine_key(
+                                       *prefill->second.provider_descriptor),
+                                   attempt.prefill) &&
+          same_provider_engine_key(provider::make_provider_engine_key(
+                                       *decode->second.provider_descriptor),
+                                   attempt.decode)) {
+        target_rpc_address = decode->second.rpc_address;
+        prefill_info = prefill->second;
+        pair_is_current = true;
+      }
+    }
+
+    const bool linked =
+        pair_is_current && call_link_instance(target_rpc_address, prefill_info);
+    xllm::proto::LinkState state;
+    const provider::ContractResult completed =
+        link_reconciler_.complete_attempt(attempt,
+                                          linked,
+                                          linked ? "ready" : "link-rpc-failed",
+                                          monotonic_time_ms(),
+                                          &state);
+    if (!completed.ok()) {
+      LOG(WARNING) << "Discard stale Provider Link attempt: "
+                   << completed.message();
+      continue;
+    }
+    if (is_master_service_.load(std::memory_order_acquire)) {
+      publish_link_state(state, monotonic_time_ms());
+    }
   }
 }
 
@@ -1548,6 +1714,12 @@ bool InstanceMgr::register_instance(const std::string& name,
                  << validation.message();
       return false;
     }
+    if (info.provider_descriptor->identity().engine_uid() != name ||
+        info.provider_descriptor->identity().incarnation_id() !=
+            info.incarnation_id) {
+      LOG(ERROR) << "Reject Provider Descriptor identity mismatch for " << name;
+      return false;
+    }
     if (info.provider_descriptor->serving().role() != get_engine_role(info)) {
       LOG(ERROR) << "Reject Provider Descriptor role mismatch for " << name;
       return false;
@@ -1596,6 +1768,20 @@ bool InstanceMgr::register_instance(const std::string& name,
 
   add_instance_resources(name, info);
 
+  // Strict V2 links are independent, incarnation-scoped state machines. Make
+  // the member visible first and let the master reconciler publish PENDING,
+  // then READY or DEGRADED per pair. A bad peer must not roll back this member
+  // or any healthy pair.
+  if (info.provider_descriptor.has_value()) {
+    {
+      std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
+      add_instance_to_index(name, info);
+      instances_.insert(std::make_pair(name, info));
+    }
+    scheduler_->notify_engine_registry_membership_changed();
+    return true;
+  }
+
   std::vector<std::pair<std::string, InstanceMetaInfo>> link_ops;
   {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
@@ -1623,9 +1809,6 @@ bool InstanceMgr::register_instance(const std::string& name,
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
     add_instance_to_index(name, info);
     instances_.insert(std::make_pair(name, info));
-  }
-  if (registry_member_installed) {
-    scheduler_->notify_engine_registry_membership_changed();
   }
   return true;
 }

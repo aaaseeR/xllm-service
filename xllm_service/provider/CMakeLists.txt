@@ -65,6 +65,18 @@ cc_library(
 
 cc_library(
   NAME
+    link_reconciler
+  HDRS
+    link_reconciler.h
+  SRCS
+    link_reconciler.cpp
+  DEPS
+    :provider_contract
+    proto_xllm
+)
+
+cc_library(
+  NAME
     provider_route_selector
   HDRS
     provider_route_selector.h

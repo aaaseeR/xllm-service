@@ -22,6 +22,16 @@ cc_test(
 
 cc_test(
   NAME
+    link_reconciler_test
+  SRCS
+    link_reconciler_test.cpp
+  DEPS
+    :link_reconciler
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     provider_contract_test
   SRCS
     provider_contract_test.cpp

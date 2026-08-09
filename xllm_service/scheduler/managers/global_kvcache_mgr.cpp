@@ -247,8 +247,21 @@ bool GlobalKVCacheMgr::upload_kvcache() {
 }
 
 void GlobalKVCacheMgr::set_as_master() {
-  is_master_service_ = true;
+  is_master_service_.store(true, std::memory_order_release);
   etcd_client_->remove_watch(ETCD_CACHE_PREFIX);
+}
+
+void GlobalKVCacheMgr::set_as_follower() {
+  const bool was_master =
+      is_master_service_.exchange(false, std::memory_order_acq_rel);
+  if (!was_master) {
+    return;
+  }
+  auto handle_kvcache = std::bind(&GlobalKVCacheMgr::update_kvcache,
+                                  this,
+                                  std::placeholders::_1,
+                                  std::placeholders::_2);
+  etcd_client_->add_watch(ETCD_CACHE_PREFIX, handle_kvcache);
 }
 
 }  // namespace xllm_service

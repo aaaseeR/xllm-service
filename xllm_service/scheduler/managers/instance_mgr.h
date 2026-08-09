@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <brpc/channel.h>
 
+#include <atomic>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -32,6 +33,7 @@ limitations under the License.
 #include "common/time_predictor.h"
 #include "common/types.h"
 #include "provider/engine_registry.h"
+#include "provider/link_reconciler.h"
 #include "request/request.h"
 #include "scheduler/etcd_client/etcd_client.h"
 #include "xllm_rpc_service.pb.h"
@@ -98,6 +100,8 @@ class InstanceMgr final {
       xllm::proto::StateBatch* batch) const;
   bool has_current_engine_state_full_snapshot() const;
 
+  void require_provider_link_recheck();
+
   // update the recent token latency metrics for the corresponding instance
   void update_latency_metrics(const std::string& instance_name,
                               const proto::LatencyMetrics& latency_metrics);
@@ -110,6 +114,7 @@ class InstanceMgr final {
   bool select_instance_pair_on_slo(std::shared_ptr<Request> request);
 
   void set_as_master();
+  void set_as_follower();
 
   // Returns true if at least one valid instance group is available:
   // - a single DEFAULT instance, or
@@ -129,6 +134,9 @@ class InstanceMgr final {
                          std::shared_ptr<brpc::Channel>* out_channel);
   bool probe_instance_health(const std::string& instance_name);
   void reconcile_instance_states();
+  void reconcile_provider_links();
+  void publish_link_state(const xllm::proto::LinkState& state,
+                          uint64_t now_monotonic_ms);
   void refresh_instance_registration(const std::string& name,
                                      const InstanceMetaInfo& info);
   void mark_instance_suspect(const std::string& name,
@@ -189,7 +197,7 @@ class InstanceMgr final {
 
   Options options_;
 
-  bool exited_ = false;
+  std::atomic_bool exited_ = false;
   bool use_etcd_ = false;
   std::atomic_bool is_master_service_ = false;
 
@@ -211,6 +219,7 @@ class InstanceMgr final {
   std::unordered_map<std::string, std::shared_ptr<brpc::Channel>>
       cached_channels_;
   provider::EngineRegistry engine_registry_;
+  provider::LinkReconciler link_reconciler_;
 
   // L2 — metrics & predictors (single lock to avoid order ambiguity)
   std::shared_mutex metrics_mutex_;

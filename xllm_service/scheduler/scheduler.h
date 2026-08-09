@@ -72,6 +72,10 @@ class Scheduler final {
   // state as Registry truth.
   void notify_engine_registry_membership_changed();
 
+  // Called by the master InstanceMgr after a per-pair handshake transition.
+  void notify_engine_link_state_changed(const xllm::proto::LinkState& state,
+                                        uint64_t received_monotonic_ms);
+
   // Returns true if at least one valid instance group is available.
   bool has_available_instances() const;
 
@@ -116,6 +120,7 @@ class Scheduler final {
   void update_master_service_heartbeat();
 
   void activate_as_master();
+  void deactivate_as_master();
   void run_state_stream_publisher();
   bool refresh_state_stream_subscribers();
   void try_apply_local_full_state(uint64_t now_monotonic_ms);

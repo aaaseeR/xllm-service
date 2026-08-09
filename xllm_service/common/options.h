@@ -83,6 +83,14 @@ class Options {
 
   PROPERTY(uint64_t, engine_link_hard_ttl_ms) = 10000;
 
+  PROPERTY(uint64_t, engine_link_retry_initial_ms) = 1000;
+
+  PROPERTY(uint64_t, engine_link_retry_max_ms) = 10000;
+
+  PROPERTY(uint64_t, engine_link_ready_recheck_ms) = 3000;
+
+  PROPERTY(size_t, engine_link_reconcile_batch_size) = 64;
+
   PROPERTY(size_t, state_stream_max_subscribers) = 256;
 
   PROPERTY(int32_t, state_stream_full_interval_ms) = 1000;
