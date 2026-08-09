@@ -1128,6 +1128,39 @@ TEST(ProviderContractTest, ExecutionPlanBuilderBuildsRemotePdPlan) {
   EXPECT_EQ(plan.ByteSizeLong(), 0u);
 }
 
+TEST(ProviderContractTest, ExecutionPlanBuilderBuildsNativeSingleEngineModes) {
+  for (size_t index : {size_t{1}, size_t{2}}) {
+    ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[index]);
+    const xllm::proto::CanonicalRequest canonical = make_request();
+    const xllm::proto::EncodedRequest encoded =
+        make_encoded_request(descriptor);
+    xllm::proto::ExecutionPlan plan;
+    const xllm::proto::ExecutionMode mode = kOpenModeCases[index].mode;
+    const ContractResult result = build_execution_plan(
+        canonical, encoded, descriptor, nullptr, &plan, mode);
+    ASSERT_TRUE(result.ok()) << result.message();
+    ASSERT_EQ(plan.selected_roles_size(), 1);
+    EXPECT_EQ(plan.selected_roles(0).role(), kOpenModeCases[index].role);
+    EXPECT_EQ(plan.mode(), mode);
+    EXPECT_EQ(plan.transfer_mode(), xllm::proto::TRANSFER_MODE_NONE);
+    EXPECT_FALSE(plan.compatibility_proof().empty());
+  }
+
+  auto [prefill, decode] = make_remote_pd_descriptors();
+  const xllm::proto::CanonicalRequest canonical = make_request();
+  const xllm::proto::EncodedRequest encoded = make_encoded_request(prefill);
+  xllm::proto::ExecutionPlan plan;
+  EXPECT_EQ(
+      build_execution_plan(canonical,
+                           encoded,
+                           prefill,
+                           nullptr,
+                           &plan,
+                           xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE)
+          .error(),
+      xllm::proto::PROVIDER_CONTRACT_ERROR_MODE_NOT_OPEN);
+}
+
 TEST(ProviderContractTest, ExecutionPlanBuilderBuildsAggregatedPlan) {
   ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[3]);
   xllm::proto::CanonicalRequest canonical = make_request();

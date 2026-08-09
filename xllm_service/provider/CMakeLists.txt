@@ -181,6 +181,18 @@ cc_library(
 
 cc_library(
   NAME
+    native_execution_mode_selector
+  HDRS
+    native_execution_mode_selector.h
+  SRCS
+    native_execution_mode_selector.cpp
+  DEPS
+    :provider_contract
+    proto_xllm
+)
+
+cc_library(
+  NAME
     execution_hold
   HDRS
     execution_hold.h

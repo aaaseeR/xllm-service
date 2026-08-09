@@ -9,3 +9,13 @@ cc_test(
     :xllm_chat_parse_runtime
     GTest::gtest_main
 )
+
+cc_test(
+  NAME
+    flow_control_queue_test
+  SRCS
+    flow_control_queue_test.cpp
+  DEPS
+    :flow_control_queue
+    GTest::gtest_main
+)

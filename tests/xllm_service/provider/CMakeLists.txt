@@ -140,6 +140,17 @@ cc_test(
 
 cc_test(
   NAME
+    native_execution_mode_selector_test
+  SRCS
+    native_execution_mode_selector_test.cpp
+  DEPS
+    :native_execution_mode_selector
+    GTest::gtest_main
+    proto_xllm
+)
+
+cc_test(
+  NAME
     attempt_control_client_test
   SRCS
     attempt_control_client_test.cpp

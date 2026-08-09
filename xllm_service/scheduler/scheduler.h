@@ -42,6 +42,7 @@ limitations under the License.
 #include "request/request.h"
 #include "request/request_deadline_queue.h"
 #include "response_handler.h"
+#include "scheduler/flow_control_queue.h"
 #include "tokenizer/tokenizer.h"
 #include "tokenizer/tokenizer_args.h"
 
@@ -54,6 +55,8 @@ class Scheduler final {
   ~Scheduler();
 
   bool schedule(std::shared_ptr<Request> request);
+
+  FlowControlSnapshot flow_control_snapshot() const;
 
   std::shared_ptr<brpc::Channel> get_channel(const std::string& target_name);
 
@@ -183,7 +186,10 @@ class Scheduler final {
       const std::shared_ptr<Request>& request,
       std::string* failure_message);
   bool select_retry_instances(const std::shared_ptr<Request>& request);
+  bool apply_native_execution_mode(const std::shared_ptr<Request>& request);
   bool prepare_v2_execution_plan(const std::shared_ptr<Request>& request);
+  bool select_and_prepare_dispatch(const std::shared_ptr<Request>& request);
+  bool admit_flow_control_locked(const std::shared_ptr<Request>& request);
   void record_kv_route_decision(const std::shared_ptr<Request>& request);
   void record_kv_route_actual(const std::shared_ptr<Request>& request,
                               const llm::RequestOutput* output);
@@ -200,6 +206,8 @@ class Scheduler final {
       bool fail_if_unavailable);
   void run_execution_hold_cleanup();
   void run_request_watchdog();
+  void run_flow_dispatch();
+  SaturationState flow_saturation_state() const;
   void arm_client_disconnect_notification(
       const std::shared_ptr<Request>& request);
 
@@ -217,6 +225,7 @@ class Scheduler final {
   std::unique_ptr<provider::ExecutionHoldCleanupTable>
       execution_hold_cleanup_table_;
   std::unique_ptr<RequestDeadlineQueue> request_deadline_queue_;
+  std::unique_ptr<FlowControlQueue> flow_control_queue_;
   std::shared_ptr<ClientDisconnectMonitor> client_disconnect_monitor_;
 
   // Serializes the transition between request-owned and detached holds with
@@ -229,6 +238,11 @@ class Scheduler final {
   bool execution_hold_cleanup_stopped_ = false;
   std::unique_ptr<std::thread> execution_hold_cleanup_thread_;
   std::unique_ptr<std::thread> request_watchdog_thread_;
+
+  std::mutex flow_dispatch_wait_mutex_;
+  std::condition_variable flow_dispatch_cv_;
+  bool flow_dispatch_stopped_ = false;
+  std::unique_ptr<std::thread> flow_dispatch_thread_;
 
   std::mutex output_gap_watch_mutex_;
   std::unordered_map<std::string, std::weak_ptr<Request>> output_gap_watchlist_;

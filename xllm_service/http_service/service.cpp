@@ -116,6 +116,22 @@ bool schedule_request(Scheduler* scheduler,
   return false;
 }
 
+const char* admission_error_message(FlowControlStatus status) {
+  switch (status) {
+    case FlowControlStatus::QUEUE_CAPACITY_EXHAUSTED:
+      return "QUEUE_CAPACITY_EXHAUSTED";
+    case FlowControlStatus::QUEUE_DEADLINE_UNSATISFIABLE:
+      return "QUEUE_DEADLINE_UNSATISFIABLE";
+    case FlowControlStatus::DUPLICATE_REQUEST:
+      return "DUPLICATE_REQUEST";
+    case FlowControlStatus::OK:
+    case FlowControlStatus::UNKNOWN_REQUEST:
+    case FlowControlStatus::INVALID_ARGUMENT:
+      return "Internal runtime error.";
+  }
+  return "Internal runtime error.";
+}
+
 std::string proto_json(const google::protobuf::Message& message) {
   std::string json;
   google::protobuf::util::JsonPrintOptions options;
@@ -615,20 +631,19 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
       [call_data, scheduler = scheduler_](const Request& retry_request) {
         return dispatch_native_request(call_data, retry_request, scheduler);
       };
+  request->dispatch_callback =
+      [call_data, scheduler = scheduler_](
+          const std::shared_ptr<Request>& dispatch_request) {
+        return dispatch_native_request(call_data, *dispatch_request, scheduler);
+      };
   // record request
   bool success = scheduler_->record_new_request(call_data, request);
   if (!success) {
     LOG(ERROR) << "rpc service add new request error: "
                << request->correlation.request_uid();
-    call_data->finish_with_error("Internal runtime error.");
+    call_data->finish_with_error(
+        admission_error_message(request->admission_status));
     return;
-  }
-
-  if (!request->retry_dispatch_callback(*request)) {
-    scheduler_->handle_attempt_dispatch_failure(
-        request->correlation.request_uid(),
-        request->correlation.attempt_seq(),
-        "Native dispatch could not be started");
   }
 }
 
@@ -643,6 +658,15 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
   request->model = req_pb->model();
   request->correlation =
       observability::make_request_correlation(correlation_input(controller));
+  request->tenant_id =
+      first_header_value(controller, {"x-tenant-id", "x-jd-tenant-id"});
+  if (request->tenant_id.empty()) {
+    request->tenant_id = "anonymous";
+  }
+  request->flow_id = first_header_value(controller, {"x-flow-id"});
+  if (request->flow_id.empty()) {
+    request->flow_id = request->tenant_id;
+  }
   request->first_event_retry_policy =
       xllm::FirstEventRetryPolicy::from_durations_ms(
           static_cast<uint64_t>(options_.p_first_event_retry_ub_ms()),
@@ -659,6 +683,9 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
 
   if (req_pb->has_stream()) {
     request->stream = req_pb->stream();
+  }
+  if (req_pb->has_offline()) {
+    request->offline = req_pb->offline();
   }
 
   if (req_pb->has_stream_options()) {
@@ -860,47 +887,42 @@ void XllmHttpServiceImpl::Completions(
 
   // vLLM backend: relay the raw client JSON over HTTP, skip xllm-only fields.
   if (service_request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
-    const std::string& provider_payload =
-        service_request->execution_plan.has_value()
-            ? service_request->execution_plan->provider_payload()
-            : attachment;
     auto call_data = std::make_shared<CompletionCallData>(
         cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
+    service_request->dispatch_callback =
+        [call_data,
+         scheduler = scheduler_,
+         internal_api_token = options_.internal_api_token(),
+         payload = attachment](const std::shared_ptr<Request>& request) {
+          const std::string& provider_payload =
+              request->execution_plan.has_value()
+                  ? request->execution_plan->provider_payload()
+                  : payload;
+          handle_vllm(call_data,
+                      scheduler,
+                      internal_api_token,
+                      request->routing.prefill_name,
+                      request->prefill_incarnation_id,
+                      "/v1/completions",
+                      /*is_post=*/true,
+                      provider_payload,
+                      request->stream,
+                      request->correlation,
+                      request);
+          return true;
+        };
     if (!scheduler_->record_new_request(call_data, service_request)) {
       call_data->finish_with_error(
-          "Provider request safety guards are unavailable.");
+          admission_error_message(service_request->admission_status));
       return;
     }
-    handle_vllm(call_data,
-                scheduler_,
-                options_.internal_api_token(),
-                service_request->routing.prefill_name,
-                service_request->prefill_incarnation_id,
-                "/v1/completions",
-                /*is_post=*/true,
-                provider_payload,
-                service_request->stream,
-                service_request->correlation,
-                service_request);
     return;
   }
 
-  // update request protobuf
-  if (!set_request_execution_context(req_pb, *service_request)) {
-    cntl->SetFailed("Invalid or expired request context before dispatch.");
-    return;
-  }
+  // Provider routing and the remaining deadline are added at queue dispatch.
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
-  req_pb->mutable_routing()->set_prefill_name(
-      service_request->routing.prefill_name);
-  req_pb->mutable_routing()->set_decode_name(
-      service_request->routing.decode_name);
-  req_pb->mutable_routing()->set_prefill_incarnation_id(
-      service_request->prefill_incarnation_id);
-  req_pb->mutable_routing()->set_decode_incarnation_id(
-      service_request->decode_incarnation_id);
 
   auto call_data = std::make_shared<CompletionCallData>(
       cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
@@ -1015,47 +1037,42 @@ void XllmHttpServiceImpl::ChatCompletions(
 
   // vLLM backend: relay the raw client JSON over HTTP, skip xllm-only fields.
   if (service_request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
-    const std::string& provider_payload =
-        service_request->execution_plan.has_value()
-            ? service_request->execution_plan->provider_payload()
-            : attachment;
     auto call_data = std::make_shared<ChatCallData>(
         cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
+    service_request->dispatch_callback =
+        [call_data,
+         scheduler = scheduler_,
+         internal_api_token = options_.internal_api_token(),
+         payload = attachment](const std::shared_ptr<Request>& request) {
+          const std::string& provider_payload =
+              request->execution_plan.has_value()
+                  ? request->execution_plan->provider_payload()
+                  : payload;
+          handle_vllm(call_data,
+                      scheduler,
+                      internal_api_token,
+                      request->routing.prefill_name,
+                      request->prefill_incarnation_id,
+                      "/v1/chat/completions",
+                      /*is_post=*/true,
+                      provider_payload,
+                      request->stream,
+                      request->correlation,
+                      request);
+          return true;
+        };
     if (!scheduler_->record_new_request(call_data, service_request)) {
       call_data->finish_with_error(
-          "Provider request safety guards are unavailable.");
+          admission_error_message(service_request->admission_status));
       return;
     }
-    handle_vllm(call_data,
-                scheduler_,
-                options_.internal_api_token(),
-                service_request->routing.prefill_name,
-                service_request->prefill_incarnation_id,
-                "/v1/chat/completions",
-                /*is_post=*/true,
-                provider_payload,
-                service_request->stream,
-                service_request->correlation,
-                service_request);
     return;
   }
 
-  // update request protobuf
-  if (!set_request_execution_context(req_pb, *service_request)) {
-    cntl->SetFailed("Invalid or expired request context before dispatch.");
-    return;
-  }
+  // Provider routing and the remaining deadline are added at queue dispatch.
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
-  req_pb->mutable_routing()->set_prefill_name(
-      service_request->routing.prefill_name);
-  req_pb->mutable_routing()->set_decode_name(
-      service_request->routing.decode_name);
-  req_pb->mutable_routing()->set_prefill_incarnation_id(
-      service_request->prefill_incarnation_id);
-  req_pb->mutable_routing()->set_decode_incarnation_id(
-      service_request->decode_incarnation_id);
 
   auto call_data = std::make_shared<ChatCallData>(
       cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
@@ -1137,21 +1154,10 @@ void XllmHttpServiceImpl::AnthropicMessages(
     return;
   }
 
-  if (!set_request_execution_context(req_pb, *service_request)) {
-    cntl->SetFailed("Invalid or expired request context before dispatch.");
-    return;
-  }
+  // Provider routing and the remaining deadline are added at queue dispatch.
   req_pb->set_source_xservice_addr(options_.service_name());
   req_pb->mutable_token_ids()->Add(service_request->token_ids.begin(),
                                    service_request->token_ids.end());
-  req_pb->mutable_routing()->set_prefill_name(
-      service_request->routing.prefill_name);
-  req_pb->mutable_routing()->set_decode_name(
-      service_request->routing.decode_name);
-  req_pb->mutable_routing()->set_prefill_incarnation_id(
-      service_request->prefill_incarnation_id);
-  req_pb->mutable_routing()->set_decode_incarnation_id(
-      service_request->decode_incarnation_id);
 
   auto call_data =
       std::make_shared<AnthropicCallData>(cntl,

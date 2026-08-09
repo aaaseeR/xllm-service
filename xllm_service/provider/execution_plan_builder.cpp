@@ -24,7 +24,8 @@ namespace xllm_service::provider {
 namespace {
 
 const xllm::proto::ExecutionModeSpec* find_open_mode(
-    const xllm::proto::ProviderDescriptor& descriptor) {
+    const xllm::proto::ProviderDescriptor& descriptor,
+    xllm::proto::ExecutionMode requested_mode) {
   const xllm::proto::ProviderId provider_id =
       descriptor.identity().provider_id();
   for (const xllm::proto::ExecutionModeSpec& spec :
@@ -36,6 +37,20 @@ const xllm::proto::ExecutionModeSpec* find_open_mode(
         spec.selection_order() == xllm::proto::SELECTION_ORDER_P_FIRST &&
         spec.binding_stage() == xllm::proto::BINDING_STAGE_BEFORE_PREFILL &&
         !spec.p_selection_delegated();
+    const bool native_local =
+        provider_id == xllm::proto::PROVIDER_ID_XLLM_NATIVE &&
+        spec.mode() == xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE &&
+        spec.transfer_mode() == xllm::proto::TRANSFER_MODE_NONE &&
+        spec.selection_order() == xllm::proto::SELECTION_ORDER_D_ONLY &&
+        spec.binding_stage() == xllm::proto::BINDING_STAGE_AT_SUBMIT &&
+        !spec.p_selection_delegated();
+    const bool native_prefill_only =
+        provider_id == xllm::proto::PROVIDER_ID_XLLM_NATIVE &&
+        spec.mode() == xllm::proto::EXECUTION_MODE_PREFILL_ONLY &&
+        spec.transfer_mode() == xllm::proto::TRANSFER_MODE_NONE &&
+        spec.selection_order() == xllm::proto::SELECTION_ORDER_P_ONLY &&
+        spec.binding_stage() == xllm::proto::BINDING_STAGE_AT_SUBMIT &&
+        !spec.p_selection_delegated();
     const bool vllm_aggregated =
         provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND &&
         spec.mode() == xllm::proto::EXECUTION_MODE_AGGREGATED &&
@@ -43,7 +58,10 @@ const xllm::proto::ExecutionModeSpec* find_open_mode(
         spec.selection_order() == xllm::proto::SELECTION_ORDER_SINGLE &&
         spec.binding_stage() == xllm::proto::BINDING_STAGE_AT_SUBMIT &&
         !spec.p_selection_delegated();
-    if (native_remote_pd || vllm_aggregated) {
+    const bool open = native_remote_pd || native_local || native_prefill_only ||
+                      vllm_aggregated;
+    if (open && (requested_mode == xllm::proto::EXECUTION_MODE_UNSPECIFIED ||
+                 requested_mode == spec.mode())) {
       return &spec;
     }
   }
@@ -105,7 +123,8 @@ ContractResult build_execution_plan(
     const xllm::proto::EncodedRequest& encoded,
     const xllm::proto::ProviderDescriptor& primary,
     const xllm::proto::ProviderDescriptor* decode,
-    xllm::proto::ExecutionPlan* plan) {
+    xllm::proto::ExecutionPlan* plan,
+    xllm::proto::ExecutionMode requested_mode) {
   if (plan == nullptr) {
     return ContractResult::failure(
         xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
@@ -117,7 +136,8 @@ ContractResult build_execution_plan(
   if (!encoded_validation.ok()) {
     return encoded_validation;
   }
-  const xllm::proto::ExecutionModeSpec* spec = find_open_mode(primary);
+  const xllm::proto::ExecutionModeSpec* spec =
+      find_open_mode(primary, requested_mode);
   if (spec == nullptr) {
     return ContractResult::failure(
         xllm::proto::PROVIDER_CONTRACT_ERROR_MODE_NOT_OPEN,
@@ -127,15 +147,29 @@ ContractResult build_execution_plan(
   std::string compatibility_proof;
   if (primary.identity().provider_id() ==
       xllm::proto::PROVIDER_ID_XLLM_NATIVE) {
-    if (decode == nullptr) {
-      return ContractResult::failure(
-          xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
-          "xLLM Native REMOTE_PD plan requires a Decode descriptor");
-    }
-    ContractResult compatibility = validate_remote_pd_compatibility(
-        primary, *decode, &compatibility_proof);
-    if (!compatibility.ok()) {
-      return compatibility;
+    if (spec->mode() == xllm::proto::EXECUTION_MODE_REMOTE_PD) {
+      if (decode == nullptr) {
+        return ContractResult::failure(
+            xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+            "xLLM Native REMOTE_PD plan requires a Decode descriptor");
+      }
+      ContractResult compatibility = validate_remote_pd_compatibility(
+          primary, *decode, &compatibility_proof);
+      if (!compatibility.ok()) {
+        return compatibility;
+      }
+    } else {
+      if (decode != nullptr) {
+        return ContractResult::failure(
+            xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_SELECTED_ROLES,
+            "xLLM Native local execution requires exactly one Engine");
+      }
+      compatibility_proof =
+          (spec->mode() == xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE
+               ? "native-local-v1|profile="
+               : "native-prefill-only-v1|profile=") +
+          primary.profile_digest() +
+          "|incarnation=" + primary.identity().incarnation_id();
     }
   } else {
     if (decode != nullptr ||

@@ -89,6 +89,23 @@ TEST(OutputEventSequencerTest, ErrorCanComeFromEitherBoundSender) {
   EXPECT_FALSE(matches_remote_pd_output_identity(error, make_binding()));
 }
 
+TEST(OutputEventSequencerTest, SingleEngineModeAcceptsOnlyBoundSender) {
+  RemotePdOutputBinding binding = make_binding();
+  binding.execution_mode = xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE;
+  binding.prefill_engine_uid = "decode-1";
+  binding.prefill_incarnation_id = "decode-incarnation-1";
+  binding.decode_engine_uid.clear();
+  binding.decode_incarnation_id.clear();
+
+  llm::RequestOutput output = make_output(0, "local");
+  output.attempt_seq = 3;
+  output.sender_engine_uid = "decode-1";
+  output.sender_incarnation_id = "decode-incarnation-1";
+  EXPECT_TRUE(matches_remote_pd_output_identity(output, binding));
+  output.sender_engine_uid = "prefill-1";
+  EXPECT_FALSE(matches_remote_pd_output_identity(output, binding));
+}
+
 TEST(OutputEventSequencerTest, LegacyOutputPassesOnlyWhenSequenceIsOptional) {
   OutputEventSequencer legacy(make_config());
   auto ready = legacy.push(make_output(std::nullopt, "legacy"), false);

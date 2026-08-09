@@ -108,6 +108,79 @@ DEFINE_uint64(kv_route_bytes_per_token,
               0,
               "Logical KV bytes per prompt token for routing calibration.");
 
+DEFINE_uint64(flow_max_queued_requests, 4096, "Service queued request bound.");
+DEFINE_uint64(flow_max_dispatched_contexts,
+              4096,
+              "Service dispatched request context bound.");
+DEFINE_uint64(flow_max_queued_prompt_tokens,
+              16 * 1024 * 1024,
+              "Service queued prompt token bound.");
+DEFINE_uint64(flow_max_queued_bytes,
+              512 * 1024 * 1024,
+              "Service queued normalized request byte bound.");
+DEFINE_uint64(flow_max_queue_wait_ms, 2000, "Maximum Service queue wait.");
+DEFINE_uint64(flow_max_queued_requests_per_tenant,
+              512,
+              "Per-tenant queued request bound on one Service.");
+DEFINE_uint64(flow_max_queued_tokens_per_tenant,
+              2 * 1024 * 1024,
+              "Per-tenant queued prompt token bound on one Service.");
+DEFINE_uint64(flow_max_model_queued_requests,
+              4096,
+              "Per-ModelPool queued request bound.");
+DEFINE_uint64(flow_max_model_dispatched_contexts,
+              4096,
+              "Per-ModelPool dispatched request context bound.");
+DEFINE_uint64(flow_max_model_queued_prompt_tokens,
+              16 * 1024 * 1024,
+              "Per-ModelPool queued prompt token bound.");
+DEFINE_uint64(flow_max_model_queued_bytes,
+              512 * 1024 * 1024,
+              "Per-ModelPool queued normalized request byte bound.");
+DEFINE_uint64(flow_service_crash_request_budget,
+              8192,
+              "Maximum queued plus dispatched requests exposed by kill -9.");
+DEFINE_uint64(flow_service_memory_budget_bytes,
+              528 * 1024 * 1024,
+              "Queue plus dispatched context memory exposure bound.");
+DEFINE_uint64(flow_dispatched_context_bytes,
+              4096,
+              "Conservative bytes charged to one dispatched context.");
+DEFINE_double(flow_dispatch_rate_lb_per_second,
+              1.0,
+              "Fresh normal-observation dispatch-rate lower bound.");
+DEFINE_uint64(flow_probe_round_ub_ms,
+              200,
+              "Upper bound for one capacity probe round.");
+DEFINE_uint64(flow_blind_dispatch_probe_concurrency,
+              1,
+              "Maximum blind BEST_EFFORT probes in flight.");
+DEFINE_uint64(flow_starvation_dispatch_bound,
+              32,
+              "Maximum consecutive higher-band dispatches.");
+DEFINE_string(flow_order, "FCFS", "Within-flow order: FCFS or EDF.");
+DEFINE_int32(flow_dispatch_interval_ms,
+             10,
+             "Maximum wait between Service flow dispatch scans.");
+DEFINE_string(flow_drain_policy,
+              "COMPLETE_QUEUED",
+              "Drain policy: COMPLETE_QUEUED or RETRY_UNDISPATCHED.");
+DEFINE_bool(native_local_prefill_enabled,
+            false,
+            "Enable allowlisted Native local Prefill/Decode selection.");
+DEFINE_uint32(native_local_prefill_bucket_permyriad,
+              0,
+              "Stable Native local Prefill workload bucket in [0, 10000].");
+DEFINE_uint64(native_local_prefill_token_cap,
+              512,
+              "Maximum prompt tokens for Native local Prefill.");
+DEFINE_bool(native_prefill_only_enabled,
+            true,
+            "Enable capability-gated Native Prefill-only selection.");
+DEFINE_uint64(native_prefill_only_output_token_cap,
+              1,
+              "Maximum output tokens for Native Prefill-only execution.");
+
 DEFINE_int32(detect_disconnected_instance_interval,
              15,
              "Deprecated V1 compatibility flag; ignored by V2 membership "

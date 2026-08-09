@@ -218,6 +218,42 @@ class Options {
   // available.
   PROPERTY(uint64_t, kv_route_bytes_per_token) = 0;
 
+  // V2 Service/ModelPool flow-control hard bounds. Queue accounting includes
+  // normalized payload/token storage and an explicit dispatched context
+  // estimate so process crash and memory exposure are configuration-bounded.
+  PROPERTY(size_t, flow_max_queued_requests) = 4096;
+  PROPERTY(size_t, flow_max_dispatched_contexts) = 4096;
+  PROPERTY(uint64_t, flow_max_queued_prompt_tokens) = 16 * 1024 * 1024;
+  PROPERTY(uint64_t, flow_max_queued_bytes) = 512 * 1024 * 1024;
+  PROPERTY(uint64_t, flow_max_queue_wait_ms) = 2000;
+  PROPERTY(size_t, flow_max_queued_requests_per_tenant) = 512;
+  PROPERTY(uint64_t, flow_max_queued_tokens_per_tenant) = 2 * 1024 * 1024;
+  PROPERTY(size_t, flow_max_model_queued_requests) = 4096;
+  PROPERTY(size_t, flow_max_model_dispatched_contexts) = 4096;
+  PROPERTY(uint64_t, flow_max_model_queued_prompt_tokens) = 16 * 1024 * 1024;
+  PROPERTY(uint64_t, flow_max_model_queued_bytes) = 512 * 1024 * 1024;
+  PROPERTY(size_t, flow_service_crash_request_budget) = 8192;
+  PROPERTY(uint64_t, flow_service_memory_budget_bytes) = 528 * 1024 * 1024;
+  PROPERTY(uint64_t, flow_dispatched_context_bytes) = 4096;
+  PROPERTY(double, flow_dispatch_rate_lb_per_second) = 1.0;
+  PROPERTY(uint64_t, flow_probe_round_ub_ms) = 200;
+  PROPERTY(size_t, flow_blind_dispatch_probe_concurrency) = 1;
+  PROPERTY(size_t, flow_starvation_dispatch_bound) = 32;
+  PROPERTY(std::string, flow_order) = "FCFS";
+  PROPERTY(int32_t, flow_dispatch_interval_ms) = 10;
+  // COMPLETE_QUEUED preserves accepted work. RETRY_UNDISPATCHED returns only
+  // work that has not crossed the dispatch boundary.
+  PROPERTY(std::string, flow_drain_policy) = "COMPLETE_QUEUED";
+
+  // Native mode gates. LOCAL remains an explicit allowlist bucket because the
+  // D-side mixed-accounting capability is necessary but not sufficient proof
+  // that a workload profile has passed the co-resident TPOT gate.
+  PROPERTY(bool, native_local_prefill_enabled) = false;
+  PROPERTY(uint32_t, native_local_prefill_bucket_permyriad) = 0;
+  PROPERTY(uint64_t, native_local_prefill_token_cap) = 512;
+  PROPERTY(bool, native_prefill_only_enabled) = true;
+  PROPERTY(uint64_t, native_prefill_only_output_token_cap) = 1;
+
   PROPERTY(std::string, service_name);
 
   // V2 execution-hold cleanup capacity. One fixed-size token is reserved

@@ -20,14 +20,15 @@ limitations under the License.
 
 namespace xllm_service::provider {
 
-// Builds the two execution shapes opened by the current V2 Provider gate:
-// xLLM Native REMOTE_PD and vLLM-Ascend AGGREGATED. The descriptors are the
-// immutable incarnation snapshots bound to this request.
+// Builds an execution shape opened by the immutable Provider Descriptor. An
+// unspecified requested mode preserves the Provider's default open mode.
 ContractResult build_execution_plan(
     const xllm::proto::CanonicalRequest& canonical,
     const xllm::proto::EncodedRequest& encoded,
     const xllm::proto::ProviderDescriptor& primary,
     const xllm::proto::ProviderDescriptor* decode,
-    xllm::proto::ExecutionPlan* plan);
+    xllm::proto::ExecutionPlan* plan,
+    xllm::proto::ExecutionMode requested_mode =
+        xllm::proto::EXECUTION_MODE_UNSPECIFIED);
 
 }  // namespace xllm_service::provider

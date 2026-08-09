@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/xllm/output.h"
+#include "provider.pb.h"
 
 namespace xllm_service {
 
@@ -45,6 +46,8 @@ struct OutputEventSequenceResult {
 
 struct RemotePdOutputBinding {
   std::optional<uint64_t> attempt_seq;
+  xllm::proto::ExecutionMode execution_mode =
+      xllm::proto::EXECUTION_MODE_REMOTE_PD;
   std::string prefill_engine_uid;
   std::string prefill_incarnation_id;
   std::string decode_engine_uid;

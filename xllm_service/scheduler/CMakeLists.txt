@@ -6,6 +6,15 @@ add_subdirectory(loadbalance_policy)
 
 cc_library(
   NAME
+    flow_control_queue
+  HDRS
+    flow_control_queue.h
+  SRCS
+    flow_control_queue.cpp
+)
+
+cc_library(
+  NAME
     xllm_chat_parse_runtime
   HDRS
     xllm_chat_parse_bridge.h
@@ -61,6 +70,7 @@ cc_library(
     :client_disconnect_monitor
     :deepseek_v4_cpp_chat_template
     :first_event_recovery_client
+    :flow_control_queue
     :kv_shadow_index
     :kv_route_metrics
     :kv_snapshot_client
@@ -77,6 +87,7 @@ cc_library(
     :execution_plan_builder
     :loadbalance_policy
     :managers
+    :native_execution_mode_selector
     :request
     :request_deadline_queue
     :state_stream_client

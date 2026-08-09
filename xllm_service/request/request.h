@@ -18,6 +18,7 @@ limitations under the License.
 #include <absl/time/time.h>
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -34,8 +35,16 @@ limitations under the License.
 #include "provider/kv_route_planner.h"
 #include "request/first_output_retry_budget.h"
 #include "request/output_event_sequencer.h"
+#include "scheduler/flow_control_queue.h"
 
 namespace xllm_service {
+
+enum class RequestQueueState {
+  RECEIVED = 0,
+  QUEUED = 1,
+  DISPATCHED = 2,
+  TERMINAL = 3,
+};
 
 // Store request-related data
 struct Request {
@@ -62,6 +71,15 @@ struct Request {
   bool include_usage = false;
 
   bool offline = false;
+
+  // Queue identity comes from trusted ingress metadata when available. The
+  // anonymous fallback is intentionally explicit and remains locally bounded.
+  std::string tenant_id = "anonymous";
+  std::string flow_id = "anonymous";
+  std::atomic<RequestQueueState> queue_state{RequestQueueState::RECEIVED};
+  std::atomic<bool> dispatch_ready{false};
+  std::optional<std::chrono::steady_clock::time_point> enqueue_time;
+  FlowControlStatus admission_status = FlowControlStatus::INVALID_ARGUMENT;
 
   // input prompt
   std::string prompt;
@@ -94,6 +112,8 @@ struct Request {
   std::optional<xllm::proto::CanonicalRequest> canonical_request;
   std::optional<xllm::proto::EncodedRequest> encoded_request;
   std::optional<xllm::proto::ExecutionPlan> execution_plan;
+  xllm::proto::ExecutionMode execution_mode =
+      xllm::proto::EXECUTION_MODE_UNSPECIFIED;
   std::optional<xllm::proto::ProviderDescriptor> prefill_provider_descriptor;
   std::optional<xllm::proto::ProviderDescriptor> decode_provider_descriptor;
 
@@ -131,6 +151,10 @@ struct Request {
   // request protobuf and starts an asynchronous native dispatch. It must not
   // retain a shared_ptr back to this Request.
   std::function<bool(const Request&)> retry_dispatch_callback;
+
+  // Starts the first provider submission only after the Service queue has
+  // selected this request and installed its mode-specific execution hold.
+  std::function<bool(const std::shared_ptr<Request>&)> dispatch_callback;
 
   // prefill stage finished
   std::atomic<bool> prefill_stage_finished{false};

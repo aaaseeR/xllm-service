@@ -248,6 +248,40 @@ int main(int argc, char* argv[]) {
       .kv_route_enforced_bucket_permyriad(
           FLAGS_kv_route_enforced_bucket_permyriad)
       .kv_route_bytes_per_token(FLAGS_kv_route_bytes_per_token)
+      .flow_max_queued_requests(FLAGS_flow_max_queued_requests)
+      .flow_max_dispatched_contexts(FLAGS_flow_max_dispatched_contexts)
+      .flow_max_queued_prompt_tokens(FLAGS_flow_max_queued_prompt_tokens)
+      .flow_max_queued_bytes(FLAGS_flow_max_queued_bytes)
+      .flow_max_queue_wait_ms(FLAGS_flow_max_queue_wait_ms)
+      .flow_max_queued_requests_per_tenant(
+          FLAGS_flow_max_queued_requests_per_tenant)
+      .flow_max_queued_tokens_per_tenant(
+          FLAGS_flow_max_queued_tokens_per_tenant)
+      .flow_max_model_queued_requests(FLAGS_flow_max_model_queued_requests)
+      .flow_max_model_dispatched_contexts(
+          FLAGS_flow_max_model_dispatched_contexts)
+      .flow_max_model_queued_prompt_tokens(
+          FLAGS_flow_max_model_queued_prompt_tokens)
+      .flow_max_model_queued_bytes(FLAGS_flow_max_model_queued_bytes)
+      .flow_service_crash_request_budget(
+          FLAGS_flow_service_crash_request_budget)
+      .flow_service_memory_budget_bytes(FLAGS_flow_service_memory_budget_bytes)
+      .flow_dispatched_context_bytes(FLAGS_flow_dispatched_context_bytes)
+      .flow_dispatch_rate_lb_per_second(FLAGS_flow_dispatch_rate_lb_per_second)
+      .flow_probe_round_ub_ms(FLAGS_flow_probe_round_ub_ms)
+      .flow_blind_dispatch_probe_concurrency(
+          FLAGS_flow_blind_dispatch_probe_concurrency)
+      .flow_starvation_dispatch_bound(FLAGS_flow_starvation_dispatch_bound)
+      .flow_order(FLAGS_flow_order)
+      .flow_dispatch_interval_ms(FLAGS_flow_dispatch_interval_ms)
+      .flow_drain_policy(FLAGS_flow_drain_policy)
+      .native_local_prefill_enabled(FLAGS_native_local_prefill_enabled)
+      .native_local_prefill_bucket_permyriad(
+          FLAGS_native_local_prefill_bucket_permyriad)
+      .native_local_prefill_token_cap(FLAGS_native_local_prefill_token_cap)
+      .native_prefill_only_enabled(FLAGS_native_prefill_only_enabled)
+      .native_prefill_only_output_token_cap(
+          FLAGS_native_prefill_only_output_token_cap)
       .xxh3_128bits_seed(FLAGS_xxh3_128bits_seed)
       .service_name(xllm_service::utils::get_local_ip() + ":" +
                     std::to_string(FLAGS_rpc_server_port))

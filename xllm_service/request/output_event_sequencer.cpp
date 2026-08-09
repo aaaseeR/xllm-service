@@ -55,6 +55,11 @@ bool matches_remote_pd_output_identity(const llm::RequestOutput& output,
       output.sender_engine_uid == binding.decode_engine_uid &&
       output.sender_incarnation_id == binding.decode_incarnation_id;
   const bool status_error = output.status.has_value() && !output.status->ok();
+  if (binding.execution_mode ==
+          xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE ||
+      binding.execution_mode == xllm::proto::EXECUTION_MODE_PREFILL_ONLY) {
+    return matches_prefill;
+  }
   if (status_error) {
     return matches_prefill || matches_decode;
   }

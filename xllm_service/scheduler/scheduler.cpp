@@ -38,6 +38,7 @@ limitations under the License.
 #include "loadbalance_policy/slo_aware_policy.h"
 #include "provider/attempt_control_client.h"
 #include "provider/execution_plan_builder.h"
+#include "provider/native_execution_mode_selector.h"
 #include "provider/provider_adapter.h"
 #include "rpc_service/first_event_recovery_client.h"
 #include "rpc_service/kv_snapshot_client.h"
@@ -60,6 +61,21 @@ uint64_t monotonic_time_ms() {
           .count());
 }
 
+bool uint64_add_overflows(uint64_t left, uint64_t right) {
+  return left > std::numeric_limits<uint64_t>::max() - right;
+}
+
+uint64_t stable_identity_hash(const std::string& identity) {
+  constexpr uint64_t kOffset = 1469598103934665603ULL;
+  constexpr uint64_t kPrime = 1099511628211ULL;
+  uint64_t hash = kOffset;
+  for (unsigned char byte : identity) {
+    hash ^= static_cast<uint64_t>(byte);
+    hash *= kPrime;
+  }
+  return hash;
+}
+
 xllm_service::provider::ExecutionHoldCleanupTable::Config execution_hold_config(
     const xllm_service::Options& options) {
   return xllm_service::provider::ExecutionHoldCleanupTable::Config{
@@ -77,6 +93,40 @@ xllm_service::provider::ReadinessControllerConfig readiness_config(
     const xllm_service::Options& options) {
   return xllm_service::provider::ReadinessControllerConfig{
       .recovery_hold_ms = options.readiness_recovery_hold_ms(),
+  };
+}
+
+xllm_service::FlowControlConfig flow_control_config(
+    const xllm_service::Options& options) {
+  const xllm_service::FlowOrder order = options.flow_order() == "EDF"
+                                            ? xllm_service::FlowOrder::EDF
+                                            : xllm_service::FlowOrder::FCFS;
+  return xllm_service::FlowControlConfig{
+      .max_queued_requests = options.flow_max_queued_requests(),
+      .max_dispatched_request_contexts = options.flow_max_dispatched_contexts(),
+      .max_queued_prompt_tokens = options.flow_max_queued_prompt_tokens(),
+      .max_queued_bytes = options.flow_max_queued_bytes(),
+      .max_queue_wait_ms = options.flow_max_queue_wait_ms(),
+      .max_queued_requests_per_tenant =
+          options.flow_max_queued_requests_per_tenant(),
+      .max_queued_tokens_per_tenant =
+          options.flow_max_queued_tokens_per_tenant(),
+      .max_model_queued_requests = options.flow_max_model_queued_requests(),
+      .max_model_dispatched_request_contexts =
+          options.flow_max_model_dispatched_contexts(),
+      .max_model_queued_prompt_tokens =
+          options.flow_max_model_queued_prompt_tokens(),
+      .max_model_queued_bytes = options.flow_max_model_queued_bytes(),
+      .service_crash_request_budget =
+          options.flow_service_crash_request_budget(),
+      .service_memory_budget_bytes = options.flow_service_memory_budget_bytes(),
+      .dispatched_context_bytes = options.flow_dispatched_context_bytes(),
+      .dispatch_rate_lb_per_second = options.flow_dispatch_rate_lb_per_second(),
+      .probe_round_ub_ms = options.flow_probe_round_ub_ms(),
+      .blind_dispatch_probe_concurrency =
+          options.flow_blind_dispatch_probe_concurrency(),
+      .starvation_dispatch_bound = options.flow_starvation_dispatch_bound(),
+      .flow_order = order,
   };
 }
 
@@ -144,6 +194,13 @@ xllm::proto::ExecutionHolder execution_holder(
   if (request.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
     return prefill_holder(request);
   }
+  if (request.execution_mode ==
+      xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE) {
+    return prefill_holder(request);
+  }
+  if (request.execution_mode == xllm::proto::EXECUTION_MODE_PREFILL_ONLY) {
+    return xllm::proto::ExecutionHolder();
+  }
   return decode_holder(request);
 }
 
@@ -190,11 +247,23 @@ Scheduler::Scheduler(const Options& options)
               execution_hold_config(options))),
       request_deadline_queue_(std::make_unique<RequestDeadlineQueue>(
           options.request_deadline_capacity())),
+      flow_control_queue_(
+          std::make_unique<FlowControlQueue>(flow_control_config(options))),
       client_disconnect_monitor_(std::make_shared<ClientDisconnectMonitor>(
           options.request_deadline_capacity())) {
   if (!readiness_controller_.valid() ||
       options_.readiness_check_interval_ms() == 0) {
     LOG(FATAL) << "Invalid readiness configuration.";
+  }
+  if ((options_.flow_order() != "FCFS" && options_.flow_order() != "EDF") ||
+      (options_.flow_drain_policy() != "COMPLETE_QUEUED" &&
+       options_.flow_drain_policy() != "RETRY_UNDISPATCHED") ||
+      options_.flow_dispatch_interval_ms() <= 0 ||
+      options_.native_local_prefill_bucket_permyriad() > 10000 ||
+      options_.native_local_prefill_token_cap() == 0 ||
+      options_.native_prefill_only_output_token_cap() == 0 ||
+      !flow_control_queue_->valid()) {
+    LOG(FATAL) << "Invalid V2 flow-control configuration.";
   }
   const std::optional<xllm::FirstEventRetryPolicy> first_event_retry_policy =
       xllm::FirstEventRetryPolicy::from_durations_ms(
@@ -415,12 +484,19 @@ Scheduler::Scheduler(const Options& options)
       &Scheduler::run_execution_hold_cleanup, this);
   request_watchdog_thread_ =
       std::make_unique<std::thread>(&Scheduler::run_request_watchdog, this);
+  flow_dispatch_thread_ =
+      std::make_unique<std::thread>(&Scheduler::run_flow_dispatch, this);
 }
 
 Scheduler::~Scheduler() {
   set_draining(true);
   refresh_readiness();
   exited_.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(flow_dispatch_wait_mutex_);
+    flow_dispatch_stopped_ = true;
+  }
+  flow_dispatch_cv_.notify_all();
   state_stream_cv_.notify_all();
   kv_state_cv_.notify_all();
   kv_snapshot_cv_.notify_all();
@@ -436,6 +512,9 @@ Scheduler::~Scheduler() {
   }
   if (heartbeat_thread_ != nullptr && heartbeat_thread_->joinable()) {
     heartbeat_thread_->join();
+  }
+  if (flow_dispatch_thread_ != nullptr && flow_dispatch_thread_->joinable()) {
+    flow_dispatch_thread_->join();
   }
   client_disconnect_monitor_->close();
   {
@@ -512,8 +591,25 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
     }
   }
 
-  const bool ret = lb_policy_->select_instances_pair(request);
-  if (!ret) {
+  // Control-plane model discovery has no CanonicalRequest and remains a
+  // direct bounded RPC. Inference requests defer route binding to dequeue.
+  if (!request->canonical_request.has_value()) {
+    return select_and_prepare_dispatch(request);
+  }
+  return true;
+}
+
+bool Scheduler::select_and_prepare_dispatch(
+    const std::shared_ptr<Request>& request) {
+  request->routing = Routing();
+  request->prefill_incarnation_id.clear();
+  request->decode_incarnation_id.clear();
+  request->prefill_provider_descriptor.reset();
+  request->decode_provider_descriptor.reset();
+  request->encoded_request.reset();
+  request->execution_plan.reset();
+  request->execution_mode = xllm::proto::EXECUTION_MODE_UNSPECIFIED;
+  if (!lb_policy_->select_instances_pair(request)) {
     return false;
   }
 
@@ -522,18 +618,167 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
                << request->routing.debug_string();
     return false;
   }
+
+  if (!apply_native_execution_mode(request)) {
+    return false;
+  }
   if (!prepare_v2_execution_plan(request)) {
     return false;
   }
   record_kv_route_decision(request);
   DLOG(INFO) << request->routing.debug_string();
 
-  // update request metrics
-  if (is_native && !request->prompt.empty()) {
+  const std::optional<provider::ProviderDispatchKind> dispatch_kind =
+      provider::resolve_provider_dispatch_kind(request->provider_id);
+  if (dispatch_kind.has_value() &&
+      *dispatch_kind == provider::ProviderDispatchKind::XLLM_NATIVE_RPC &&
+      !request->prompt.empty()) {
     instance_mgr_->update_request_metrics(request, RequestAction::SCHEDULE);
   }
 
   return true;
+}
+
+bool Scheduler::apply_native_execution_mode(
+    const std::shared_ptr<Request>& request) {
+  request->execution_mode = xllm::proto::EXECUTION_MODE_UNSPECIFIED;
+  if (request->provider_id != xllm::proto::PROVIDER_ID_XLLM_NATIVE ||
+      !request->canonical_request.has_value()) {
+    return true;
+  }
+  const bool has_prefill = request->prefill_provider_descriptor.has_value();
+  const bool has_decode = request->decode_provider_descriptor.has_value();
+  if (!has_prefill && !has_decode) {
+    return true;
+  }
+  if (!has_prefill || !has_decode) {
+    LOG(ERROR) << "Native strict route must bind both P and D before mode "
+                  "selection, routing="
+               << request->routing.debug_string();
+    return false;
+  }
+
+  provider::NativeExecutionModeDecision decision;
+  const provider::ContractResult result =
+      provider::select_native_execution_mode(
+          provider::NativeExecutionModeConfig{
+              .local_prefill_decode_enabled =
+                  options_.native_local_prefill_enabled(),
+              .local_prefill_decode_bucket_permyriad =
+                  options_.native_local_prefill_bucket_permyriad(),
+              .local_prefill_decode_prompt_token_cap =
+                  options_.native_local_prefill_token_cap(),
+              .prefill_only_enabled = options_.native_prefill_only_enabled(),
+              .prefill_only_output_token_cap =
+                  options_.native_prefill_only_output_token_cap(),
+          },
+          provider::NativeExecutionModeInput{
+              .stable_request_hash =
+                  stable_identity_hash(request->correlation.request_uid()),
+              .prompt_tokens = request->token_ids.size(),
+              .output_tokens =
+                  request->canonical_request->effective_max_new_tokens(),
+              .prefill = &*request->prefill_provider_descriptor,
+              .decode = &*request->decode_provider_descriptor,
+          },
+          &decision);
+  if (!result.ok()) {
+    LOG(ERROR) << "Native execution mode selection failed: "
+               << result.message();
+    return false;
+  }
+
+  request->execution_mode = decision.mode;
+  if (decision.mode == xllm::proto::EXECUTION_MODE_PREFILL_ONLY) {
+    request->routing.decode_name.clear();
+    request->decode_incarnation_id.clear();
+    request->decode_provider_descriptor.reset();
+  } else if (decision.mode ==
+             xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE) {
+    request->routing.prefill_name = request->routing.decode_name;
+    request->prefill_incarnation_id = request->decode_incarnation_id;
+    request->prefill_provider_descriptor = request->decode_provider_descriptor;
+    request->routing.decode_name.clear();
+    request->decode_incarnation_id.clear();
+    request->decode_provider_descriptor.reset();
+  }
+  return true;
+}
+
+SaturationState Scheduler::flow_saturation_state() const {
+  const provider::ReadinessSnapshot readiness = readiness_status();
+  const bool has_capacity = has_available_instances();
+  if (readiness.reason == provider::ReadinessReason::READY) {
+    return has_capacity ? SaturationState::AVAILABLE
+                        : SaturationState::SATURATED;
+  }
+  if (readiness.reason == provider::ReadinessReason::DRAINING && has_capacity) {
+    return SaturationState::AVAILABLE;
+  }
+  return SaturationState::UNKNOWN;
+}
+
+bool Scheduler::admit_flow_control_locked(
+    const std::shared_ptr<Request>& request) {
+  if (request->dispatch_callback == nullptr ||
+      !request->request_deadline.has_value() ||
+      !request->canonical_request.has_value() ||
+      request->queue_state.load(std::memory_order_acquire) !=
+          RequestQueueState::RECEIVED) {
+    request->admission_status = FlowControlStatus::INVALID_ARGUMENT;
+    return false;
+  }
+
+  const xllm::proto::CanonicalRequest& canonical = *request->canonical_request;
+  const uint64_t token_count = request->token_ids.empty()
+                                   ? canonical.canonical_payload().size()
+                                   : request->token_ids.size();
+  const uint64_t token_bytes =
+      token_count > std::numeric_limits<uint64_t>::max() / sizeof(int32_t)
+          ? std::numeric_limits<uint64_t>::max()
+          : token_count * sizeof(int32_t);
+  const uint64_t base_bytes =
+      static_cast<uint64_t>(sizeof(Request)) + canonical.ByteSizeLong();
+  const uint64_t request_bytes = uint64_add_overflows(base_bytes, token_bytes)
+                                     ? std::numeric_limits<uint64_t>::max()
+                                     : base_bytes + token_bytes;
+  int32_t priority = canonical.priority();
+  if (priority == static_cast<int32_t>(xllm::proto::DEFAULT)) {
+    priority = static_cast<int32_t>(xllm::proto::NORMAL);
+  }
+  FlowControlWork work{
+      .request_uid = request->correlation.request_uid(),
+      .model_pool = request->model,
+      .tenant_id = request->tenant_id,
+      .flow_id = request->flow_id,
+      .priority_band = priority,
+      .prompt_tokens = token_count,
+      .request_bytes = request_bytes,
+      .deadline = request->request_deadline->time_point(),
+      .strict = canonical.strict(),
+  };
+  const FlowControlAdmission admission = flow_control_queue_->admit(
+      work, FlowControlQueue::Clock::now(), flow_saturation_state());
+  request->admission_status = admission.status;
+  if (admission.status != FlowControlStatus::OK) {
+    return false;
+  }
+  RequestQueueState expected = RequestQueueState::RECEIVED;
+  if (!request->queue_state.compare_exchange_strong(
+          expected,
+          RequestQueueState::QUEUED,
+          std::memory_order_acq_rel,
+          std::memory_order_acquire)) {
+    flow_control_queue_->cancel(request->correlation.request_uid());
+    request->admission_status = FlowControlStatus::INVALID_ARGUMENT;
+    return false;
+  }
+  request->enqueue_time = FlowControlQueue::Clock::now();
+  return true;
+}
+
+FlowControlSnapshot Scheduler::flow_control_snapshot() const {
+  return flow_control_queue_->snapshot();
 }
 
 bool Scheduler::prepare_v2_execution_plan(
@@ -624,7 +869,7 @@ bool Scheduler::prepare_v2_execution_plan(
           : nullptr;
   xllm::proto::ExecutionPlan plan;
   const provider::ContractResult plan_result = provider::build_execution_plan(
-      canonical, encoded, primary, decode, &plan);
+      canonical, encoded, primary, decode, &plan, request->execution_mode);
   if (!plan_result.ok()) {
     LOG(ERROR) << "V2 ExecutionPlan construction failed: "
                << plan_result.message();
@@ -634,6 +879,13 @@ bool Scheduler::prepare_v2_execution_plan(
   request->canonical_request = std::move(canonical);
   request->encoded_request = std::move(encoded);
   request->execution_plan = std::move(plan);
+  if (request->execution_mode ==
+      xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE) {
+    request->execution_plan->add_reason_codes("native-local-prefill-allowlist");
+  } else if (request->execution_mode ==
+             xllm::proto::EXECUTION_MODE_PREFILL_ONLY) {
+    request->execution_plan->add_reason_codes("native-prefill-only");
+  }
   return true;
 }
 
@@ -1421,6 +1673,14 @@ bool Scheduler::install_execution_hold_locked(
     return false;
   }
   if (!has_execution_holder(*request)) {
+    if (request->provider_id == xllm::proto::PROVIDER_ID_XLLM_NATIVE &&
+        request->execution_mode == xllm::proto::EXECUTION_MODE_PREFILL_ONLY) {
+      request->output_event_sequencer =
+          std::make_unique<OutputEventSequencer>(OutputEventSequencer::Config{
+              .max_buffered_events = options_.output_reorder_max_events(),
+              .max_buffered_bytes = options_.output_reorder_max_bytes(),
+              .max_sequence_gap = options_.output_reorder_max_events()});
+    }
     return true;
   }
   if (request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
@@ -1441,11 +1701,14 @@ bool Scheduler::install_execution_hold_locked(
     return false;
   }
 
-  const xllm::proto::ExecutionHolder holder = decode_holder(*request);
+  const bool local = request->execution_mode ==
+                     xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE;
+  const xllm::proto::ExecutionHolder holder = execution_holder(*request);
   const provider::ExecutionHoldStatus status =
       execution_hold_cleanup_table_->install_request_hold(
           &request->execution_hold,
-          xllm::proto::EXECUTION_HOLD_KIND_REMOTE_D_RESERVATION,
+          local ? xllm::proto::EXECUTION_HOLD_KIND_LOCAL_DECODE_SUBMISSION
+                : xllm::proto::EXECUTION_HOLD_KIND_REMOTE_D_RESERVATION,
           execution_attempt(*request),
           service_incarnation_id_,
           {holder});
@@ -1473,16 +1736,11 @@ bool Scheduler::install_request_safety_guards_locked(
                << request_uid;
     return false;
   }
-  if (!install_execution_hold_locked(request)) {
-    client_disconnect_monitor_->erase(request_uid);
-    return false;
-  }
   return true;
 }
 
 void Scheduler::rollback_request_safety_guards_locked(
     const std::shared_ptr<Request>& request) {
-  request->execution_hold.abandon_before_dispatch();
   client_disconnect_monitor_->erase(request->correlation.request_uid());
 }
 
@@ -1533,6 +1791,17 @@ bool Scheduler::request_cancel_fences_for_retry(
   const std::optional<xllm::proto::ExecutionResourceHold> hold =
       request->execution_hold.snapshot();
   if (!hold.has_value()) {
+    if (request->provider_id == xllm::proto::PROVIDER_ID_XLLM_NATIVE &&
+        request->execution_mode == xllm::proto::EXECUTION_MODE_PREFILL_ONLY) {
+      xllm::proto::ExecutionResourceHold attempt_identity;
+      *attempt_identity.mutable_attempt() = execution_attempt(*request);
+      if (!call_attempt_control(attempt_identity,
+                                prefill_holder(*request),
+                                /*query=*/false,
+                                options_.instance_delete_probe_timeout_ms())) {
+        return false;
+      }
+    }
     return true;
   }
 
@@ -1565,15 +1834,24 @@ bool Scheduler::select_retry_instances(
   request->routing = Routing();
   request->prefill_incarnation_id.clear();
   request->decode_incarnation_id.clear();
+  request->prefill_provider_descriptor.reset();
+  request->decode_provider_descriptor.reset();
+  request->execution_mode = xllm::proto::EXECUTION_MODE_UNSPECIFIED;
   if (!lb_policy_->select_instances_pair(request) ||
       !instance_mgr_->bind_request_instance_incarnations(request)) {
     return false;
   }
+  if (!apply_native_execution_mode(request)) {
+    return false;
+  }
+  const bool remote =
+      request->execution_mode == xllm::proto::EXECUTION_MODE_REMOTE_PD;
   if (request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND ||
-      request->routing.decode_name.empty() ||
+      request->execution_mode == xllm::proto::EXECUTION_MODE_UNSPECIFIED ||
+      (remote && request->routing.decode_name.empty()) ||
       (requires_strict_route &&
        (!request->prefill_provider_descriptor.has_value() ||
-        !request->decode_provider_descriptor.has_value()))) {
+        (remote && !request->decode_provider_descriptor.has_value())))) {
     LOG(ERROR) << "First-output retry selected an incompatible execution "
                   "mode, routing="
                << request->routing.debug_string();
@@ -1810,6 +2088,8 @@ void Scheduler::recover_first_output_events(
   active_requests.reserve(requests.size());
   std::vector<FirstEventRecoveryQuery> queries;
   queries.reserve(requests.size());
+  std::vector<bool> requires_remote_query;
+  requires_remote_query.reserve(requests.size());
   for (const std::shared_ptr<Request>& service_request : requests) {
     {
       std::lock_guard<std::mutex> output_guard(
@@ -1833,30 +2113,38 @@ void Scheduler::recover_first_output_events(
                             service_request->request_deadline->remaining_ms());
     }
     active_requests.emplace_back(service_request);
-    queries.emplace_back(FirstEventRecoveryQuery{
-        .channel =
-            instance_mgr_->get_channel(service_request->routing.decode_name),
-        .attempt = execution_attempt(*service_request),
-        .decode = decode_holder(*service_request),
-        .prefill = prefill_holder(*service_request),
-        .max_payload_bytes = options_.output_reorder_max_bytes(),
-        .timeout_ms = timeout_ms,
-    });
+    const bool remote = service_request->execution_mode ==
+                        xllm::proto::EXECUTION_MODE_REMOTE_PD;
+    requires_remote_query.emplace_back(remote);
+    if (remote) {
+      queries.emplace_back(FirstEventRecoveryQuery{
+          .channel =
+              instance_mgr_->get_channel(service_request->routing.decode_name),
+          .attempt = execution_attempt(*service_request),
+          .decode = decode_holder(*service_request),
+          .prefill = prefill_holder(*service_request),
+          .max_payload_bytes = options_.output_reorder_max_bytes(),
+          .timeout_ms = timeout_ms,
+      });
+    }
   }
 
   std::vector<FirstEventRecoveryResult> results =
       query_first_output_events(queries);
-  CHECK_EQ(results.size(), active_requests.size());
+  CHECK_EQ(results.size(), queries.size());
+  size_t result_index = 0;
   for (size_t index = 0; index < active_requests.size(); ++index) {
-    const FirstEventRecoveryQuery& query = queries[index];
-    const FirstEventRecoveryResult& result = results[index];
     bool recovered = false;
-    if (result.status.ok() && result.output.has_value()) {
-      recovered = handle_generation(*result.output);
-    } else {
-      LOG(ERROR) << "Failed to recover first event, request_uid="
-                 << query.attempt.request_uid()
-                 << ", error=" << result.status.message();
+    if (requires_remote_query[index]) {
+      const FirstEventRecoveryQuery& query = queries[result_index];
+      const FirstEventRecoveryResult& result = results[result_index++];
+      if (result.status.ok() && result.output.has_value()) {
+        recovered = handle_generation(*result.output);
+      } else {
+        LOG(ERROR) << "Failed to recover first event, request_uid="
+                   << query.attempt.request_uid()
+                   << ", error=" << result.status.message();
+      }
     }
     if (recovered) {
       continue;
@@ -1967,6 +2255,157 @@ void Scheduler::run_execution_hold_cleanup() {
           execution_hold_cleanup_table_->apply_convergence_proof(
               hold.attempt(), holder, proof);
         }
+      }
+    }
+
+    wait_lock.lock();
+  }
+}
+
+void Scheduler::run_flow_dispatch() {
+  std::unique_lock<std::mutex> wait_lock(flow_dispatch_wait_mutex_);
+  while (!flow_dispatch_stopped_) {
+    flow_dispatch_cv_.wait_for(
+        wait_lock,
+        std::chrono::milliseconds(options_.flow_dispatch_interval_ms()),
+        [this] { return flow_dispatch_stopped_; });
+    if (flow_dispatch_stopped_) {
+      break;
+    }
+    wait_lock.unlock();
+
+    const std::vector<FlowControlWork> expired_work =
+        flow_control_queue_->take_expired(
+            FlowControlQueue::Clock::now(),
+            options_.request_watchdog_batch_size());
+    const auto fail_queued_work = [this](
+                                      const std::vector<FlowControlWork>& work,
+                                      llm::StatusCode status,
+                                      const char* message) {
+      for (const FlowControlWork& item : work) {
+        std::shared_ptr<Request> request;
+        {
+          std::lock_guard<std::mutex> request_guard(request_mutex_);
+          const auto it = requests_.find(item.request_uid);
+          if (it != requests_.end()) {
+            request = it->second;
+          }
+        }
+        if (request == nullptr) {
+          continue;
+        }
+        std::lock_guard<std::mutex> output_guard(
+            request->output_dispatch_mutex);
+        {
+          std::lock_guard<std::mutex> request_guard(request_mutex_);
+          const auto it = requests_.find(item.request_uid);
+          if (it == requests_.end() || it->second != request ||
+              request->queue_state.load(std::memory_order_acquire) !=
+                  RequestQueueState::QUEUED) {
+            continue;
+          }
+        }
+        fail_output_dispatch_locked(request, status, message);
+      }
+    };
+    fail_queued_work(expired_work,
+                     llm::StatusCode::DEADLINE_EXCEEDED,
+                     "QUEUE_WAIT_EXCEEDED");
+
+    if (draining_.load(std::memory_order_acquire) &&
+        options_.flow_drain_policy() == "RETRY_UNDISPATCHED") {
+      const std::vector<FlowControlWork> retry_work =
+          flow_control_queue_->retry_undispatched(
+              options_.request_watchdog_batch_size());
+      fail_queued_work(retry_work,
+                       llm::StatusCode::UNAVAILABLE,
+                       "SERVICE_DRAIN_RETRY_UNDISPATCHED");
+    }
+
+    // COMPLETE_QUEUED intentionally reaches the work-conserving loop below.
+    while (!exited_.load(std::memory_order_acquire)) {
+      const FlowControlDispatch dispatch = flow_control_queue_->take_next(
+          FlowControlQueue::Clock::now(), flow_saturation_state());
+      if (dispatch.status != FlowControlStatus::OK ||
+          !dispatch.work.has_value()) {
+        break;
+      }
+
+      const std::string request_uid = dispatch.work->request_uid;
+      std::shared_ptr<Request> request;
+      {
+        std::lock_guard<std::mutex> request_guard(request_mutex_);
+        const auto it = requests_.find(request_uid);
+        if (it != requests_.end()) {
+          request = it->second;
+        }
+      }
+      if (request == nullptr ||
+          !request->dispatch_ready.load(std::memory_order_acquire) ||
+          request->queue_state.load(std::memory_order_acquire) !=
+              RequestQueueState::QUEUED) {
+        if (request != nullptr &&
+            request->queue_state.load(std::memory_order_acquire) ==
+                RequestQueueState::QUEUED) {
+          flow_control_queue_->return_to_queue(request_uid);
+          break;
+        }
+        flow_control_queue_->cancel(request_uid);
+        continue;
+      }
+
+      if (!select_and_prepare_dispatch(request)) {
+        flow_control_queue_->return_to_queue(request_uid);
+        break;
+      }
+
+      bool dispatch_started = false;
+      bool request_active = false;
+      bool hold_installed = false;
+      {
+        std::lock_guard<std::mutex> output_guard(
+            request->output_dispatch_mutex);
+        if (!request->output_dispatch_closed) {
+          std::lock_guard<std::mutex> cleanup_guard(
+              execution_hold_cleanup_mutex_);
+          std::lock_guard<std::mutex> request_guard(request_mutex_);
+          const auto it = requests_.find(request_uid);
+          request_active =
+              it != requests_.end() && it->second == request &&
+              request->queue_state.load(std::memory_order_acquire) ==
+                  RequestQueueState::QUEUED;
+          if (request_active) {
+            hold_installed = install_execution_hold_locked(request);
+            if (hold_installed) {
+              request->queue_state.store(RequestQueueState::DISPATCHED,
+                                         std::memory_order_release);
+            }
+          }
+        }
+        if (request_active && hold_installed &&
+            request->dispatch_callback != nullptr) {
+          dispatch_started = request->dispatch_callback(request);
+        }
+      }
+
+      if (!request_active) {
+        flow_control_queue_->cancel(request_uid);
+        continue;
+      }
+      if (!hold_installed) {
+        request->execution_hold.abandon_before_dispatch();
+        flow_control_queue_->return_to_queue(request_uid);
+        request->queue_state.store(RequestQueueState::QUEUED,
+                                   std::memory_order_release);
+        break;
+      }
+      if (!dispatch_started) {
+        handle_attempt_dispatch_failure(
+            request_uid,
+            request->correlation.has_attempt_seq()
+                ? request->correlation.attempt_seq()
+                : 0,
+            "Provider dispatch could not be started");
       }
     }
 
@@ -2205,6 +2644,7 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
          reasoning_parser = std::move(reasoning_parser_pref),
          force_reasoning,
          stream_state = std::move(stream_state),
+         request_context = request.get(),
          created_time = absl::ToUnixSeconds(request->latest_generate_time)](
             const llm::RequestOutput& req_output) mutable -> bool {
       if (req_output.status.has_value()) {
@@ -2221,7 +2661,11 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
                                                       model,
                                                       req_output,
                                                       stream_state);
-      } else if (!req_output.finished_on_prefill_instance) {
+      } else if (!req_output.finished_on_prefill_instance ||
+                 request_context->execution_mode ==
+                     xllm::proto::EXECUTION_MODE_PREFILL_ONLY ||
+                 request_context->execution_mode ==
+                     xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE) {
         // for non-stream request, only send final result from decode instance
         return response_handler_.send_result_to_client(call_data,
                                                        created_time,
@@ -2245,6 +2689,11 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
       rollback_request_safety_guards_locked(request);
       return false;
     }
+    if (!admit_flow_control_locked(request)) {
+      request_deadline_queue_->erase(request->correlation.request_uid());
+      rollback_request_safety_guards_locked(request);
+      return false;
+    }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
@@ -2258,6 +2707,8 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
   }
 
   arm_client_disconnect_notification(request);
+  request->dispatch_ready.store(true, std::memory_order_release);
+  flow_dispatch_cv_.notify_one();
 
   return true;
 }
@@ -2310,6 +2761,7 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
          tools = std::move(tools_for_parse),
          tool_call_parser = std::move(tool_call_parser_pref),
          reasoning_parser = std::move(reasoning_parser_pref),
+         request_context = request.get(),
          force_reasoning](
             const llm::RequestOutput& req_output) mutable -> bool {
       if (req_output.status.has_value()) {
@@ -2322,7 +2774,11 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
       if (stream) {
         return response_handler_.send_delta_to_client(
             call_data, model, req_output, *stream_encoder, stream_parser);
-      } else if (!req_output.finished_on_prefill_instance) {
+      } else if (!req_output.finished_on_prefill_instance ||
+                 request_context->execution_mode ==
+                     xllm::proto::EXECUTION_MODE_PREFILL_ONLY ||
+                 request_context->execution_mode ==
+                     xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE) {
         return response_handler_.send_result_to_client(call_data,
                                                        model,
                                                        req_output,
@@ -2344,6 +2800,11 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
       rollback_request_safety_guards_locked(request);
       return false;
     }
+    if (!admit_flow_control_locked(request)) {
+      request_deadline_queue_->erase(request->correlation.request_uid());
+      rollback_request_safety_guards_locked(request);
+      return false;
+    }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
@@ -2356,6 +2817,8 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
   }
 
   arm_client_disconnect_notification(request);
+  request->dispatch_ready.store(true, std::memory_order_release);
+  flow_dispatch_cv_.notify_one();
 
   return true;
 }
@@ -2385,6 +2848,7 @@ bool Scheduler::record_new_request(
          model = request->model,
          stream = request->stream,
          include_usage = request->include_usage,
+         request_context = request.get(),
          created_time = absl::ToUnixSeconds(request->latest_generate_time)](
             const llm::RequestOutput& req_output) mutable -> bool {
       if (req_output.status.has_value()) {
@@ -2397,7 +2861,11 @@ bool Scheduler::record_new_request(
       if (stream) {
         return response_handler_.send_delta_to_client(
             call_data, include_usage, created_time, model, req_output);
-      } else if (!req_output.finished_on_prefill_instance) {
+      } else if (!req_output.finished_on_prefill_instance ||
+                 request_context->execution_mode ==
+                     xllm::proto::EXECUTION_MODE_PREFILL_ONLY ||
+                 request_context->execution_mode ==
+                     xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE) {
         // for non-stream request, only send final result from decode instance
         return response_handler_.send_result_to_client(
             call_data, created_time, model, req_output);
@@ -2415,6 +2883,11 @@ bool Scheduler::record_new_request(
       rollback_request_safety_guards_locked(request);
       return false;
     }
+    if (!admit_flow_control_locked(request)) {
+      request_deadline_queue_->erase(request->correlation.request_uid());
+      rollback_request_safety_guards_locked(request);
+      return false;
+    }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
   }
@@ -2428,6 +2901,8 @@ bool Scheduler::record_new_request(
   }
 
   arm_client_disconnect_notification(request);
+  request->dispatch_ready.store(true, std::memory_order_release);
+  flow_dispatch_cv_.notify_one();
 
   return true;
 }
@@ -2448,8 +2923,13 @@ void Scheduler::finish_request(const std::string& service_request_id,
     }
     if (request != nullptr) {
       detach_execution_hold_locked(request);
+      request->queue_state.store(RequestQueueState::TERMINAL,
+                                 std::memory_order_release);
     }
   }
+
+  flow_control_queue_->cancel(service_request_id);
+  flow_dispatch_cv_.notify_one();
 
   if (request != nullptr) {
     record_kv_route_actual(request, nullptr);
@@ -2500,8 +2980,12 @@ void Scheduler::clear_requests_on_failed_instance(
                  std::memory_order_acquire));
         const bool clear_decode =
             (type == InstanceType::DECODE &&
-             it->second->routing.decode_name == instance_name &&
-             it->second->decode_incarnation_id == incarnation_id);
+             ((it->second->routing.decode_name == instance_name &&
+               it->second->decode_incarnation_id == incarnation_id) ||
+              (it->second->execution_mode ==
+                   xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE &&
+               it->second->routing.prefill_name == instance_name &&
+               it->second->prefill_incarnation_id == incarnation_id)));
         const bool recover_first_event =
             clear_prefill && !clear_decode &&
             !it->second->routing.decode_name.empty() &&
@@ -2522,8 +3006,9 @@ void Scheduler::clear_requests_on_failed_instance(
     }
 
     for (const std::shared_ptr<Request>& request : cleared_requests) {
-      if (request->routing.decode_name == instance_name &&
-          request->decode_incarnation_id == incarnation_id) {
+      const xllm::proto::ExecutionHolder holder = execution_holder(*request);
+      if (holder.engine_uid() == instance_name &&
+          holder.incarnation_id() == incarnation_id) {
         request->execution_hold.apply_convergence_proof(
             execution_attempt(*request),
             terminated_holder,
@@ -2618,6 +3103,7 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
     if (request->correlation.has_attempt_seq()) {
       binding.attempt_seq = request->correlation.attempt_seq();
     }
+    binding.execution_mode = request->execution_mode;
     binding.prefill_engine_uid = request->routing.prefill_name;
     binding.prefill_incarnation_id = request->prefill_incarnation_id;
     binding.decode_engine_uid = request->routing.decode_name;
@@ -2676,7 +3162,14 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
         ready_output.status.has_value() && !ready_output.status->ok();
     const bool finished_on_prefill_instance =
         ready_output.finished_on_prefill_instance;
-    if (!status_error && finished_on_prefill_instance &&
+    const bool local_first_output =
+        request->execution_mode ==
+            xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE &&
+        ready_output.output_event_seq.has_value() &&
+        *ready_output.output_event_seq == 0;
+    const bool generation_commit =
+        local_first_output || finished_on_prefill_instance;
+    if (!status_error && generation_commit &&
         !confirm_generation_commit(request)) {
       fail_output_dispatch_locked(
           request, llm::StatusCode::UNKNOWN, "Invalid generation commit proof");
@@ -2684,8 +3177,8 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
           /*code=*/proto::GENERATION_DELIVERY_CODE_COMMIT_UNPROVEN,
           /*message=*/"Generation commit is not proven");
     }
-    if (!status_error && !finished_on_prefill_instance &&
-        ready_output.finished && !resolve_terminal_execution_hold(request)) {
+    if (!status_error && ready_output.finished &&
+        !resolve_terminal_execution_hold(request)) {
       fail_output_dispatch_locked(request,
                                   llm::StatusCode::UNKNOWN,
                                   "Invalid terminal execution proof");
@@ -2748,7 +3241,11 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
               ready_output.status.has_value() && !ready_output.status->ok();
           const bool finished = ready_output.finished;
           const bool crosses_response_boundary =
-              request->stream || !ready_output.finished_on_prefill_instance;
+              request->stream || !ready_output.finished_on_prefill_instance ||
+              request->execution_mode ==
+                  xllm::proto::EXECUTION_MODE_PREFILL_ONLY ||
+              request->execution_mode ==
+                  xllm::proto::EXECUTION_MODE_LOCAL_PREFILL_DECODE;
           if (!cb(std::move(ready_output)) || status_error) {
             finish_request(service_request_id, true);
             return;
@@ -2890,6 +3387,7 @@ void Scheduler::refresh_readiness() {
 
 void Scheduler::set_draining(bool draining) {
   draining_.store(draining, std::memory_order_release);
+  flow_dispatch_cv_.notify_all();
 }
 
 bool Scheduler::wait_for_requests_drained(std::chrono::milliseconds timeout) {
