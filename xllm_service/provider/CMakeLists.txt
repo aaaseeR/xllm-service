@@ -130,3 +130,17 @@ cc_library(
   DEPS
     proto_xllm
 )
+
+cc_library(
+  NAME
+    attempt_control_client
+  HDRS
+    attempt_control_client.h
+  SRCS
+    attempt_control_client.cpp
+  DEPS
+    nlohmann_json::nlohmann_json
+    proto::proto_rpc_service
+    proto_xllm
+)
+target_link_libraries(attempt_control_client PRIVATE brpc-static)

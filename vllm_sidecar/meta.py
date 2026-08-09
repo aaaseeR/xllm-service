@@ -28,6 +28,8 @@ normalization mirror `instance_mgr.cpp` (`ETCD_KEYS_PREFIX_MAP`) and
 `utils.cpp` (`normalize_etcd_namespace` / `build_etcd_key_with_namespace`).
 """
 
+from __future__ import annotations
+
 import time
 from enum import IntEnum
 
@@ -84,6 +86,7 @@ def build_instance_meta(
     incarnation_id: str,
     instance_type: InstanceType = InstanceType.DEFAULT,
     backend_type: str = "vllm",
+    provider_descriptor: dict | None = None,
 ) -> dict:
     """Build the InstanceMetaInfo JSON payload stored under the lease.
 
@@ -93,17 +96,39 @@ def build_instance_meta(
     """
     if backend_type != "vllm":
         raise ValueError(f"unsupported vLLM sidecar backend_type: {backend_type}")
-    return {
+    meta = {
         "name": addr,
         "rpc_address": addr,
         "type": int(instance_type),
         "backend_type": backend_type,
-        # Provider identity is authoritative for V2 readers. Contract version
-        # zero marks this sidecar payload as the legacy BEST_EFFORT bridge;
-        # the production Provider Agent will publish a full Descriptor.
         "provider_id": 2,
-        "provider_contract_version": 0,
-        "provider_profile_digest": "",
         "incarnation_id": incarnation_id,
         "register_ts_ms": int(time.time() * 1000),
     }
+    if provider_descriptor is None:
+        # Contract version zero marks this payload as the legacy BEST_EFFORT
+        # bridge. Strict V2 registration always supplies a full Descriptor.
+        meta["provider_contract_version"] = 0
+        meta["provider_profile_digest"] = ""
+        return meta
+
+    identity = provider_descriptor.get("identity", {})
+    if identity.get("engine_uid") != addr:
+        raise ValueError("ProviderDescriptor engine_uid must equal registered address")
+    if identity.get("incarnation_id") != incarnation_id:
+        raise ValueError(
+            "ProviderDescriptor incarnation_id does not match registration"
+        )
+    if identity.get("provider_id") != "PROVIDER_ID_VLLM_ASCEND":
+        raise ValueError("ProviderDescriptor provider_id must be VLLM_ASCEND")
+    if provider_descriptor.get("contract_version") != 1:
+        raise ValueError("ProviderDescriptor contract_version must be 1")
+    if provider_descriptor.get("endpoint", {}).get("address") != addr:
+        raise ValueError("ProviderDescriptor endpoint must equal registered address")
+    profile_digest = provider_descriptor.get("profile_digest")
+    if not isinstance(profile_digest, str) or not profile_digest:
+        raise ValueError("ProviderDescriptor profile_digest must be nonempty")
+    meta["provider_contract_version"] = 1
+    meta["provider_profile_digest"] = profile_digest
+    meta["provider_descriptor"] = provider_descriptor
+    return meta

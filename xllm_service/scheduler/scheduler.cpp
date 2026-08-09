@@ -29,12 +29,12 @@ limitations under the License.
 #include "common/utils.h"
 #include "common/xllm/status.h"
 #include "common/xllm/uuid.h"
-#include "disagg_pd.pb.h"
 #include "http_service/anthropic_adapter.h"
 #include "http_service/anthropic_stream_encoder.h"
 #include "loadbalance_policy/cache_aware_routing.h"
 #include "loadbalance_policy/round_robin.h"
 #include "loadbalance_policy/slo_aware_policy.h"
+#include "provider/attempt_control_client.h"
 #include "provider/execution_plan_builder.h"
 #include "provider/provider_adapter.h"
 #include "rpc_service/first_event_recovery_client.h"
@@ -102,21 +102,17 @@ xllm::proto::ExecutionHolder prefill_holder(
   return holder;
 }
 
-bool same_attempt_key(const xllm::proto::RequestAttemptKey& key,
-                      const xllm::proto::ExecutionAttemptId& attempt,
-                      const xllm::proto::ExecutionHolder& holder) {
-  return key.request_uid() == attempt.request_uid() && key.has_attempt_seq() &&
-         attempt.has_attempt_seq() &&
-         key.attempt_seq() == attempt.attempt_seq() &&
-         key.incarnation_id() == holder.incarnation_id();
+xllm::proto::ExecutionHolder execution_holder(
+    const xllm_service::Request& request) {
+  if (request.provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
+    return prefill_holder(request);
+  }
+  return decode_holder(request);
 }
 
-bool terminal_attempt_state(xllm::proto::AttemptLifecycleState state) {
-  return state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_DONE ||
-         state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_CANCELLED ||
-         state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_EXPIRED ||
-         state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_FAILED ||
-         state == xllm::proto::ATTEMPT_LIFECYCLE_STATE_CANCELLED_BEFORE_CREATE;
+bool has_execution_holder(const xllm_service::Request& request) {
+  const xllm::proto::ExecutionHolder holder = execution_holder(request);
+  return !holder.engine_uid().empty() && !holder.incarnation_id().empty();
 }
 
 const char* retry_decision_name(
@@ -984,13 +980,25 @@ bool Scheduler::install_execution_hold_locked(
                << request->routing.debug_string();
     return false;
   }
-  if (request->routing.decode_name.empty()) {
+  if (!has_execution_holder(*request)) {
     return true;
   }
   if (request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
-    // vLLM AGGREGATED holds require the Provider Agent submit identity and are
-    // installed by that path when it is opened.
-    return true;
+    const provider::ExecutionHoldStatus status =
+        execution_hold_cleanup_table_->install_request_hold(
+            &request->execution_hold,
+            xllm::proto::EXECUTION_HOLD_KIND_AGGREGATED_EXECUTION,
+            execution_attempt(*request),
+            service_incarnation_id_,
+            {execution_holder(*request)});
+    if (status == provider::ExecutionHoldStatus::kOk) {
+      return true;
+    }
+    LOG(ERROR) << "Failed to install aggregated execution hold before "
+                  "dispatch, request_uid="
+               << request->correlation.request_uid()
+               << ", status=" << static_cast<int>(status);
+    return false;
   }
 
   const xllm::proto::ExecutionHolder holder = decode_holder(*request);
@@ -1040,12 +1048,12 @@ void Scheduler::rollback_request_safety_guards_locked(
 
 bool Scheduler::confirm_generation_commit(
     const std::shared_ptr<Request>& request) {
-  if (request->routing.decode_name.empty()) {
+  if (!has_execution_holder(*request)) {
     return true;
   }
   const provider::ExecutionHoldStatus status =
       request->execution_hold.confirm_holder(
-          decode_holder(*request),
+          execution_holder(*request),
           xllm::proto::EXECUTION_HOLD_PROOF_GENERATION_COMMITTED);
   if (status == provider::ExecutionHoldStatus::kOk) {
     return true;
@@ -1059,13 +1067,13 @@ bool Scheduler::confirm_generation_commit(
 
 bool Scheduler::resolve_terminal_execution_hold(
     const std::shared_ptr<Request>& request) {
-  if (request->routing.decode_name.empty()) {
+  if (!has_execution_holder(*request)) {
     return true;
   }
   const provider::ExecutionHoldStatus status =
       request->execution_hold.apply_convergence_proof(
           execution_attempt(*request),
-          decode_holder(*request),
+          execution_holder(*request),
           xllm::proto::HOLDER_CONVERGENCE_PROOF_TERMINAL_OUTCOME);
   if (status == provider::ExecutionHoldStatus::kResolved) {
     return true;
@@ -1303,32 +1311,19 @@ bool Scheduler::call_attempt_control(
   if (channel == nullptr) {
     return false;
   }
-
-  xllm::proto::AttemptControlRequest request;
-  xllm::proto::RequestAttemptKey* key = request.mutable_key();
-  key->set_request_uid(hold.attempt().request_uid());
-  if (hold.attempt().has_attempt_seq()) {
-    key->set_attempt_seq(hold.attempt().attempt_seq());
-  }
-  key->set_incarnation_id(holder.incarnation_id());
-
-  xllm::proto::AttemptControlResponse response;
-  brpc::Controller controller;
-  if (timeout_ms > 0) {
-    controller.set_timeout_ms(timeout_ms);
-  }
-  xllm::proto::DisaggPDService_Stub stub(channel.get());
-  if (query) {
-    stub.QueryRequest(&controller, &request, &response, nullptr);
-  } else {
-    stub.CancelRequest(&controller, &request, &response, nullptr);
-  }
-  const bool direct_success = !controller.Failed();
+  const InstanceMetaInfo instance = get_instance_info(holder.engine_uid());
+  const provider::AttemptControlResult result =
+      provider::call_provider_attempt_control(
+          instance.provider_id,
+          channel,
+          hold,
+          holder,
+          query ? provider::AttemptControlOperation::QUERY
+                : provider::AttemptControlOperation::CANCEL,
+          timeout_ms);
   record_direct_engine_evidence(
-      holder.engine_uid(), holder.incarnation_id(), direct_success);
-  return direct_success && response.ok() &&
-         same_attempt_key(response.status().key(), hold.attempt(), holder) &&
-         terminal_attempt_state(response.status().state());
+      holder.engine_uid(), holder.incarnation_id(), result.direct_success);
+  return result.direct_success && result.terminal_proof;
 }
 
 void Scheduler::recover_first_output_events(

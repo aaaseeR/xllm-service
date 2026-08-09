@@ -29,6 +29,8 @@ watch event -- the master's watcher only sees the initial PUT and the final
 DELETE (on lease expiry/revoke). Only `requests` is required.
 """
 
+from __future__ import annotations
+
 import base64
 import logging
 

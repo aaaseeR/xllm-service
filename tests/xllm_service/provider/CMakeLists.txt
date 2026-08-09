@@ -87,3 +87,16 @@ cc_test(
     GTest::gtest_main
     proto_xllm
 )
+
+cc_test(
+  NAME
+    attempt_control_client_test
+  SRCS
+    attempt_control_client_test.cpp
+  DEPS
+    :attempt_control_client
+    GTest::gtest_main
+    brpc-static
+    proto::proto_http_service
+    proto_xllm
+)

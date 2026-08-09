@@ -116,6 +116,12 @@ class Scheduler final {
                                        uint64_t attempt_seq,
                                        std::string message);
 
+  // Provider ingress calls these at the mode-specific GenerationCommit and
+  // terminal boundaries. They validate the exact attempt/holder installed
+  // before dispatch and never infer proof from transport success alone.
+  bool confirm_generation_commit(const std::shared_ptr<Request>& request);
+  bool resolve_terminal_execution_hold(const std::shared_ptr<Request>& request);
+
   // update request metrics for prefill finished request
   void update_request_metrics(std::shared_ptr<Request> request,
                               bool finished_on_prefill_instance);
@@ -153,8 +159,6 @@ class Scheduler final {
       const std::shared_ptr<Request>& request);
   void rollback_request_safety_guards_locked(
       const std::shared_ptr<Request>& request);
-  bool confirm_generation_commit(const std::shared_ptr<Request>& request);
-  bool resolve_terminal_execution_hold(const std::shared_ptr<Request>& request);
   bool converge_execution_hold_for_retry_locked(
       const std::shared_ptr<Request>& request);
   bool retry_first_output_attempt_locked(

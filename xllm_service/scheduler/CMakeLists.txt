@@ -55,6 +55,7 @@ cc_library(
   DEPS
     :anthropic_adapter
     :anthropic_stream_encoder
+    :attempt_control_client
     :usage_proto_adapter
     :chat_template
     :client_disconnect_monitor

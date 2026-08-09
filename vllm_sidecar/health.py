@@ -19,6 +19,8 @@ registration and lease refresh on vLLM's own `/health` endpoint so that a dead
 vLLM (with the sidecar still running) does not leave a phantom instance routable.
 """
 
+from __future__ import annotations
+
 import logging
 
 import requests

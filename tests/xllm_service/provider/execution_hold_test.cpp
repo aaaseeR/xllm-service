@@ -173,6 +173,37 @@ TEST(ExecutionHoldTest, CleanupCapacityIsReservedBeforeDispatchInstall) {
   EXPECT_FALSE(rejected.has_hold());
 }
 
+TEST(ExecutionHoldTest, AggregatedExecutionUsesSameCommitAndCleanupInvariant) {
+  ExecutionHoldCleanupTable table(make_config(/*record_capacity=*/1));
+  RequestExecutionHold request_hold;
+  const ExecutionHolder agent = make_holder("agent");
+
+  ASSERT_EQ(table.install_request_hold(
+                &request_hold,
+                xllm::proto::EXECUTION_HOLD_KIND_AGGREGATED_EXECUTION,
+                make_attempt(),
+                "coordinator-1",
+                {agent}),
+            ExecutionHoldStatus::kOk);
+  const std::optional<ExecutionResourceHold> installed =
+      request_hold.snapshot();
+  ASSERT_TRUE(installed.has_value());
+  EXPECT_EQ(installed->kind(),
+            xllm::proto::EXECUTION_HOLD_KIND_AGGREGATED_EXECUTION);
+  EXPECT_EQ(installed->potential_holders_size(), 1);
+
+  EXPECT_EQ(request_hold.confirm_holder(
+                agent, xllm::proto::EXECUTION_HOLD_PROOF_GENERATION_COMMITTED),
+            ExecutionHoldStatus::kOk);
+  EXPECT_EQ(request_hold.apply_convergence_proof(
+                make_attempt(),
+                agent,
+                xllm::proto::HOLDER_CONVERGENCE_PROOF_TERMINAL_OUTCOME),
+            ExecutionHoldStatus::kResolved);
+  EXPECT_FALSE(request_hold.has_hold());
+  EXPECT_EQ(table.stats().reserved_records, 0);
+}
+
 TEST(ExecutionHoldTest, PreDispatchRollbackReleasesAndReusesCapacity) {
   ExecutionHoldCleanupTable table(make_config(/*record_capacity=*/1));
   RequestExecutionHold request_hold;

@@ -14,7 +14,11 @@
 # ==============================================================================
 """Unit tests for vLLM /metrics parsing (no HTTP needed)."""
 
-from vllm_sidecar.metrics import VllmMetricsScraper, _parse_samples
+from vllm_sidecar.metrics import (
+    VllmMetricsScraper,
+    _parse_labeled_samples,
+    _parse_samples,
+)
 
 SAMPLE = """\
 # HELP vllm:num_requests_waiting Number of requests waiting.
@@ -79,3 +83,51 @@ def test_interval_avg_ms_zero_when_no_new_samples() -> None:
     sc = VllmMetricsScraper("http://unused")
     sc._interval_avg_ms({"h_sum": 2.0, "h_count": 10.0}, "h")
     assert sc._interval_avg_ms({"h_sum": 2.0, "h_count": 10.0}, "h") == 0
+
+
+def test_per_dp_metrics_preserve_labels_and_use_worst_cache_ratio() -> None:
+    text = """\
+vllm:num_requests_running{model_name="m",data_parallel_rank="0"} 2
+vllm:num_requests_waiting{model_name="m",data_parallel_rank="0"} 1
+vllm:kv_cache_usage_perc{model_name="m",data_parallel_rank="0"} 0.25
+vllm:num_requests_running{model_name="m",data_parallel_rank="1"} 3
+vllm:num_requests_waiting{model_name="m",data_parallel_rank="1"} 4
+vllm:kv_cache_usage_perc{model_name="m",data_parallel_rank="1"} 0.75
+"""
+    scraper = VllmMetricsScraper(
+        "http://unused", dp_size=2, max_num_seqs=16
+    )
+    per_dp, complete = scraper._per_dp(_parse_labeled_samples(text))
+    assert complete
+    assert per_dp == [
+        {
+            "dp_rank": 0,
+            "running": 2,
+            "waiting_capacity": 1,
+            "kv_used_ratio": 0.25,
+            "admission_credit": 13,
+        },
+        {
+            "dp_rank": 1,
+            "running": 3,
+            "waiting_capacity": 4,
+            "kv_used_ratio": 0.75,
+            "admission_credit": 9,
+        },
+    ]
+    assert max(item["kv_used_ratio"] for item in per_dp) == 0.75
+
+
+def test_multi_dp_unlabelled_or_missing_metrics_are_partial() -> None:
+    text = """\
+vllm:num_requests_running{model_name="m"} 2
+vllm:num_requests_waiting{model_name="m",dp_rank="0"} 1
+vllm:kv_cache_usage_perc{model_name="m",dp_rank="0"} 0.25
+"""
+    scraper = VllmMetricsScraper(
+        "http://unused", dp_size=2, max_num_seqs=16
+    )
+    per_dp, complete = scraper._per_dp(_parse_labeled_samples(text))
+    assert not complete
+    assert "running" not in per_dp[0]
+    assert per_dp[1] == {"dp_rank": 1}

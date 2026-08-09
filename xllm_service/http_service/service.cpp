@@ -321,12 +321,16 @@ class CustomProgressiveReader final : public brpc::ProgressiveReader {
                                    std::shared_ptr<T> call_data,
                                    Scheduler* scheduler,
                                    std::string instance_name,
-                                   std::string incarnation_id)
+                                   std::string incarnation_id,
+                                   bool backend_success,
+                                   std::shared_ptr<Request> request)
       : redirect_cntl_(redirect_cntl),
         call_data_(call_data),
         scheduler_(scheduler),
         instance_name_(std::move(instance_name)),
-        incarnation_id_(std::move(incarnation_id)) {}
+        incarnation_id_(std::move(incarnation_id)),
+        backend_success_(backend_success),
+        request_(std::move(request)) {}
 
   ~CustomProgressiveReader() override { delete redirect_cntl_; }
 
@@ -348,7 +352,16 @@ class CustomProgressiveReader final : public brpc::ProgressiveReader {
   // be called after. User can release the memory of this object inside.
   void OnEndOfMessage(const butil::Status& status) override {
     scheduler_->record_direct_engine_evidence(
-        instance_name_, incarnation_id_, status.ok());
+        instance_name_, incarnation_id_, status.ok() && backend_success_);
+    bool terminal_resolved = true;
+    if (status.ok() && backend_success_ && request_ != nullptr) {
+      terminal_resolved = scheduler_->resolve_terminal_execution_hold(request_);
+    }
+    if (request_ != nullptr) {
+      scheduler_->finish_request(
+          request_->correlation.request_uid(),
+          !status.ok() || !backend_success_ || !terminal_resolved);
+    }
     delete this;
   }
 
@@ -358,6 +371,8 @@ class CustomProgressiveReader final : public brpc::ProgressiveReader {
   Scheduler* scheduler_ = nullptr;
   std::string instance_name_;
   std::string incarnation_id_;
+  bool backend_success_ = false;
+  std::shared_ptr<Request> request_;
 };
 
 // Done callback for a streaming vLLM forward: once the response header has
@@ -370,6 +385,7 @@ void handle_vllm_stream_done(brpc::Controller* redirect_cntl,
                              Scheduler* scheduler,
                              std::string instance_name,
                              std::string incarnation_id,
+                             std::shared_ptr<Request> request,
                              std::shared_ptr<brpc::Channel> channel) {
   UNUSED_PARAMETER(channel);
   const int32_t status_code = redirect_cntl->http_response().status_code();
@@ -381,11 +397,27 @@ void handle_vllm_stream_done(brpc::Controller* redirect_cntl,
     LOG(ERROR) << "Fail to forward to vLLM (stream): "
                << redirect_cntl->ErrorText();
     call_data->finish_with_error(redirect_cntl->ErrorText());
+    if (request != nullptr) {
+      scheduler->finish_request(request->correlation.request_uid(), true);
+    }
     delete redirect_cntl;
     return;
   }
-  redirect_cntl->ReadProgressiveAttachmentBy(new CustomProgressiveReader<T>(
-      redirect_cntl, call_data, scheduler, instance_name, incarnation_id));
+  if (success && request != nullptr &&
+      !scheduler->confirm_generation_commit(request)) {
+    call_data->finish_with_error("Provider GenerationCommit proof failed.");
+    scheduler->finish_request(request->correlation.request_uid(), true);
+    delete redirect_cntl;
+    return;
+  }
+  redirect_cntl->ReadProgressiveAttachmentBy(
+      new CustomProgressiveReader<T>(redirect_cntl,
+                                     call_data,
+                                     scheduler,
+                                     instance_name,
+                                     incarnation_id,
+                                     success,
+                                     std::move(request)));
 }
 
 // Done callback for a non-streaming vLLM forward. Delegates to the shared
@@ -397,14 +429,25 @@ void handle_vllm_non_stream_done(brpc::Controller* redirect_cntl,
                                  Scheduler* scheduler,
                                  std::string instance_name,
                                  std::string incarnation_id,
+                                 std::shared_ptr<Request> request,
                                  std::shared_ptr<brpc::Channel> channel) {
   UNUSED_PARAMETER(channel);
   const int32_t status_code = redirect_cntl->http_response().status_code();
-  const bool success =
+  bool success =
       !redirect_cntl->Failed() && status_code >= 200 && status_code < 300;
   scheduler->record_direct_engine_evidence(
       instance_name, incarnation_id, success);
+  if (success && request != nullptr) {
+    success = scheduler->confirm_generation_commit(request) &&
+              scheduler->resolve_terminal_execution_hold(request);
+    if (!success) {
+      redirect_cntl->SetFailed("Provider attempt proof failed.");
+    }
+  }
   handle_non_stream_response(redirect_cntl, call_data);
+  if (request != nullptr) {
+    scheduler->finish_request(request->correlation.request_uid(), !success);
+  }
 }
 
 // Forward an OpenAI HTTP request to a vLLM backend, transparently relaying the
@@ -420,11 +463,15 @@ void handle_vllm(std::shared_ptr<T> call_data,
                  bool is_post,
                  const std::string& body,
                  bool stream,
-                 const xllm::proto::RequestCorrelation& correlation = {}) {
+                 const xllm::proto::RequestCorrelation& correlation = {},
+                 std::shared_ptr<Request> request = nullptr) {
   auto channel = scheduler->get_channel(target_name);
   if (channel == nullptr) {
     LOG(ERROR) << "No channel for vLLM instance: " << target_name;
     call_data->finish_with_error("vLLM backend instance is not available.");
+    if (request != nullptr) {
+      scheduler->finish_request(request->correlation.request_uid(), true);
+    }
     return;
   }
 
@@ -443,6 +490,27 @@ void handle_vllm(std::shared_ptr<T> call_data,
                                             correlation.request_uid());
     redirect_cntl->http_request().SetHeader(
         "X-Attempt-Seq", std::to_string(correlation.attempt_seq()));
+    if (request == nullptr || !request->request_deadline.has_value()) {
+      call_data->finish_with_error("Provider request deadline is unavailable.");
+      if (request != nullptr) {
+        scheduler->finish_request(request->correlation.request_uid(), true);
+      }
+      delete redirect_cntl;
+      return;
+    }
+    const uint64_t remaining_deadline_ms =
+        request->request_deadline->remaining_ms();
+    if (remaining_deadline_ms == 0) {
+      call_data->finish_with_error("Provider request deadline expired.");
+      scheduler->finish_request(request->correlation.request_uid(), true);
+      delete redirect_cntl;
+      return;
+    }
+    redirect_cntl->http_request().SetHeader(
+        "X-Remaining-Deadline-Ms", std::to_string(remaining_deadline_ms));
+    redirect_cntl->set_timeout_ms(static_cast<int>(std::min<uint64_t>(
+        remaining_deadline_ms,
+        static_cast<uint64_t>(std::numeric_limits<int>::max()))));
   }
   if (is_post) {
     redirect_cntl->http_request().SetHeader("Content-Type", "application/json");
@@ -458,6 +526,7 @@ void handle_vllm(std::shared_ptr<T> call_data,
                           scheduler,
                           target_name,
                           target_incarnation_id,
+                          request,
                           channel);
     channel->CallMethod(nullptr, redirect_cntl, nullptr, nullptr, done);
   } else {
@@ -468,6 +537,7 @@ void handle_vllm(std::shared_ptr<T> call_data,
                           scheduler,
                           target_name,
                           target_incarnation_id,
+                          request,
                           channel);
     channel->CallMethod(nullptr, redirect_cntl, nullptr, nullptr, done);
   }
@@ -772,6 +842,11 @@ void XllmHttpServiceImpl::Completions(
             : attachment;
     auto call_data = std::make_shared<CompletionCallData>(
         cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
+    if (!scheduler_->record_new_request(call_data, service_request)) {
+      call_data->finish_with_error(
+          "Provider request safety guards are unavailable.");
+      return;
+    }
     handle_vllm(call_data,
                 scheduler_,
                 service_request->routing.prefill_name,
@@ -780,7 +855,8 @@ void XllmHttpServiceImpl::Completions(
                 /*is_post=*/true,
                 provider_payload,
                 service_request->stream,
-                service_request->correlation);
+                service_request->correlation,
+                service_request);
     return;
   }
 
@@ -920,6 +996,11 @@ void XllmHttpServiceImpl::ChatCompletions(
             : attachment;
     auto call_data = std::make_shared<ChatCallData>(
         cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
+    if (!scheduler_->record_new_request(call_data, service_request)) {
+      call_data->finish_with_error(
+          "Provider request safety guards are unavailable.");
+      return;
+    }
     handle_vllm(call_data,
                 scheduler_,
                 service_request->routing.prefill_name,
@@ -928,7 +1009,8 @@ void XllmHttpServiceImpl::ChatCompletions(
                 /*is_post=*/true,
                 provider_payload,
                 service_request->stream,
-                service_request->correlation);
+                service_request->correlation,
+                service_request);
     return;
   }
 

@@ -24,6 +24,8 @@ Run alongside a vLLM server:
 See README.md for the full flag list and the lifecycle contract.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
@@ -36,6 +38,8 @@ from types import FrameType
 
 import requests
 
+from .agent import AgentRuntime
+from .descriptor import build_provider_descriptor, load_provider_config
 from .etcd_registry import EtcdGatewayClient, EtcdError
 from .health import VllmHealthProbe
 from .meta import InstanceType, build_instance_key, build_instance_meta
@@ -47,6 +51,28 @@ logger = logging.getLogger("vllm_sidecar")
 class Sidecar:
     def __init__(self, args: argparse.Namespace) -> None:
         self._args = args
+        provider_config_path = getattr(args, "provider_config", "")
+        self._provider_config = (
+            load_provider_config(provider_config_path) if provider_config_path else None
+        )
+        self._agent = None
+        if self._provider_config is not None:
+            agent_listen = getattr(args, "agent_listen", "")
+            if not agent_listen:
+                raise ValueError("--agent-listen is required with --provider-config")
+            self._agent = AgentRuntime(
+                listen_address=agent_listen,
+                upstream_url=args.vllm_url,
+                max_attempt_records=getattr(args, "max_attempt_records", 8192),
+                terminal_ttl_seconds=getattr(args, "attempt_terminal_ttl", 60.0),
+                connect_timeout_seconds=getattr(args, "agent_connect_timeout", 1.0),
+            )
+            if agent_listen.endswith(":0") and args.register_addr == agent_listen:
+                args.register_addr = self._agent.listen_address
+            if args.register_addr != self._agent.listen_address:
+                raise ValueError(
+                    "strict Agent --register-addr must equal --agent-listen"
+                )
         self._etcd = EtcdGatewayClient(
             args.etcd_endpoints,
             username=args.etcd_username,
@@ -63,10 +89,20 @@ class Sidecar:
         self._incarnation_id = None
         # heartbeat (LoadMetrics/LatencyMetrics) -> master HTTP endpoint
         self._hb_url = args.xllm_service_url.rstrip("/") + "/v1/internal/heartbeat"
+        topology = (
+            self._provider_config.get("topology", {}) if self._provider_config else {}
+        )
+        scheduler = (
+            self._provider_config.get("scheduler", {}) if self._provider_config else {}
+        )
         self._metrics = VllmMetricsScraper(
-            args.metrics_url, timeout=args.health_timeout
+            args.metrics_url,
+            timeout=args.health_timeout,
+            dp_size=topology.get("dp", 1),
+            max_num_seqs=scheduler.get("max_num_seqs", 1),
         )
         self._last_hb = 0.0
+        self._state_seq = 0
         # Reuse one connection for the periodic heartbeat POSTs (keep-alive).
         self._hb_session = requests.Session()
 
@@ -83,15 +119,27 @@ class Sidecar:
         try:
             incarnation = self._new_incarnation()
             lease_id = self._etcd.lease_grant(self._args.lease_ttl)
+            descriptor = None
+            if self._provider_config is not None:
+                descriptor = build_provider_descriptor(
+                    self._provider_config,
+                    self._args.register_addr,
+                    incarnation,
+                    self._args.register_addr,
+                )
             meta = build_instance_meta(
                 self._args.register_addr,
                 incarnation,
                 self._instance_type,
                 self._args.backend_type,
+                descriptor,
             )
             self._etcd.put(self._key, json.dumps(meta), lease_id)
             self._lease_id = lease_id
             self._incarnation_id = incarnation
+            self._state_seq = 0
+            if self._agent is not None:
+                self._agent.activate(incarnation)
             logger.info(
                 "registered %s (incarnation=%s, lease=%s, ttl=%ds)",
                 self._key,
@@ -103,10 +151,14 @@ class Sidecar:
         except EtcdError as e:
             logger.warning("register failed, will retry: %s", e)
             self._lease_id = None
+            if self._agent is not None:
+                self._agent.fence("ADMISSION_REASON_ENGINE_DRAINING")
             return False
 
     def _deregister(self) -> None:
         """Revoke the lease so the master removes the instance immediately."""
+        if self._agent is not None:
+            self._agent.fence("ADMISSION_REASON_ENGINE_DRAINING")
         if self._lease_id is None:
             return
         try:
@@ -131,32 +183,40 @@ class Sidecar:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
 
-        self._wait_until_healthy()
-        if self._stop.is_set():
-            return
-        model = self._health.served_model()
-        logger.info("vLLM healthy (model=%s), registering ...", model or "?")
-        self._register()
+        if self._agent is not None:
+            self._agent.start()
 
-        fail = 0
-        while not self._stop.wait(self._args.keepalive_interval):
-            if self._health.is_healthy():
-                fail = 0
-                self._keepalive_or_reregister()
-                self._maybe_heartbeat()
-            else:
-                fail += 1
-                logger.warning(
-                    "vLLM health probe failed (%d/%d)",
-                    fail,
-                    self._args.health_fail_threshold,
-                )
-                if self._registered and fail >= self._args.health_fail_threshold:
-                    logger.error("vLLM unhealthy, deregistering")
-                    self._deregister()
+        try:
+            self._wait_until_healthy()
+            if self._stop.is_set():
+                return
+            model = self._health.served_model()
+            logger.info("vLLM healthy (model=%s), registering ...", model or "?")
+            self._register()
 
-        self._deregister()
-        logger.info("sidecar stopped")
+            fail = 0
+            while not self._stop.wait(self._args.keepalive_interval):
+                if self._health.is_healthy():
+                    fail = 0
+                    self._keepalive_or_reregister()
+                    self._maybe_heartbeat()
+                else:
+                    fail += 1
+                    if self._agent is not None:
+                        self._agent.fence("ADMISSION_REASON_INTERNAL_ERROR")
+                    logger.warning(
+                        "vLLM health probe failed (%d/%d)",
+                        fail,
+                        self._args.health_fail_threshold,
+                    )
+                    if self._registered and fail >= self._args.health_fail_threshold:
+                        logger.error("vLLM unhealthy, deregistering")
+                        self._deregister()
+        finally:
+            self._deregister()
+            if self._agent is not None:
+                self._agent.stop()
+            logger.info("sidecar stopped")
 
     def _wait_until_healthy(self) -> None:
         backoff = 1.0
@@ -175,10 +235,19 @@ class Sidecar:
             ttl = self._etcd.lease_keepalive(self._lease_id)
             if ttl <= 0:
                 logger.warning("lease %s lost (ttl=0), re-registering", self._lease_id)
+                if self._agent is not None:
+                    self._agent.fence("ADMISSION_REASON_STALE_INCARNATION")
                 self._lease_id = None
                 self._register()
+            elif self._agent is not None and self._incarnation_id is not None:
+                # A transient health failure fences ingress immediately. Only
+                # a successful ownership renewal may reopen the same
+                # incarnation after health recovers.
+                self._agent.activate(self._incarnation_id)
         except EtcdError as e:
             logger.warning("keepalive failed, re-registering: %s", e)
+            if self._agent is not None:
+                self._agent.fence("ADMISSION_REASON_STALE_INCARNATION")
             self._lease_id = None
             self._register()
 
@@ -208,6 +277,32 @@ class Sidecar:
             "load_metrics": metrics["load_metrics"],
             "latency_metrics": metrics["latency_metrics"],
         }
+        if self._provider_config is not None:
+            self._state_seq += 1
+            descriptor = build_provider_descriptor(
+                self._provider_config,
+                self._args.register_addr,
+                self._incarnation_id,
+                self._args.register_addr,
+            )
+            body["engine_state"] = {
+                "engine_uid": self._args.register_addr,
+                "incarnation_id": self._incarnation_id,
+                "state_seq": self._state_seq,
+                "observed_at_unix_ms": int(time.time() * 1000),
+                "lifecycle": "ENGINE_LIFECYCLE_READY",
+                "ownership": "ENGINE_OWNERSHIP_OWNED",
+                "shallow_health": "HEALTH_STATUS_HEALTHY",
+                "deep_health": "HEALTH_STATUS_UNKNOWN",
+                "per_dp": metrics["per_dp"],
+                "connector_state": "READY",
+                "state_quality": metrics["state_quality"],
+                "provider_id": "PROVIDER_ID_VLLM_ASCEND",
+                "profile_digest": descriptor["profile_digest"],
+                "model_revision": descriptor["model"]["model_revision"],
+                "heartbeat_age_ms_at_publish": 0,
+                "state_age_ms_at_publish": 0,
+            }
         headers = {"Content-Type": "application/json"}
         if self._args.internal_token:
             headers["X-Internal-Token"] = self._args.internal_token
@@ -224,7 +319,7 @@ class Sidecar:
         if r.status_code == 409:
             # master doesn't know this incarnation -> re-register and resync id
             logger.warning("heartbeat 409 (stale/unknown), re-registering")
-            self._lease_id = None
+            self._deregister()
             self._register()
         elif r.status_code == 401:
             logger.error("heartbeat 401: invalid --internal-token")
@@ -261,6 +356,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="host:port the master uses to reach vLLM, NO scheme "
         "(default: derived from --vllm-url)",
     )
+    p.add_argument(
+        "--provider-config",
+        default="",
+        help="verified V2 Provider profile JSON; enables strict Agent mode",
+    )
+    p.add_argument(
+        "--agent-listen",
+        default="",
+        help="strict Agent host:port; must equal --register-addr",
+    )
+    p.add_argument("--max-attempt-records", type=int, default=8192)
+    p.add_argument("--attempt-terminal-ttl", type=float, default=60.0)
+    p.add_argument("--agent-connect-timeout", type=float, default=1.0)
     p.add_argument("--backend-type", default="vllm")
     p.add_argument(
         "--instance-type",
@@ -331,7 +439,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     if not args.register_addr:
-        args.register_addr = _derive_addr(args.vllm_url)
+        args.register_addr = (
+            args.agent_listen if args.provider_config else _derive_addr(args.vllm_url)
+        )
     if not args.metrics_url:
         args.metrics_url = args.vllm_url.rstrip("/") + "/metrics"
     logger.info(

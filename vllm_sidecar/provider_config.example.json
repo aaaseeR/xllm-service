@@ -1,0 +1,47 @@
+{
+  "runtime": {
+    "runtime_version": "0.21.0",
+    "plugin_version": "0.11.0",
+    "hardware_runtime_version": "CANN-8.3",
+    "fate_bound_mode": "same_restart_unit",
+    "raw_ingress_isolated": true
+  },
+  "model": {
+    "model_revision": "replace-with-immutable-model-revision",
+    "tokenizer_revision": "replace-with-tokenizer-revision",
+    "chat_template_digest": "sha256:replace-with-template-digest",
+    "quantization": "none",
+    "renderer_digest": "sha256:replace-with-renderer-digest"
+  },
+  "topology": {
+    "soc": "Ascend-910B",
+    "device_count": 1,
+    "tp": 1,
+    "dp": 1,
+    "pp": 1,
+    "ep": 1,
+    "cp": 1
+  },
+  "kv": {
+    "kv_layout_digest": "sha256:replace-with-kv-layout-digest",
+    "cache_dtype": "bfloat16",
+    "block_size": 16,
+    "cache_groups": [
+      "full-attention"
+    ],
+    "head_shard_mapping_digest": "sha256:replace-with-head-map-digest",
+    "connector": "none",
+    "connector_version": "1"
+  },
+  "scheduler": {
+    "scheduler_class": "vllm-v1",
+    "max_num_seqs": 256,
+    "max_num_batched_tokens": 8192,
+    "scheduler_policy_digest": "sha256:replace-with-scheduler-digest"
+  },
+  "api_features": [
+    "chat_completions",
+    "completions",
+    "models"
+  ]
+}
