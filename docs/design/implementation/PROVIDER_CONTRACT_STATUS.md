@@ -47,6 +47,14 @@ limitations under the License.
 - 状态、资源和错误码权威位置：wire 类型和稳定
   `ProviderContractError` 只定义在 xLLM `xllm/proto/provider.proto`；Service
   不复制 enum。Mode/capability 对应关系只定义在公共 Resolver。
+- 多硬件边界已固定为 Engine/Provider 暴露、Service 消费标准化事实。Service 只读取
+  Provider/runtime/profile、capability、KV/Connector compatibility、topology、
+  admission 和统一 Engine/Link 状态；不调用 CANN/CUDA，不持有 device pointer、真实
+  HBM 地址或具体 stream/event/allocator。`soc` 和硬件 Runtime 版本仅参与已验证
+  profile 的兼容与发布门禁，不作为硬件特例分支键。
+- 真实与 simulated HBM allocator 均位于 Engine/backend 或 fake Provider 边界。
+  Service 通过相同 Provider Contract 验证 reservation、execution hold、transfer、
+  cancel/fencing 和回收，不在生产 Service 内复制 KV/HBM allocator。
 - 跨仓协议与依赖：xLLM 是 `provider.proto` 的唯一源；xllm-service 通过
   `proto_xllm` 直接生成和链接同一文件。`renderer_digest` 覆盖 tokenizer +
   template 渲染契约，STRICT 编码结果必须与 Descriptor 相等。
@@ -102,7 +110,8 @@ limitations under the License.
 | G-2/F81 Descriptor | 四种开放 profile、缺能力、重复项、runtime alias 负向测试 | N/A | 待真实 Provider | PASS |
 | G-2/F82 ExecutionPlan | 四种 role shape、capability、deadline、identity 门禁 | N/A | 待真实 Provider | PASS |
 | STRICT renderer | canonical/encoded/model/capability/renderer 一致性正负测试 | N/A | 待真实 tokenizer/runtime | PASS |
-| EngineState schema | UNKNOWN 与 0、per-DP、ratio、connector READY/NOT_READY 负向测试 | N/A | 待 State Stream | PASS；READY 已作为调度硬门禁 |
+| EngineState schema | UNKNOWN 与 0、per-DP、ratio、stale/state-quality 负向测试；connector tag 12/name reserved | N/A | 待真实 State Stream | PASS；固定 `READY` 占位已删除，Remote PD connector 门禁由 incarnation-scoped `LinkState=READY` 独立表达 |
+| 多硬件感知边界 | Descriptor/capability/profile、STRICT KV/Connector/topology compatibility 和跨 Provider 隔离测试 | N/A，无设备 API | 待 NPU 首发及后续 backend conformance | PASS（公共契约）；真实 backend 逐 profile 待验证 |
 | Adapter registry | ownership、lookup、重复 key、非法 Descriptor、生产 factory、同 key 并发懒注册合并、profile digest 碰撞拒绝、跨 attempt request context 复用；缓存关键三项重复 100 轮 | N/A | N/A | PASS |
 | 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
 | Canonical/Plan 生产接入 | ingress 语义保留、Native REMOTE_PD 与 vLLM AGGREGATED plan、renderer identity/digest、UNKNOWN KV estimate | N/A，无 tensor 逻辑 | 待真实 Provider wire | PASS，4 项新增测试 |
@@ -142,4 +151,6 @@ validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completio
 - 性能、容量和观测证据：纯 CPU 校验路径，无生产吞吐结论；State Stream 与
   观测基线由 G0/G3 批次交付。
 - 达到 VERIFIED 仍需完成：两个真实 Adapter conformance、Scheduler 只依赖
-  CanonicalRequest/ExecutionPlan、Engine Registry/State Stream、NPU smoke 与故障门禁。
+  CanonicalRequest/ExecutionPlan、Engine Registry/State Stream、NPU smoke 与故障门禁；
+  后续新增硬件必须复用同一 Contract/Resolver 并按 profile 完成 conformance，不得在
+  Service 中增加芯片专属调度路径。

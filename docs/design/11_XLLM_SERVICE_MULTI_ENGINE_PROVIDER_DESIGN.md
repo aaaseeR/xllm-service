@@ -67,7 +67,35 @@ xLLM Service
        +-- VllmAscendAdapter/Agent --> vLLM API Server + Ascend Plugin
 ```
 
-Service 不直接理解 Scheduler 类、KV Connector 实现或设备 API。Adapter 负责把公共语义映射到 Provider 能力，并将 Provider 的状态转换为统一状态。Adapter 不伪造不存在的能力。
+Service 不直接理解 Engine 内部 Scheduler 类、KV Connector 实现或设备 API。Adapter
+负责把公共语义映射到 Provider 能力，并将 Provider 的状态转换为统一状态。Adapter
+不伪造不存在的能力。
+
+#### 硬件感知边界
+
+多硬件支持由底层 Engine/Provider 及其 Adapter 暴露。Service 不是完全忽略硬件，
+而是只感知经过版本化、可验证和可用于调度的**标准化事实**，不感知这些事实背后的
+设备实现：
+
+| Service 必须感知的标准化事实 | Service 不得感知的设备实现 |
+| --- | --- |
+| Provider/runtime/plugin/protocol identity 与不可变 `profile_digest` | CANN、CUDA、HCCL、NCCL 或其他设备 API 调用 |
+| execution mode、capability、binding/commit/fencing 语义 | NPU/GPU stream、event、context 的具体类型和生命周期 |
+| model/renderer、KV layout/dtype/block/cache group | device pointer、真实 HBM 地址和 `aclrtMalloc`/`cudaMalloc` 等 allocator 调用 |
+| Connector protocol/version、transfer mode 与 pair `LinkState` | kernel、DMA/RDMA 实现细节和芯片专属错误码分支 |
+| TP/DP 等 topology、admission、KV headroom 与统一健康状态 | 按芯片型号散落的 Scheduler/Provider 特例 |
+
+`soc`、`hardware_runtime_version` 等字段是 opaque compatibility/release-policy 属性，
+用于选择已经通过 conformance 的 profile、阻断未证明的 P/D 组合和定位问题；它们不得
+成为 `if (npu)`、`if (cuda)` 式执行分支的依据。Service 的公共 Resolver 只判断
+capability、profile、compatibility proof 和统一状态，硬件到这些公共语义的翻译由
+Adapter/backend 完成。
+
+真实 HBM allocator、KV 内容读写和设备传输属于 Engine/backend。simulated HBM 必须
+实现同一底层资源契约或由 fake Provider 包装后进入端到端测试；Service 只验证
+reservation、ownership、transfer、cancel、fencing 和回收结果，不在生产代码中实现
+第二套硬件 allocator。新增硬件只允许增加 backend/Adapter 和对应 conformance
+profile，不得复制 Service 调度正确性路径。
 
 ### 3.1 Provider Adapter SPI
 
@@ -76,7 +104,7 @@ Service 不直接理解 Scheduler 类、KV Connector 实现或设备 API。Adapt
 | 接口组 | 最小语义 |
 | --- | --- |
 | `Describe` | 返回不可变 Provider/Profile、协议版本和能力集合 |
-| `PublishState` | 发布带序号的 lifecycle、健康、队列、KV、吞吐、延迟和 Connector 状态 |
+| `PublishState` | 发布带序号的 lifecycle、健康、队列、per-DP KV/容量和状态质量；pair Connector 健康由 `LinkState` 独立发布 |
 | `Submit/Stream` | 按执行计划提交并返回有序事件；保留 Provider 原生协议 |
 | `Cancel/QueryAttempt` | 取消、查询 attempt 终态；能力不足时必须显式返回 `UNSUPPORTED` |
 | `Reserve/Transfer/Link` | 仅 P/D Provider 实现 Decode reservation、KV 交接和 pair readiness |

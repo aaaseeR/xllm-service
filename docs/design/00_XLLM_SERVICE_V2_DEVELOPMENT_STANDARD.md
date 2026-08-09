@@ -126,6 +126,14 @@ DCU 等 backend 实现同一接口。simulated HBM 只是该生产契约的 CPU 
 语义。公共 Scheduler/Provider 禁止散落 `USE_NPU`/CANN 特例；硬件差异由 backend
 capability/profile 与明确 Adapter 边界表达。
 
+`xllm-service` 只允许感知底层 Engine/Provider 暴露的标准化事实，包括不可变 Provider
+identity/profile、execution capability、KV layout/Connector compatibility、topology、
+admission 和统一健康/Link 状态。它不得直接持有或调用 CANN/CUDA 等设备 API，不得理解
+device pointer、真实 HBM 地址、stream/event 实现和芯片专属 allocator/kernel/error。
+`soc` 与硬件 Runtime 版本只能作为 opaque compatibility/conformance 属性，不能成为
+Service 中的硬件分支键。真实和 simulated HBM allocator 均属于 Engine/backend 或
+fake Provider 边界；Service 只消费同一资源契约并验证跨组件生命周期。
+
 ### 4.2 功能覆盖要求
 
 “CPU 测试覆盖全”按功能与状态语义验收，不以单一行覆盖率代替。每个新增或
