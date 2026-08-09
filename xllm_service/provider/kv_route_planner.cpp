@@ -43,6 +43,19 @@ double safe_ratio(double value) {
   return std::clamp(value, 0.0, 1.0);
 }
 
+uint64_t bounded_hit_tokens(uint64_t prompt_tokens,
+                            uint64_t block_size,
+                            uint64_t prefix_blocks) {
+  if (block_size == 0 || prefix_blocks == 0) {
+    return 0;
+  }
+  const uint64_t hit_tokens =
+      prefix_blocks > std::numeric_limits<uint64_t>::max() / block_size
+          ? std::numeric_limits<uint64_t>::max()
+          : prefix_blocks * block_size;
+  return std::min(prompt_tokens, hit_tokens);
+}
+
 double candidate_load_cost(const KVRoutePlannerConfig& config,
                            const KVRouteEngineCandidate& candidate,
                            bool is_decode) {
@@ -71,6 +84,48 @@ double candidate_load_cost(const KVRoutePlannerConfig& config,
 }
 
 }  // namespace
+
+LowerTierShadowCredit lower_tier_shadow_credit(
+    const KVRouteRequest& request,
+    const std::vector<KVRoutePlanCandidate>& candidates) {
+  LowerTierShadowCredit credit;
+  for (const KVRoutePlanCandidate& candidate : candidates) {
+    credit.prefill_host_hit_tokens_ub =
+        std::max(credit.prefill_host_hit_tokens_ub,
+                 bounded_hit_tokens(request.prompt_tokens,
+                                    request.block_size,
+                                    candidate.prefill.host_prefix_blocks));
+    credit.prefill_ssd_hit_tokens_ub =
+        std::max(credit.prefill_ssd_hit_tokens_ub,
+                 bounded_hit_tokens(request.prompt_tokens,
+                                    request.block_size,
+                                    candidate.prefill.ssd_prefix_blocks));
+    credit.prefill_store_hit_tokens_ub =
+        std::max(credit.prefill_store_hit_tokens_ub,
+                 bounded_hit_tokens(request.prompt_tokens,
+                                    request.block_size,
+                                    candidate.prefill.store_prefix_blocks));
+    if (!candidate.decode.has_value()) {
+      continue;
+    }
+    credit.decode_host_hit_tokens_ub =
+        std::max(credit.decode_host_hit_tokens_ub,
+                 bounded_hit_tokens(request.prompt_tokens,
+                                    request.block_size,
+                                    candidate.decode->host_prefix_blocks));
+    credit.decode_ssd_hit_tokens_ub =
+        std::max(credit.decode_ssd_hit_tokens_ub,
+                 bounded_hit_tokens(request.prompt_tokens,
+                                    request.block_size,
+                                    candidate.decode->ssd_prefix_blocks));
+    credit.decode_store_hit_tokens_ub =
+        std::max(credit.decode_store_hit_tokens_ub,
+                 bounded_hit_tokens(request.prompt_tokens,
+                                    request.block_size,
+                                    candidate.decode->store_prefix_blocks));
+  }
+  return credit;
+}
 
 KVRouteMode select_kv_route_mode(KVRouteMode configured_mode,
                                  bool enforced_gate_open,

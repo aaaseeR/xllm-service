@@ -18,9 +18,9 @@ limitations under the License.
 ## 基本信息
 
 - Owner：xLLM Service V2
-- 状态：PARTIAL
+- 状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
 - 关联设计/Requirement ID：G3、F64、F65、F67、F78、D13、D15-D18、D34、D41、D52
-- 最近验证基线：xLLM `b1cc43dc`；xllm-service 本状态文档所在提交
+- 最近验证基线：xLLM `446bae12`；xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
@@ -31,7 +31,7 @@ limitations under the License.
 | xLLM Native | legacy Descriptor-less | BEST_EFFORT | UNSUPPORTED | V2 路由统一 fail closed；完成相应 V2 Descriptor/EngineState producer 后才能加入候选 |
 | vLLM-Ascend | `AGGREGATED` | contract v1 strict Descriptor | CPU_VERIFIED / NPU_PENDING | Agent 发布单调、incarnation/profile/model 对齐的 per-DP EngineState；真实指标与 NPU deep health 待验证 |
 
-总体状态保持 PARTIAL：单一协议、xLLM Native 状态生产、权威成员与软状态分离、
+总体 CPU 状态已闭环：单一协议、xLLM Native 状态生产、权威成员与软状态分离、
 master 聚合与有界异步扇出、权威 master incarnation 分发、接收缓存和真实调度消费
 链路已经闭环；`NORMAL/STATE_BLIND/REGISTRY_BLIND` 迟滞、统一候选过滤、实际直连证据、
 永久 listener 和独立 readiness 已完成 CPU 闭环；Link 周期对账的 Service 侧已经闭环，
@@ -124,7 +124,7 @@ NPU handshake 故障矩阵待最终环境验证。
 
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
-| 单一 additive wire | xLLM `ProviderProtocolTest.StateBatchGoldenWireAndAgesAreStable`、critical field numbers | N/A，无 tensor 逻辑 | N/A | PASS，协议组 8/8 |
+| 单一 additive wire | xLLM `ProviderProtocolTest.StateBatchGoldenWireAndAgesAreStable`、critical field numbers | N/A，无 tensor 逻辑 | N/A | PASS，协议组 9/9 |
 | master/FULL/DELTA fencing | `RequiresCurrentMasterFullBeforeScheduling`、旧 master/旧 snapshot/DELTA-before-FULL 负向路径 | N/A | 待多机切主 | PASS |
 | membership/incarnation | `IncarnationReplacementCannotBeResurrectedByState`、Descriptor collision、权威 remove | N/A | 待 Engine self-fencing | PASS |
 | 权威 DELETE fencing | InstanceMgr 生产路径编译链接；Registry remove/incarnation replacement/state 不能复活旧成员；revision/tombstone 代码检查 | N/A | 待真实 etcd DELETE/revoke、乱序 PUT/DELETE 与 lease 到期注入 | PASS（CPU 核心）；真实 etcd 注入待补 |
@@ -139,13 +139,13 @@ NPU handshake 故障矩阵待最终环境验证。
 | xLLM Native 生产 | Descriptor 确定性/非法输入、P/D mode、per-DP 完整/空容量、缺失 capability、snapshot 序号不消耗、32 线程唯一序号；heartbeat field 7 | N/A，无 tensor 数值逻辑 | 待真实 CANN/SOC 版本、NPU block 账本与 P/D heartbeat | PASS；Native 6/6、协议 8/8，并发套件连续 100 轮 |
 
 本批验证：xllm-service Debug 三个生产服务目标编译、动态链接通过，pinned 与外部
-xLLM 两种构建的全量 CPU 测试均为 304/304；ObservationController 8/8；
+xLLM Service pinned/override 两种构建的当前全量 CPU 测试均为 380/380；ObservationController 8/8；
 ReadinessController 6/6；HealthResponse 3/3；EngineRegistry 15/15；
 StateStreamOutbox 6/6；
 StateStreamClient BRPC loopback 4/4；
-LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 8/8。State Stream、
+LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 9/9。State Stream、
 Link 和 Native producer 的关键并发用例连续 100 轮通过；xLLM 公共 CPU 回归为
-103/103。xLLM 的
+118/118。xLLM 的
 `native_provider_runtime.cpp`、`xservice_client.cpp`、`llm_master.cpp` 和
 `vlm_master.cpp` 使用真实 Torch CPU/BRPC 编译参数通过。完整 xLLM runtime 目标仍被
 既有 `process_group.cpp` 的 CPU `ProcessGroupImpl` 不完整类型错误阻断，该文件不在本批
@@ -178,8 +178,5 @@ Link 和 Native producer 的关键并发用例连续 100 轮通过；xLLM 公共
   分配，不执行 deregister、unlink 或在飞资源清理。
 - 性能、容量和观测证据：CPU 单测已覆盖有界内存、锁安全、慢订阅者超时、断连合并、
   FULL 恢复与并发调用，不代表生产扇出吞吐；仍需补长时间高频状态 soak 和分发指标。
-- 达到完整 G3 CPU_VERIFIED 仍需完成：真实 etcd 切主和成员事件故障注入；xLLM 完整
-  CPU runtime 链接还需先修复上述既有 ProcessGroup 编译
-  基线。
-- 达到 VERIFIED 仍需完成：上述 CPU 门禁全部通过，并在 NPU 多 P/D、多 Service、切主、
+- 达到 VERIFIED 仍需完成：在真实 etcd 和 NPU 多 P/D、多 Service、切主、
   heartbeat 丢失、陈旧状态和 link 故障矩阵中验证。

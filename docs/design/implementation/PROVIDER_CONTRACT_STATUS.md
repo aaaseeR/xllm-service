@@ -20,7 +20,7 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：CPU_VERIFIED
 - 关联设计/Requirement ID：G-2、G-1、F66、F72、F73、F80-F82、D50、D52、D56
-- 最近验证基线：xLLM `b1cc43dc`、xllm-service 本状态文档所在提交
+- 最近验证基线：xLLM `446bae12`、xllm-service 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
 
 ## 支持范围
@@ -98,15 +98,14 @@ limitations under the License.
   compatibility proof。STRICT 与 BEST_EFFORT legacy 不能单边混配；矩阵同时用于
   route、readiness、静态 peer 与 Link/Unlink 候选。
 - 明确不支持范围：Descriptor-less Engine 仍作为显式 BEST_EFFORT 兼容入口，不生成
-  V2 artifacts。State Stream 接收、Engine/Link 状态门禁已进入生产路径，但发布、切主
-  identity 分发和失明状态机仍为 PARTIAL；不声称任何真实 NPU Provider 已通过
-  conformance。
+  V2 artifacts。State Stream 发布/接收、切主 identity 分发、Engine/Link 状态门禁和
+  失明状态机已完成 CPU 闭环；不声称任何真实 NPU Provider 已通过 conformance。
 
 ## 需求与测试追踪
 
 | Requirement ID | CPU test | Torch CPU test | NPU test | 结果 |
 | --- | --- | --- | --- | --- |
-| G-1/F66 单一 wire 真相 | xLLM `ProviderProtocolTest` golden wire、roundtrip、optional presence、field number | N/A，无 tensor 逻辑 | N/A | PASS，8/8（含 G1 additive resource wire 与 StateBatch） |
+| G-1/F66 单一 wire 真相 | xLLM `ProviderProtocolTest` golden wire、roundtrip、optional presence、field number | N/A，无 tensor 逻辑 | N/A | PASS，9/9（含 G1 additive resource wire、StateBatch 与关键字段号） |
 | G-2/F80 mode/capability | `ResolvesEveryCompleteV2CapabilityRow`、未知 mode/transfer 负向测试 | N/A | 待真实 Provider | PASS |
 | G-2/F81 Descriptor | 四种开放 profile、缺能力、重复项、runtime alias 负向测试 | N/A | 待真实 Provider | PASS |
 | G-2/F82 ExecutionPlan | 四种 role shape、capability、deadline、identity 门禁 | N/A | 待真实 Provider | PASS |
@@ -122,8 +121,8 @@ limitations under the License.
 
 Service 的 Provider/Registry 纯 CPU 测试已覆盖 Adapter、route、EngineState 和
 LinkState；当前全量 service CPU 回归在 pinned 与外部 xLLM 两种构建下均为
-304/304，vLLM Agent/sidecar CPU 回归为 60/60，xLLM CPU 公共路径基线为
-113/113（含 simulated HBM 10/10）。新增 xLLM Engine plan
+380/380，vLLM Agent/sidecar CPU 回归为 60/60，xLLM CPU 公共路径基线为
+118/118（含 simulated HBM 12/12、Provider protocol 9/9）。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
 生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
 仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。
@@ -141,7 +140,7 @@ validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completio
   已携带当前 attempt 计划，Engine 在实际入口 fail closed 校验计划与本机身份。
 - 已知缺口/风险：当前 schema 尚无可校验的 topology-transform proof，因此非相同
   topology 保守拒绝；per-pair `LinkState=READY` 的接收和路由门禁已完成，失败隔离、
-  publisher 与周期对账仍属于 G3 未完成部分。
+  publisher 与周期对账已完成 CPU 接线，真实多机切主与 Link 故障注入仍待集群验证。
   动态吞吐、延迟直方图、失败计数和计划预测字段在没有校准 producer 与生产决策
   consumer 前已从 schema 删除并 reserved；当前不声称动态性能排序能力。
   客户端 model alias 到权威 model revision 的映射需由 catalog 明确，当前 STRICT

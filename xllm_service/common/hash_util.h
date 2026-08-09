@@ -81,4 +81,12 @@ void xxh3_128bits_hash(std::string_view kv_namespace,
                        std::string_view block_extra,
                        uint8_t* hash_value);
 
+// Derives the request-visible hash namespace while preserving the immutable
+// Engine stream namespace as the KV event lookup domain. Empty/oversized
+// inputs fail closed. adapter_identity is reserved for a trusted dynamic
+// adapter/LoRA identity and is length-delimited even when empty.
+std::string derive_request_kv_namespace(std::string_view base_namespace,
+                                        std::string_view isolation_domain,
+                                        std::string_view adapter_identity);
+
 }  // namespace xllm_service

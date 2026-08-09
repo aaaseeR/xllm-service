@@ -180,6 +180,26 @@ DEFINE_bool(native_prefill_only_enabled,
 DEFINE_uint64(native_prefill_only_output_token_cap,
               1,
               "Maximum output tokens for Native Prefill-only execution.");
+DEFINE_bool(trusted_tenant_headers_enabled,
+            false,
+            "Trust authenticated x-tenant-id/x-flow-id Gateway headers. When "
+            "false, tenant headers are ignored and cross-request KV reuse is "
+            "disabled.");
+DEFINE_uint64(observability_event_capacity,
+              65536,
+              "Fixed-capacity Service request-event ring size.");
+DEFINE_uint64(observability_export_batch_size,
+              1024,
+              "Maximum request events exported per observability tick.");
+DEFINE_int32(observability_export_interval_ms,
+             20,
+             "Request-event export interval in milliseconds.");
+DEFINE_int32(observability_snapshot_interval_ms,
+             5000,
+             "Cluster performance snapshot interval in milliseconds.");
+DEFINE_string(observability_build_id,
+              "development",
+              "Immutable build or artifact identifier in request events.");
 
 DEFINE_int32(detect_disconnected_instance_interval,
              15,

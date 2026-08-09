@@ -24,6 +24,8 @@ limitations under the License.
 #include <thread>
 #include <vector>
 
+#include "nlohmann/json.hpp"
+
 namespace xllm_service::observability {
 namespace {
 
@@ -106,6 +108,31 @@ TEST(RequestEventRecorderTest, RecordsAndDrainsWithoutExceedingCapacity) {
   ASSERT_EQ(drained.size(), 2u);
   EXPECT_EQ(drained[0].event_seq(), 1u);
   EXPECT_EQ(drained[1].event_seq(), 2u);
+}
+
+TEST(RequestEventRecorderTest, StructuredLogPreservesTraceWithoutContent) {
+  xllm::proto::RequestEvent event = make_event();
+  event.mutable_workload()->set_prompt_tokens(17);
+  event.mutable_workload()->set_effective_max_new_tokens(9);
+  event.mutable_workload()->set_predicted_prefill_hit_tokens(0);
+  event.mutable_workload()->set_actual_decode_hit_tokens(11);
+  event.mutable_workload()->set_shadow_prefill_host_hit_tokens_ub(13);
+  event.mutable_workload()->set_shadow_decode_store_hit_tokens_ub(7);
+
+  const nlohmann::json output =
+      nlohmann::json::parse(format_request_event_log(event));
+
+  EXPECT_EQ(output.at("request_uid"), "01234567-89ab-7cde-bf01-23456789abcd");
+  EXPECT_EQ(output.at("event_type"), "REQUEST_EVENT_TYPE_INGRESS");
+  EXPECT_EQ(output.at("prompt_tokens"), 17);
+  EXPECT_EQ(output.at("effective_max_new_tokens"), 9);
+  EXPECT_EQ(output.at("predicted_prefill_hit_tokens"), 0);
+  EXPECT_EQ(output.at("actual_decode_hit_tokens"), 11);
+  EXPECT_EQ(output.at("shadow_prefill_host_hit_tokens_ub"), 13);
+  EXPECT_EQ(output.at("shadow_decode_store_hit_tokens_ub"), 7);
+  EXPECT_FALSE(output.contains("prompt"));
+  EXPECT_FALSE(output.contains("output"));
+  EXPECT_FALSE(output.contains("token_ids"));
 }
 
 TEST(RequestEventRecorderTest, ZeroCapacityDropsWithoutAccessingRing) {

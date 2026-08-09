@@ -254,6 +254,19 @@ class Options {
   PROPERTY(bool, native_prefill_only_enabled) = true;
   PROPERTY(uint64_t, native_prefill_only_output_token_cap) = 1;
 
+  // The deployment, not an end client, asserts that tenant/flow headers are
+  // authenticated and stripped/replaced at the Gateway trust boundary.
+  PROPERTY(bool, trusted_tenant_headers_enabled) = false;
+
+  // Request events are written by producers into a fixed-capacity ring and
+  // exported by a dedicated thread. Observability loss is visible but never
+  // backpressures inference.
+  PROPERTY(size_t, observability_event_capacity) = 65536;
+  PROPERTY(size_t, observability_export_batch_size) = 1024;
+  PROPERTY(int32_t, observability_export_interval_ms) = 20;
+  PROPERTY(int32_t, observability_snapshot_interval_ms) = 5000;
+  PROPERTY(std::string, observability_build_id) = "development";
+
   PROPERTY(std::string, service_name);
 
   // V2 execution-hold cleanup capacity. One fixed-size token is reserved

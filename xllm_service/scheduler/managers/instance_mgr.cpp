@@ -33,6 +33,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/global_gflags.h"
+#include "common/hash_util.h"
 #include "common/types.h"
 #include "common/utils.h"
 #include "common/xllm/output.h"
@@ -178,6 +179,15 @@ xllm::proto::EngineRole get_engine_role(
   }
 }
 
+bool instance_matches_model(const xllm_service::InstanceMetaInfo& info,
+                            const std::string& model_revision) {
+  if (!info.provider_descriptor.has_value()) {
+    return true;
+  }
+  return info.provider_descriptor->model().model_revision() == model_revision &&
+         info.provider_descriptor->serving().role() == get_engine_role(info);
+}
+
 std::vector<xllm_service::provider::ProviderRouteCandidate>
 make_route_candidates(
     const std::unordered_map<std::string, xllm_service::InstanceMetaInfo>&
@@ -198,6 +208,8 @@ make_route_candidates(
           instance_it->second, registry, now_monotonic_ms);
       if (instance_it->second.provider_descriptor.has_value()) {
         candidate.descriptor = &instance_it->second.provider_descriptor.value();
+        candidate.model_revision =
+            candidate.descriptor->model().model_revision();
       }
     }
     candidates.emplace_back(std::move(candidate));
@@ -415,7 +427,8 @@ InstanceMetaInfo InstanceMgr::get_instance_info(
   return instances_[instance_name];
 }
 
-bool InstanceMgr::get_next_provider(xllm::proto::ProviderId* provider_id) {
+bool InstanceMgr::get_next_provider(const std::string& model_revision,
+                                    xllm::proto::ProviderId* provider_id) {
   std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
   if (provider_id == nullptr) {
     return false;
@@ -439,7 +452,8 @@ bool InstanceMgr::get_next_provider(xllm::proto::ProviderId* provider_id) {
           xllm::proto::PROVIDER_ID_UNSPECIFIED,
           next_provider_index_,
           next_decode_index_,
-          &selection)) {
+          &selection,
+          model_revision)) {
     LOG(ERROR) << "No provider has a schedulable execution route.";
     return false;
   }
@@ -449,7 +463,8 @@ bool InstanceMgr::get_next_provider(xllm::proto::ProviderId* provider_id) {
 }
 
 bool InstanceMgr::get_next_instance_pair(Routing* routing,
-                                         xllm::proto::ProviderId provider_id) {
+                                         xllm::proto::ProviderId provider_id,
+                                         const std::string& model_revision) {
   std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
   if (routing == nullptr ||
       provider_id == xllm::proto::PROVIDER_ID_UNSPECIFIED) {
@@ -473,7 +488,8 @@ bool InstanceMgr::get_next_instance_pair(Routing* routing,
                                                provider_id,
                                                next_prefill_index_,
                                                next_decode_index_,
-                                               &selection)) {
+                                               &selection,
+                                               model_revision)) {
     LOG(ERROR) << "No schedulable route for provider_id="
                << static_cast<int32_t>(provider_id);
     return false;
@@ -647,7 +663,8 @@ bool InstanceMgr::get_kv_route_candidates(
                                                           provider_id,
                                                           max_candidate_plans,
                                                           &selections,
-                                                          truncated)) {
+                                                          truncated,
+                                                          model_revision)) {
     return false;
   }
 
@@ -847,6 +864,18 @@ InstanceMgr::engine_observation_snapshot(uint64_t receiver_monotonic_ms) const {
   return engine_registry_.observation_snapshot(receiver_monotonic_ms);
 }
 
+size_t InstanceMgr::engine_member_count() const {
+  return engine_registry_.member_count();
+}
+
+size_t InstanceMgr::engine_state_count() const {
+  return engine_registry_.state_count();
+}
+
+size_t InstanceMgr::engine_link_count() const {
+  return engine_registry_.link_count();
+}
+
 void InstanceMgr::set_as_master() {
   is_master_service_.store(true, std::memory_order_release);
   etcd_client_->remove_watch(ETCD_LOADMETRICS_PREFIX);
@@ -972,7 +1001,8 @@ bool InstanceMgr::bind_request_instance_incarnations(
                                                request->provider_id,
                                                0,
                                                0,
-                                               &validated_selection) ||
+                                               &validated_selection,
+                                               request->model) ||
       validated_selection.prefill_engine_uid != request->routing.prefill_name ||
       validated_selection.decode_engine_uid != request->routing.decode_name) {
     LOG(ERROR) << "Load balancer produced an invalid Provider route shape: "
@@ -1011,7 +1041,16 @@ bool InstanceMgr::bind_request_instance_incarnations(
       }
     }
     if (prefill_has_hash_contract) {
-      request->kv_namespace = prefill_namespace;
+      const std::string isolation_domain =
+          request->kv_isolation_domain.empty()
+              ? request->correlation.request_uid()
+              : request->kv_isolation_domain;
+      request->kv_namespace = derive_request_kv_namespace(
+          prefill_namespace, isolation_domain, /*adapter_identity=*/"");
+      if (request->kv_namespace.empty()) {
+        LOG(ERROR) << "Failed to derive request KV isolation namespace.";
+        return false;
+      }
     } else if (request->provider_id == xllm::proto::PROVIDER_ID_XLLM_NATIVE) {
       // Backward-compatible descriptors remain selectable for legacy tests,
       // but Native V2 dispatch rejects them in set_request_execution_context.
@@ -1682,6 +1721,7 @@ bool InstanceMgr::select_instance_pair_on_slo(
     const auto instance_it = instances_.find(prefill_instance);
     if (instance_it == instances_.end() ||
         instance_it->second.provider_id != request->provider_id ||
+        !instance_matches_model(instance_it->second, request->model) ||
         !is_instance_schedulable(
             instance_it->second, engine_registry_, now_monotonic_ms)) {
       continue;
@@ -1711,6 +1751,7 @@ bool InstanceMgr::select_instance_pair_on_slo(
     const auto instance_it = instances_.find(decode_instance);
     if (instance_it == instances_.end() ||
         instance_it->second.provider_id != request->provider_id ||
+        !instance_matches_model(instance_it->second, request->model) ||
         !is_instance_schedulable(
             instance_it->second, engine_registry_, now_monotonic_ms)) {
       continue;

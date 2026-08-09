@@ -90,6 +90,20 @@ class AutoCounter final {
     *latency_recorder_##name << (value);           \
   }
 
+// define multi counter. Labels must come from a fixed enum vocabulary; never
+// use request, tenant, model, Engine, or incarnation identities here.
+#define DEFINE_MULTI_COUNTER(name, label, desc)                         \
+  bvar::MultiDimension<bvar::Adder<double>> MULTI_COUNTER_##name(#name, \
+                                                                 {(label)});
+
+#define MULTI_COUNTER_INC(name, key)                                        \
+  do {                                                                      \
+    bvar::Adder<double>* counter = MULTI_COUNTER_##name.get_stats({(key)}); \
+    if (counter != nullptr) {                                               \
+      *counter << 1;                                                        \
+    }                                                                       \
+  } while (false)
+
 // declare gauge
 #define DECLARE_GAUGE(name) extern bvar::Status<double> GAUGE_##name;
 
@@ -103,6 +117,9 @@ class AutoCounter final {
 #define DECLARE_MULTI_HISTOGRAM(name) \
   extern bvar::MultiDimension<bvar::LatencyRecorder> MULTI_HISTOGRAM_##name;
 
+#define DECLARE_MULTI_COUNTER(name) \
+  extern bvar::MultiDimension<bvar::Adder<double>> MULTI_COUNTER_##name;
+
 // NOLINTEND(bugprone-macro-parentheses)
 
 DECLARE_COUNTER(server_request_in_total);
@@ -111,5 +128,23 @@ DECLARE_COUNTER(attempt_control_token_invalid_total);
 DECLARE_COUNTER(attempt_control_rpc_failed_total);
 DECLARE_COUNTER(attempt_control_non_terminal_total);
 
+DECLARE_GAUGE(xllm_service_v2_queued_requests);
+DECLARE_GAUGE(xllm_service_v2_dispatched_requests);
+DECLARE_GAUGE(xllm_service_v2_queued_prompt_tokens);
+DECLARE_GAUGE(xllm_service_v2_queued_bytes);
+DECLARE_GAUGE(xllm_service_v2_active_requests);
+DECLARE_GAUGE(xllm_service_v2_observability_ring_events);
+
+DECLARE_MULTI_COUNTER(xllm_service_v2_request_lifecycle_total);
+DECLARE_MULTI_COUNTER(xllm_service_v2_request_failure_total);
+DECLARE_MULTI_COUNTER(xllm_service_v2_request_terminal_total);
+DECLARE_MULTI_COUNTER(xllm_service_v2_execution_mode_total);
+DECLARE_MULTI_COUNTER(xllm_service_v2_observability_events_total);
+DECLARE_MULTI_COUNTER(xllm_service_v2_output_sequence_total);
+
 DECLARE_HISTOGRAM(time_to_first_token_latency_milliseconds);
 DECLARE_HISTOGRAM(inter_token_latency_milliseconds);
+DECLARE_MULTI_HISTOGRAM(xllm_service_v2_queue_wait_milliseconds);
+DECLARE_MULTI_HISTOGRAM(xllm_service_v2_ttft_milliseconds);
+DECLARE_MULTI_HISTOGRAM(xllm_service_v2_tpot_milliseconds);
+DECLARE_MULTI_HISTOGRAM(xllm_service_v2_e2e_milliseconds);

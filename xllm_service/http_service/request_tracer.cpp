@@ -38,6 +38,10 @@ namespace xllm_service {
 RequestTracer::RequestTracer(bool enable_request_trace)
     : enable_request_trace_(enable_request_trace) {
   if (!enable_request_trace_) return;
+  LOG(WARNING)
+      << "Legacy request content trace is enabled: trace/trace.json contains "
+         "request/response bodies and must not be used for routine production "
+         "debugging or performance analysis.";
   std::filesystem::create_directories("trace");
   log_stream_.open("trace/trace.json", std::ios::app);
   if (!log_stream_.is_open()) {

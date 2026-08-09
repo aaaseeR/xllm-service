@@ -90,6 +90,7 @@ cc_library(
     :native_execution_mode_selector
     :request
     :request_deadline_queue
+    :request_event_recorder
     :state_stream_client
     :xllm_chat_parse_runtime
     cpprest

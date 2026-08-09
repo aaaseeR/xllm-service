@@ -24,6 +24,15 @@ namespace xllm_service {
 
 namespace {
 
+constexpr size_t kMaxFlowIdentityLength = 256;
+
+bool valid_flow_identity(const std::string& value) {
+  return !value.empty() && value.size() <= kMaxFlowIdentityLength &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return character != 0 && character != '\n' && character != '\r';
+         });
+}
+
 bool add_overflows(uint64_t left, uint64_t right) {
   return left > std::numeric_limits<uint64_t>::max() - right;
 }
@@ -155,9 +164,11 @@ FlowControlAdmission FlowControlQueue::admit(const FlowControlWork& work,
                                              TimePoint now,
                                              SaturationState state) {
   std::lock_guard<std::mutex> guard(mutex_);
-  if (!valid_ || work.request_uid.empty() || work.model_pool.empty() ||
-      work.tenant_id.empty() || work.flow_id.empty() ||
-      work.request_bytes == 0 || work.deadline <= now) {
+  if (!valid_ || !valid_flow_identity(work.request_uid) ||
+      !valid_flow_identity(work.model_pool) ||
+      !valid_flow_identity(work.tenant_id) ||
+      !valid_flow_identity(work.flow_id) || work.request_bytes == 0 ||
+      work.deadline <= now) {
     return {FlowControlStatus::INVALID_ARGUMENT, 0};
   }
   if (entries_.find(work.request_uid) != entries_.end()) {

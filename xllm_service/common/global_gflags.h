@@ -87,6 +87,12 @@ DECLARE_uint32(native_local_prefill_bucket_permyriad);
 DECLARE_uint64(native_local_prefill_token_cap);
 DECLARE_bool(native_prefill_only_enabled);
 DECLARE_uint64(native_prefill_only_output_token_cap);
+DECLARE_bool(trusted_tenant_headers_enabled);
+DECLARE_uint64(observability_event_capacity);
+DECLARE_uint64(observability_export_batch_size);
+DECLARE_int32(observability_export_interval_ms);
+DECLARE_int32(observability_snapshot_interval_ms);
+DECLARE_string(observability_build_id);
 
 DECLARE_int32(detect_disconnected_instance_interval);
 

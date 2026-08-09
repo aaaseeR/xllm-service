@@ -159,6 +159,34 @@ TEST(KVRoutePlannerTest, ShadowModeObservesButKeepsLoadOnlyRoute) {
   EXPECT_EQ(decision.fallback, KVRouteFallback::NONE);
 }
 
+TEST(KVRoutePlannerTest, LowerTierCreditIsShadowOnlyAndBounded) {
+  KVRoutePlanner planner(config());
+  std::vector<KVRoutePlanCandidate> candidates = {plan("least-load", 0),
+                                                  plan("lower-tier-rich", 2)};
+  candidates[1].prefill.host_prefix_blocks = 20;
+  candidates[1].prefill.ssd_prefix_blocks = 6;
+  candidates[1].prefill.store_prefix_blocks = 4;
+  candidates[1].decode = engine("decode", 0);
+  candidates[1].decode->host_prefix_blocks = 8;
+  candidates[1].decode->ssd_prefix_blocks = 3;
+  candidates[1].decode->store_prefix_blocks = 2;
+
+  const LowerTierShadowCredit credit =
+      lower_tier_shadow_credit(request(), candidates);
+  EXPECT_EQ(credit.prefill_host_hit_tokens_ub, 160u);
+  EXPECT_EQ(credit.prefill_ssd_hit_tokens_ub, 96u);
+  EXPECT_EQ(credit.prefill_store_hit_tokens_ub, 64u);
+  EXPECT_EQ(credit.decode_host_hit_tokens_ub, 128u);
+  EXPECT_EQ(credit.decode_ssd_hit_tokens_ub, 48u);
+  EXPECT_EQ(credit.decode_store_hit_tokens_ub, 32u);
+
+  const KVRouteDecision decision =
+      planner.select(request(), candidates, KVRouteMode::ENFORCED);
+  ASSERT_TRUE(decision.valid);
+  EXPECT_EQ(decision.selected_index, 0u);
+  EXPECT_EQ(decision.fallback, KVRouteFallback::KV_UNAVAILABLE);
+}
+
 TEST(KVRoutePlannerTest, UnknownIndexFallsBackWithoutLosingAvailability) {
   KVRoutePlanner planner(config());
   const std::vector<KVRoutePlanCandidate> candidates = {plan("p0", 0),

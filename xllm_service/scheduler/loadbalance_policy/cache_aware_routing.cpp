@@ -96,24 +96,55 @@ std::vector<std::string> build_block_hashes(
   return hashes;
 }
 
+provider::KVPrefixMatch observe_prefix_tier(
+    provider::KVShadowIndex* index,
+    const std::vector<std::string>& block_hashes,
+    const provider::KVRouteEngineCandidate& candidate,
+    xllm::proto::KVCacheTier tier) {
+  if (index == nullptr || candidate.engine_key.engine_uid().empty() ||
+      candidate.model_revision.empty() || candidate.kv_namespace.empty() ||
+      candidate.cache_group.empty()) {
+    return {};
+  }
+  return index->match_current_contiguous_prefix(candidate.engine_key,
+                                                candidate.model_revision,
+                                                candidate.kv_namespace,
+                                                block_hashes,
+                                                candidate.cache_group,
+                                                tier);
+}
+
 void observe_prefix(provider::KVShadowIndex* index,
                     const std::vector<std::string>& block_hashes,
                     provider::KVRouteEngineCandidate* candidate) {
-  if (index == nullptr || candidate == nullptr ||
-      candidate->engine_key.engine_uid().empty() ||
-      candidate->model_revision.empty() || candidate->kv_namespace.empty() ||
-      candidate->cache_group.empty()) {
+  if (candidate == nullptr) {
     return;
   }
-  const provider::KVPrefixMatch match =
-      index->match_current_contiguous_prefix(candidate->engine_key,
-                                             candidate->model_revision,
-                                             candidate->kv_namespace,
-                                             block_hashes,
-                                             candidate->cache_group,
-                                             xllm::proto::KV_CACHE_TIER_HBM);
+  const provider::KVPrefixMatch match = observe_prefix_tier(
+      index, block_hashes, *candidate, xllm::proto::KV_CACHE_TIER_HBM);
   candidate->kv_health = match.health;
   candidate->hbm_prefix_blocks = match.contiguous_blocks;
+}
+
+void observe_lower_tier_prefix(provider::KVShadowIndex* index,
+                               const std::vector<std::string>& block_hashes,
+                               provider::KVRouteEngineCandidate* candidate) {
+  if (candidate == nullptr) {
+    return;
+  }
+  const auto observe_shadow_blocks = [&](xllm::proto::KVCacheTier tier) {
+    const provider::KVPrefixMatch tier_match =
+        observe_prefix_tier(index, block_hashes, *candidate, tier);
+    return tier_match.health == provider::KVShadowHealth::READY
+               ? tier_match.contiguous_blocks
+               : 0;
+  };
+  candidate->host_prefix_blocks =
+      observe_shadow_blocks(xllm::proto::KV_CACHE_TIER_HOST);
+  candidate->ssd_prefix_blocks =
+      observe_shadow_blocks(xllm::proto::KV_CACHE_TIER_SSD);
+  candidate->store_prefix_blocks =
+      observe_shadow_blocks(xllm::proto::KV_CACHE_TIER_STORE);
 }
 
 std::string decode_name(const provider::KVRoutePlanCandidate& candidate) {
@@ -134,13 +165,14 @@ CacheAwareRouting::CacheAwareRouting(const Options& options,
 bool CacheAwareRouting::fallback_load_only(
     const std::shared_ptr<Request>& request) const {
   request->kv_route_observation.reset();
-  return instance_mgr_->get_next_instance_pair(&request->routing,
-                                               request->provider_id);
+  return instance_mgr_->get_next_instance_pair(
+      &request->routing, request->provider_id, request->model);
 }
 
 bool CacheAwareRouting::select_instances_pair(
     std::shared_ptr<Request> request) {
-  if (request == nullptr || request->token_ids.empty() || !planner_.valid()) {
+  if (request == nullptr || request->token_ids.empty() || !planner_.valid() ||
+      !request->kv_isolation_reusable) {
     return request != nullptr && fallback_load_only(request);
   }
   const std::string model_revision =
@@ -176,8 +208,13 @@ bool CacheAwareRouting::select_instances_pair(
     return fallback_load_only(request);
   }
 
+  const std::string request_kv_namespace = derive_request_kv_namespace(
+      kv_namespace, request->kv_isolation_domain, /*adapter_identity=*/"");
+  if (request_kv_namespace.empty()) {
+    return fallback_load_only(request);
+  }
   const std::vector<std::string> block_hashes = build_block_hashes(
-      kv_namespace, hash_seed, request->token_ids, block_size);
+      request_kv_namespace, hash_seed, request->token_ids, block_size);
   for (provider::KVRoutePlanCandidate& candidate : candidates) {
     observe_prefix(kv_shadow_index_, block_hashes, &candidate.prefill);
     if (candidate.decode.has_value()) {
@@ -200,8 +237,24 @@ bool CacheAwareRouting::select_instances_pair(
       planner_.select(route_request, candidates, effective_mode, truncated);
   if (!decision.valid || decision.selected_index >= candidates.size() ||
       decision.load_only_index >= candidates.size() ||
-      decision.kv_preferred_index >= candidates.size()) {
+      decision.kv_preferred_index >= candidates.size() ||
+      decision.evaluations.size() != candidates.size()) {
     return fallback_load_only(request);
+  }
+
+  // Lower-tier cache state is V2 observation-only. Query only the bounded
+  // planner shortlist after the HBM decision has been frozen, so HOST/SSD/
+  // STORE cannot influence routing and do not add O(all candidates) work.
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    if (!decision.evaluations[index].in_shortlist) {
+      continue;
+    }
+    observe_lower_tier_prefix(
+        kv_shadow_index_, block_hashes, &candidates[index].prefill);
+    if (candidates[index].decode.has_value()) {
+      observe_lower_tier_prefix(
+          kv_shadow_index_, block_hashes, &candidates[index].decode.value());
+    }
   }
 
   const provider::KVRoutePlanCandidate& selected =
@@ -215,6 +268,8 @@ bool CacheAwareRouting::select_instances_pair(
       candidates[decision.kv_preferred_index];
   const provider::KVRouteEvaluation& kv_evaluation =
       decision.evaluations[decision.kv_preferred_index];
+  const provider::LowerTierShadowCredit lower_tier_credit =
+      provider::lower_tier_shadow_credit(route_request, candidates);
   request->kv_route_observation = provider::KVRouteObservation{
       .mode = effective_mode,
       .fallback = decision.fallback,
@@ -230,6 +285,18 @@ bool CacheAwareRouting::select_instances_pair(
       .predicted_effective_prefill_tokens =
           kv_evaluation.effective_prefill_tokens,
       .predicted_transfer_bytes = kv_evaluation.effective_transfer_bytes,
+      .shadow_prefill_host_hit_tokens_ub =
+          lower_tier_credit.prefill_host_hit_tokens_ub,
+      .shadow_prefill_ssd_hit_tokens_ub =
+          lower_tier_credit.prefill_ssd_hit_tokens_ub,
+      .shadow_prefill_store_hit_tokens_ub =
+          lower_tier_credit.prefill_store_hit_tokens_ub,
+      .shadow_decode_host_hit_tokens_ub =
+          lower_tier_credit.decode_host_hit_tokens_ub,
+      .shadow_decode_ssd_hit_tokens_ub =
+          lower_tier_credit.decode_ssd_hit_tokens_ub,
+      .shadow_decode_store_hit_tokens_ub =
+          lower_tier_credit.decode_store_hit_tokens_ub,
       .kv_bytes_per_token = route_request.kv_bytes_per_token,
       .load_only_cost_us =
           decision.evaluations[decision.load_only_index].load_only_cost_us,

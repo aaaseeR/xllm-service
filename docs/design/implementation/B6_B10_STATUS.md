@@ -22,9 +22,10 @@ B6-B10 是完整 V2 首个交付版本的后半程开发门，不是独立产品
 通过后才能标记 `CPU_VERIFIED`。最终 `VERIFIED` 还要求对应 NPU、真实 P/D/etcd、
 故障注入和容量门禁通过；`CPU_VERIFIED` 不得改写为生产硬件已验证。
 
-当前总状态：`IN_PROGRESS`。B6、B7、B8 仓库内代码与 CPU 门已完成，平台 branch
-protection、真实 cluster 和 NPU 保持 pending；B9 正在实现。B8-B10 的范围和 DoD
-已冻结，禁止用后续文档静默缩小。
+当前总状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`。B6-B10 的仓库内代码、
+CPU/Torch CPU 可达路径、simulated HBM、双 Provider CPU conformance、压力回归和
+交付文档已完成。平台 branch protection、真实多 Service/P/D/etcd/Link 集群、NPU、
+长时 soak 和线上校准保持 pending；这些外部证据不能由 CPU 结果替代。
 
 ## 门级范围
 
@@ -33,8 +34,8 @@ protection、真实 cluster 和 NPU 保持 pending；B9 正在实现。B8-B10 �
 | V2-B6 | 00 §4、02 G-1 测试底座、11 硬件感知边界 | 真正生效的 pin/CPU 合入入口；device-neutral KV/HBM 资源契约；xLLM simulated HBM test backend；容量、block 地址/所有权、内容/checksum、OOM/碎片、并发与故障回收门禁 | CPU_VERIFIED / PLATFORM_AND_NPU_PENDING；见 [SIMULATED_HBM_STATUS.md](./SIMULATED_HBM_STATUS.md) |
 | V2-B7 | 08 V2-K0 | Engine block 真源产生 KV store/remove/clear 事件；独立 KV lane；incarnation/cache epoch/event sequence；有界 shadow index；gap 后分页 snapshot 恢复和对账；只观测不影响路由 | CPU_VERIFIED / NPU_AND_CLUSTER_PENDING；见 [B7_K0_KV_SHADOW_STATUS.md](./B7_K0_KV_SHADOW_STATUS.md) |
 | V2-B8 | 08 V2-K1 | 统一候选过滤后的 HBM P/D Prefix + load 联合评分；canonical cross-repo hash/namespace/seed 与 P→D 透传；least-load/top-prefix shortlist、pending-work、survival/residence credit；P/D actual 对账、确定性 bucket gate 与 simulated HBM replay | CPU_VERIFIED / NPU_AND_CLUSTER_PENDING；见 [B8_K1_CANONICAL_HASH_STATUS.md](./B8_K1_CANONICAL_HASH_STATUS.md) |
-| V2-B9 | 09 | 每 Service/ModelPool 有界队列；request/token/byte/tenant 硬上限；priority band、tenant flow 公平和 flow 内 FCFS/EDF；整池饱和门；按 capability 选择 REMOTE_PD、LOCAL_PREFILL_DECODE、PREFILL_ONLY | PLANNED |
-| V2-B10 | 08 V2-K2、完整 09/11、00 §2.1 | 多模型隔离；优先级/公平与 KV 选择联合；可观测低层 shadow credit；双 Provider 最终 conformance；容量/故障/回退矩阵；沿用 xLLM 风格的端到端关联日志、阶段耗时和有界集群指标快照；完整支持矩阵、性能解读/优化手册和 V2 代码完成口径 | PLANNED |
+| V2-B9 | 09 | 每 Service/ModelPool 有界队列；request/token/byte/tenant 硬上限；priority band、tenant flow 公平和 flow 内 FCFS/EDF；整池饱和门；按 capability 选择 REMOTE_PD、LOCAL_PREFILL_DECODE、PREFILL_ONLY | CPU_VERIFIED / NPU_AND_CLUSTER_PENDING |
+| V2-B10 | 08 V2-K2、完整 09/11、00 §2.1 | 多模型隔离；优先级/公平与 KV 选择联合；可观测低层 shadow credit；双 Provider最终 conformance；容量/故障/回退矩阵；沿用 xLLM 风格的端到端关联日志、阶段耗时和有界集群指标快照；完整支持矩阵、性能解读/优化手册和 V2 代码完成口径 | CPU_VERIFIED / NPU_AND_CLUSTER_PENDING；见 [B10_V2_DELIVERY_STATUS.md](./B10_V2_DELIVERY_STATUS.md) |
 
 ## B6 Definition of Done
 

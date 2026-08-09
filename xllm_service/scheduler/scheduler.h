@@ -18,6 +18,8 @@ limitations under the License.
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <optional>
+#include <string>
 #include <thread>
 
 #include "chat_template/chat_template.h"
@@ -31,6 +33,7 @@ limitations under the License.
 #include "loadbalance_policy/loadbalance_policy.h"
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
+#include "observability/request_event_recorder.h"
 #include "provider/kv_route_metrics.h"
 #include "provider/kv_shadow_index.h"
 #include "provider/kv_state_outbox.h"
@@ -207,9 +210,31 @@ class Scheduler final {
   void run_execution_hold_cleanup();
   void run_request_watchdog();
   void run_flow_dispatch();
+  void run_observability_exporter();
   SaturationState flow_saturation_state() const;
   void arm_client_disconnect_notification(
       const std::shared_ptr<Request>& request);
+  void record_request_event(
+      const std::shared_ptr<Request>& request,
+      xllm::proto::RequestEventType event_type,
+      xllm::proto::EventResult result,
+      xllm::proto::ErrorStage error_stage,
+      xllm::proto::EventReason reason,
+      const std::string& target_engine_uid = "",
+      const std::string& target_incarnation_id = "",
+      std::optional<uint64_t> stage_duration_ns = std::nullopt);
+  xllm::proto::RequestEvent make_request_event_base(
+      const std::shared_ptr<Request>& request);
+  void submit_request_event(xllm::proto::RequestEvent event);
+  void record_request_metric(const std::shared_ptr<Request>& request,
+                             xllm::proto::RequestMetric metric);
+  void record_response_boundary(
+      const std::shared_ptr<Request>& request,
+      std::optional<uint64_t> cumulative_output_tokens);
+  void record_request_terminal(const std::shared_ptr<Request>& request,
+                               xllm::proto::EventResult result,
+                               xllm::proto::ErrorStage error_stage,
+                               xllm::proto::EventReason reason);
 
  private:
   Options options_;
@@ -227,6 +252,15 @@ class Scheduler final {
   std::unique_ptr<RequestDeadlineQueue> request_deadline_queue_;
   std::unique_ptr<FlowControlQueue> flow_control_queue_;
   std::shared_ptr<ClientDisconnectMonitor> client_disconnect_monitor_;
+  std::unique_ptr<observability::RequestEventRecorder> request_event_recorder_;
+
+  std::mutex observability_wait_mutex_;
+  std::condition_variable observability_cv_;
+  bool observability_stopped_ = false;
+  std::unique_ptr<std::thread> observability_thread_;
+  std::atomic<uint64_t> observability_successful_terminals_{0};
+  std::atomic<uint64_t> observability_failed_terminals_{0};
+  std::atomic<uint64_t> observability_delivered_tokens_{0};
 
   // Serializes the transition between request-owned and detached holds with
   // exact process-termination evidence. Lock order is this mutex, then

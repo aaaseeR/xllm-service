@@ -80,6 +80,21 @@ TEST(FlowControlQueueTest, RejectsInvalidCrashAndMemoryBudgets) {
   EXPECT_FALSE(FlowControlQueue(invalid).valid());
 }
 
+TEST(FlowControlQueueTest, RejectsUnboundedOrDelimitedIdentityKeys) {
+  FlowControlQueue queue(config());
+  const auto now = FlowControlQueue::Clock::now();
+  FlowControlWork invalid = work("invalid", now);
+  invalid.tenant_id = std::string(257, 't');
+  EXPECT_EQ(queue.admit(invalid, now, SaturationState::AVAILABLE).status,
+            FlowControlStatus::INVALID_ARGUMENT);
+
+  invalid = work("invalid", now);
+  invalid.flow_id = "flow\nforged";
+  EXPECT_EQ(queue.admit(invalid, now, SaturationState::AVAILABLE).status,
+            FlowControlStatus::INVALID_ARGUMENT);
+  EXPECT_EQ(queue.snapshot().queued_requests, 0u);
+}
+
 TEST(FlowControlQueueTest, CapacityRejectionDoesNotPartiallyReserve) {
   FlowControlConfig limits = config();
   limits.max_queued_requests_per_tenant = 1;

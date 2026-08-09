@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <functional>
 #include <future>
 #include <limits>
@@ -50,15 +51,172 @@ limitations under the License.
 namespace {
 constexpr int32_t kHeartbeatInterval = 3;  // in seconds
 constexpr int32_t kRegistrationMaxRetries = 5;
+constexpr size_t kMaxObservabilityEventCapacity = 1 << 20;
 
 constexpr const char* kEtcdUsernameEnvVar = "ETCD_USERNAME";
 constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
+
+bool valid_log_token(const std::string& value) {
+  return !value.empty() && value.size() <= 256 &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return (character >= 'a' && character <= 'z') ||
+                  (character >= 'A' && character <= 'Z') ||
+                  (character >= '0' && character <= '9') || character == '-' ||
+                  character == '_' || character == '.' || character == ':' ||
+                  character == '/' || character == '@' || character == '+';
+         });
+}
 
 uint64_t monotonic_time_ms() {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
           .count());
+}
+
+int64_t monotonic_time_ns() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+void saturated_atomic_add(std::atomic<uint64_t>* target, uint64_t value) {
+  uint64_t current = target->load(std::memory_order_relaxed);
+  while (true) {
+    const uint64_t next = value > std::numeric_limits<uint64_t>::max() - current
+                              ? std::numeric_limits<uint64_t>::max()
+                              : current + value;
+    if (target->compare_exchange_weak(current,
+                                      next,
+                                      std::memory_order_relaxed,
+                                      std::memory_order_relaxed)) {
+      return;
+    }
+  }
+}
+
+uint64_t counter_delta(uint64_t current, uint64_t previous) {
+  return current >= previous ? current - previous : 0;
+}
+
+std::optional<uint64_t> elapsed_ns_since(
+    std::chrono::steady_clock::time_point started) {
+  const std::chrono::steady_clock::time_point now =
+      std::chrono::steady_clock::now();
+  if (now < started) {
+    return std::nullopt;
+  }
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(now - started)
+          .count());
+}
+
+std::string execution_mode_label(xllm::proto::ExecutionMode mode) {
+  if (!xllm::proto::ExecutionMode_IsValid(mode)) {
+    return "EXECUTION_MODE_INVALID";
+  }
+  return xllm::proto::ExecutionMode_Name(mode);
+}
+
+const char* saturation_state_name(xllm_service::SaturationState state) {
+  switch (state) {
+    case xllm_service::SaturationState::AVAILABLE:
+      return "AVAILABLE";
+    case xllm_service::SaturationState::SATURATED:
+      return "SATURATED";
+    case xllm_service::SaturationState::UNKNOWN:
+      return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+xllm::proto::EventResult terminal_result_for_status(
+    xllm_service::llm::StatusCode status) {
+  if (status == xllm_service::llm::StatusCode::CANCELLED) {
+    return xllm::proto::EVENT_RESULT_CANCELLED;
+  }
+  if (status == xllm_service::llm::StatusCode::DEADLINE_EXCEEDED) {
+    return xllm::proto::EVENT_RESULT_DEADLINE_EXCEEDED;
+  }
+  return xllm::proto::EVENT_RESULT_FAILED;
+}
+
+xllm::proto::EventReason event_reason_for_status(
+    xllm_service::llm::StatusCode status) {
+  switch (status) {
+    case xllm_service::llm::StatusCode::CANCELLED:
+      return xllm::proto::EVENT_REASON_CANCELLED;
+    case xllm_service::llm::StatusCode::DEADLINE_EXCEEDED:
+      return xllm::proto::EVENT_REASON_DEADLINE_EXCEEDED;
+    case xllm_service::llm::StatusCode::RESOURCE_EXHAUSTED:
+      return xllm::proto::EVENT_REASON_CAPACITY_EXHAUSTED;
+    case xllm_service::llm::StatusCode::UNAVAILABLE:
+      return xllm::proto::EVENT_REASON_STALE_STATE;
+    case xllm_service::llm::StatusCode::UNIMPLEMENTED:
+      return xllm::proto::EVENT_REASON_MODE_UNSUPPORTED;
+    case xllm_service::llm::StatusCode::OK:
+    case xllm_service::llm::StatusCode::UNKNOWN:
+    case xllm_service::llm::StatusCode::INVALID_ARGUMENT:
+    case xllm_service::llm::StatusCode::UNAUTHENTICATED:
+      return xllm::proto::EVENT_REASON_PROVIDER_ERROR;
+  }
+  return xllm::proto::EVENT_REASON_INTERNAL_ERROR;
+}
+
+xllm::proto::EventReason event_reason_for_flow_status(
+    xllm_service::FlowControlStatus status) {
+  switch (status) {
+    case xllm_service::FlowControlStatus::QUEUE_CAPACITY_EXHAUSTED:
+      return xllm::proto::EVENT_REASON_CAPACITY_EXHAUSTED;
+    case xllm_service::FlowControlStatus::QUEUE_DEADLINE_UNSATISFIABLE:
+      return xllm::proto::EVENT_REASON_DEADLINE_EXCEEDED;
+    case xllm_service::FlowControlStatus::DUPLICATE_REQUEST:
+      return xllm::proto::EVENT_REASON_ATTEMPT_CONFLICT;
+    case xllm_service::FlowControlStatus::UNKNOWN_REQUEST:
+    case xllm_service::FlowControlStatus::INVALID_ARGUMENT:
+      return xllm::proto::EVENT_REASON_INTERNAL_ERROR;
+    case xllm_service::FlowControlStatus::OK:
+      return xllm::proto::EVENT_REASON_NONE;
+  }
+  return xllm::proto::EVENT_REASON_INTERNAL_ERROR;
+}
+
+const char* output_sequence_status_name(
+    xllm_service::OutputEventSequenceStatus status) {
+  switch (status) {
+    case xllm_service::OutputEventSequenceStatus::kReady:
+      return "ready";
+    case xllm_service::OutputEventSequenceStatus::kBuffered:
+      return "buffered_gap";
+    case xllm_service::OutputEventSequenceStatus::kDuplicate:
+      return "duplicate";
+    case xllm_service::OutputEventSequenceStatus::kMissingSequence:
+      return "missing_sequence";
+    case xllm_service::OutputEventSequenceStatus::kGapTooLarge:
+      return "gap_too_large";
+    case xllm_service::OutputEventSequenceStatus::kCapacityExceeded:
+      return "capacity_exceeded";
+    case xllm_service::OutputEventSequenceStatus::kTerminalConflict:
+      return "terminal_conflict";
+    case xllm_service::OutputEventSequenceStatus::kInvalidSequence:
+      return "invalid_sequence";
+    case xllm_service::OutputEventSequenceStatus::kClosed:
+      return "closed";
+  }
+  return "unknown";
+}
+
+const char* observation_mode_name(
+    xllm_service::provider::ObservationMode mode) {
+  switch (mode) {
+    case xllm_service::provider::ObservationMode::NORMAL:
+      return "NORMAL";
+    case xllm_service::provider::ObservationMode::STATE_BLIND:
+      return "STATE_BLIND";
+    case xllm_service::provider::ObservationMode::REGISTRY_BLIND:
+      return "REGISTRY_BLIND";
+  }
+  return "UNKNOWN";
 }
 
 bool uint64_add_overflows(uint64_t left, uint64_t right) {
@@ -265,6 +423,20 @@ Scheduler::Scheduler(const Options& options)
       !flow_control_queue_->valid()) {
     LOG(FATAL) << "Invalid V2 flow-control configuration.";
   }
+  if (options_.observability_event_capacity() == 0 ||
+      options_.observability_event_capacity() >
+          kMaxObservabilityEventCapacity ||
+      options_.observability_export_batch_size() == 0 ||
+      options_.observability_export_batch_size() >
+          options_.observability_event_capacity() ||
+      options_.observability_export_interval_ms() <= 0 ||
+      options_.observability_snapshot_interval_ms() <= 0 ||
+      !valid_log_token(options_.observability_build_id())) {
+    LOG(FATAL) << "Invalid V2 observability configuration.";
+  }
+  request_event_recorder_ =
+      std::make_unique<observability::RequestEventRecorder>(
+          options_.observability_event_capacity());
   const std::optional<xllm::FirstEventRetryPolicy> first_event_retry_policy =
       xllm::FirstEventRetryPolicy::from_durations_ms(
           static_cast<uint64_t>(options_.p_first_event_retry_ub_ms()),
@@ -486,6 +658,8 @@ Scheduler::Scheduler(const Options& options)
       std::make_unique<std::thread>(&Scheduler::run_request_watchdog, this);
   flow_dispatch_thread_ =
       std::make_unique<std::thread>(&Scheduler::run_flow_dispatch, this);
+  observability_thread_ = std::make_unique<std::thread>(
+      &Scheduler::run_observability_exporter, this);
 }
 
 Scheduler::~Scheduler() {
@@ -497,6 +671,11 @@ Scheduler::~Scheduler() {
     flow_dispatch_stopped_ = true;
   }
   flow_dispatch_cv_.notify_all();
+  {
+    std::lock_guard<std::mutex> lock(observability_wait_mutex_);
+    observability_stopped_ = true;
+  }
+  observability_cv_.notify_all();
   state_stream_cv_.notify_all();
   kv_state_cv_.notify_all();
   kv_snapshot_cv_.notify_all();
@@ -516,6 +695,9 @@ Scheduler::~Scheduler() {
   if (flow_dispatch_thread_ != nullptr && flow_dispatch_thread_->joinable()) {
     flow_dispatch_thread_->join();
   }
+  if (observability_thread_ != nullptr && observability_thread_->joinable()) {
+    observability_thread_->join();
+  }
   client_disconnect_monitor_->close();
   {
     std::lock_guard<std::mutex> lock(execution_hold_cleanup_wait_mutex_);
@@ -533,26 +715,51 @@ Scheduler::~Scheduler() {
 }
 
 bool Scheduler::schedule(std::shared_ptr<Request> request) {
+  if (request == nullptr) {
+    return false;
+  }
+  const bool traced_request = request->canonical_request.has_value();
+  if (traced_request) {
+    record_request_event(request,
+                         xllm::proto::REQUEST_EVENT_TYPE_INGRESS,
+                         xllm::proto::EVENT_RESULT_STARTED,
+                         xllm::proto::ERROR_STAGE_NONE,
+                         xllm::proto::EVENT_REASON_NONE);
+  }
+  const auto reject = [this, &request, traced_request](
+                          xllm::proto::ErrorStage stage,
+                          xllm::proto::EventReason reason) {
+    if (traced_request) {
+      record_request_terminal(
+          request, xllm::proto::EVENT_RESULT_REJECTED, stage, reason);
+    }
+    return false;
+  };
   if (!accepting_new_requests_.load(std::memory_order_acquire)) {
     LOG(WARNING) << "Reject request while Service is not ready, reason="
                  << provider::readiness_reason_name(readiness_status().reason);
-    return false;
+    return reject(xllm::proto::ERROR_STAGE_INGRESS,
+                  xllm::proto::EVENT_REASON_STALE_STATE);
   }
   if (request->request_deadline_present &&
       (!request->request_deadline.has_value() ||
        request->request_deadline->expired())) {
     LOG(ERROR) << "Request deadline is invalid or already expired.";
-    return false;
+    return reject(xllm::proto::ERROR_STAGE_INGRESS,
+                  xllm::proto::EVENT_REASON_DEADLINE_EXCEEDED);
   }
-  if (!instance_mgr_->get_next_provider(&request->provider_id)) {
-    return false;
+  if (!instance_mgr_->get_next_provider(request->model,
+                                        &request->provider_id)) {
+    return reject(xllm::proto::ERROR_STAGE_ROUTING,
+                  xllm::proto::EVENT_REASON_STALE_STATE);
   }
   const std::optional<provider::ProviderDispatchKind> dispatch_kind =
       provider::resolve_provider_dispatch_kind(request->provider_id);
   if (!dispatch_kind.has_value()) {
     LOG(ERROR) << "Selected provider has no dispatch adapter: "
                << static_cast<int32_t>(request->provider_id);
-    return false;
+    return reject(xllm::proto::ERROR_STAGE_ROUTING,
+                  xllm::proto::EVENT_REASON_MODE_UNSUPPORTED);
   }
   const bool is_native =
       *dispatch_kind == provider::ProviderDispatchKind::XLLM_NATIVE_RPC;
@@ -561,7 +768,8 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   if (is_native && !request->messages.empty()) {
     if (chat_template_ == nullptr) {
       LOG(ERROR) << "Chat template has not configured.";
-      return false;
+      return reject(xllm::proto::ERROR_STAGE_INGRESS,
+                    xllm::proto::EVENT_REASON_PROVIDER_ERROR);
     }
 
     const std::vector<JsonTool> empty_tools;
@@ -570,8 +778,11 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
     auto prompt = chat_template_->apply(
         request->messages, tools_for_template, request->chat_template_kwargs);
     if (!prompt.has_value()) {
-      LOG(ERROR) << "Failed to construct prompt from messages";
-      return false;
+      LOG(ERROR) << "Failed to construct prompt from messages, request_uid="
+                 << request->correlation.request_uid()
+                 << ", model=" << request->model;
+      return reject(xllm::proto::ERROR_STAGE_INGRESS,
+                    xllm::proto::EVENT_REASON_PROVIDER_ERROR);
     }
     request->prompt = prompt.value();
   }
@@ -580,14 +791,19 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   if (is_native && !request->prompt.empty()) {
     if (chat_template_ == nullptr || tokenizer_ == nullptr) {
       LOG(ERROR) << "Native provider tokenizer assets are not configured.";
-      return false;
+      return reject(xllm::proto::ERROR_STAGE_INGRESS,
+                    xllm::proto::EVENT_REASON_PROVIDER_ERROR);
     }
     if (!get_tls_tokenizer()->encode(
             request->prompt,
             &request->token_ids,
             chat_template_->encode_add_special_tokens())) {
-      LOG(ERROR) << "Encode prompt failed: " << request->prompt;
-      return false;
+      LOG(ERROR) << "Prompt encoding failed, request_uid="
+                 << request->correlation.request_uid()
+                 << ", model=" << request->model
+                 << ", prompt_bytes=" << request->prompt.size();
+      return reject(xllm::proto::ERROR_STAGE_INGRESS,
+                    xllm::proto::EVENT_REASON_PROVIDER_ERROR);
     }
   }
 
@@ -761,6 +977,23 @@ bool Scheduler::admit_flow_control_locked(
       work, FlowControlQueue::Clock::now(), flow_saturation_state());
   request->admission_status = admission.status;
   if (admission.status != FlowControlStatus::OK) {
+    const xllm::proto::EventReason reason =
+        event_reason_for_flow_status(admission.status);
+    record_request_event(
+        request,
+        xllm::proto::REQUEST_EVENT_TYPE_PREFILL_QUEUE,
+        admission.status == FlowControlStatus::QUEUE_DEADLINE_UNSATISFIABLE
+            ? xllm::proto::EVENT_RESULT_DEADLINE_EXCEEDED
+            : xllm::proto::EVENT_RESULT_REJECTED,
+        xllm::proto::ERROR_STAGE_INGRESS,
+        reason);
+    record_request_terminal(
+        request,
+        admission.status == FlowControlStatus::QUEUE_DEADLINE_UNSATISFIABLE
+            ? xllm::proto::EVENT_RESULT_DEADLINE_EXCEEDED
+            : xllm::proto::EVENT_RESULT_REJECTED,
+        xllm::proto::ERROR_STAGE_INGRESS,
+        reason);
     return false;
   }
   RequestQueueState expected = RequestQueueState::RECEIVED;
@@ -771,9 +1004,21 @@ bool Scheduler::admit_flow_control_locked(
           std::memory_order_acquire)) {
     flow_control_queue_->cancel(request->correlation.request_uid());
     request->admission_status = FlowControlStatus::INVALID_ARGUMENT;
+    record_request_terminal(request,
+                            xllm::proto::EVENT_RESULT_REJECTED,
+                            xllm::proto::ERROR_STAGE_INGRESS,
+                            xllm::proto::EVENT_REASON_INTERNAL_ERROR);
     return false;
   }
   request->enqueue_time = FlowControlQueue::Clock::now();
+  record_request_event(request,
+                       xllm::proto::REQUEST_EVENT_TYPE_PREFILL_QUEUE,
+                       xllm::proto::EVENT_RESULT_ACCEPTED,
+                       xllm::proto::ERROR_STAGE_NONE,
+                       xllm::proto::EVENT_REASON_NONE,
+                       "",
+                       "",
+                       elapsed_ns_since(request->trace_ingress_time));
   return true;
 }
 
@@ -1957,6 +2202,22 @@ bool Scheduler::retry_first_output_attempt_locked(
     return false;
   }
   instance_mgr_->update_request_metrics(request, RequestAction::SCHEDULE);
+  record_request_event(request,
+                       xllm::proto::REQUEST_EVENT_TYPE_ROUTE,
+                       xllm::proto::EVENT_RESULT_SUCCEEDED,
+                       xllm::proto::ERROR_STAGE_NONE,
+                       xllm::proto::EVENT_REASON_NONE,
+                       request->routing.prefill_name,
+                       request->prefill_incarnation_id);
+  if (!request->routing.decode_name.empty()) {
+    record_request_event(request,
+                         xllm::proto::REQUEST_EVENT_TYPE_ROUTE,
+                         xllm::proto::EVENT_RESULT_SUCCEEDED,
+                         xllm::proto::ERROR_STAGE_NONE,
+                         xllm::proto::EVENT_REASON_NONE,
+                         request->routing.decode_name,
+                         request->decode_incarnation_id);
+  }
 
   {
     std::lock_guard<std::mutex> watch_guard(output_gap_watch_mutex_);
@@ -1981,6 +2242,10 @@ void Scheduler::fail_output_dispatch_locked(
     return;
   }
   request->output_dispatch_closed = true;
+  record_request_terminal(request,
+                          terminal_result_for_status(status_code),
+                          xllm::proto::ERROR_STAGE_OUTPUT,
+                          event_reason_for_status(status_code));
   const std::string request_uid = request->correlation.request_uid();
   if (request->output_event_sequencer != nullptr) {
     request->output_event_sequencer->close();
@@ -2196,6 +2461,19 @@ void Scheduler::recover_first_output_events(
       continue;
     }
     if (service_request->retry_dispatch_callback(*service_request)) {
+      MULTI_COUNTER_INC(xllm_service_v2_execution_mode_total,
+                        execution_mode_label(service_request->execution_mode));
+      xllm::proto::ExecutionHolder holder = execution_holder(*service_request);
+      if (holder.engine_uid().empty()) {
+        holder = prefill_holder(*service_request);
+      }
+      record_request_event(service_request,
+                           xllm::proto::REQUEST_EVENT_TYPE_P_DISPATCH,
+                           xllm::proto::EVENT_RESULT_ACCEPTED,
+                           xllm::proto::ERROR_STAGE_NONE,
+                           xllm::proto::EVENT_REASON_NONE,
+                           holder.engine_uid(),
+                           holder.incarnation_id());
       continue;
     }
 
@@ -2359,6 +2637,34 @@ void Scheduler::run_flow_dispatch() {
         break;
       }
 
+      std::optional<uint64_t> queue_wait_ns;
+      if (request->enqueue_time.has_value()) {
+        queue_wait_ns = elapsed_ns_since(*request->enqueue_time);
+      }
+      const std::string mode = execution_mode_label(request->execution_mode);
+      if (queue_wait_ns.has_value()) {
+        MULTI_HISTOGRAM_OBSERVE(xllm_service_v2_queue_wait_milliseconds,
+                                mode,
+                                static_cast<int64_t>(*queue_wait_ns / 1000000));
+      }
+      record_request_event(request,
+                           xllm::proto::REQUEST_EVENT_TYPE_ROUTE,
+                           xllm::proto::EVENT_RESULT_SUCCEEDED,
+                           xllm::proto::ERROR_STAGE_NONE,
+                           xllm::proto::EVENT_REASON_NONE,
+                           request->routing.prefill_name,
+                           request->prefill_incarnation_id,
+                           queue_wait_ns);
+      if (!request->routing.decode_name.empty()) {
+        record_request_event(request,
+                             xllm::proto::REQUEST_EVENT_TYPE_ROUTE,
+                             xllm::proto::EVENT_RESULT_SUCCEEDED,
+                             xllm::proto::ERROR_STAGE_NONE,
+                             xllm::proto::EVENT_REASON_NONE,
+                             request->routing.decode_name,
+                             request->decode_incarnation_id);
+      }
+
       bool dispatch_started = false;
       bool request_active = false;
       bool hold_installed = false;
@@ -2406,10 +2712,190 @@ void Scheduler::run_flow_dispatch() {
                 ? request->correlation.attempt_seq()
                 : 0,
             "Provider dispatch could not be started");
+      } else {
+        MULTI_COUNTER_INC(xllm_service_v2_execution_mode_total, mode);
+        xllm::proto::ExecutionHolder holder = execution_holder(*request);
+        if (holder.engine_uid().empty()) {
+          holder = prefill_holder(*request);
+        }
+        record_request_event(request,
+                             xllm::proto::REQUEST_EVENT_TYPE_P_DISPATCH,
+                             xllm::proto::EVENT_RESULT_ACCEPTED,
+                             xllm::proto::ERROR_STAGE_NONE,
+                             xllm::proto::EVENT_REASON_NONE,
+                             holder.engine_uid(),
+                             holder.incarnation_id());
       }
     }
 
     wait_lock.lock();
+  }
+}
+
+void Scheduler::run_observability_exporter() {
+  uint64_t last_snapshot_ms = 0;
+  uint64_t previous_successful_terminals = 0;
+  uint64_t previous_failed_terminals = 0;
+  uint64_t previous_delivered_tokens = 0;
+  provider::KVRouteMetricsSnapshot previous_kv;
+  observability::RecorderStats previous_stats;
+  const auto export_one_batch = [this]() {
+    std::vector<xllm::proto::RequestEvent> events =
+        request_event_recorder_->drain(
+            options_.observability_export_batch_size());
+    for (const xllm::proto::RequestEvent& event : events) {
+      try {
+        VLOG(1) << "xllm_service_request_event "
+                << observability::format_request_event_log(event);
+      } catch (const std::exception& error) {
+        LOG(ERROR) << "Failed to format request event: " << error.what();
+      }
+    }
+    return events.size();
+  };
+
+  std::unique_lock<std::mutex> wait_lock(observability_wait_mutex_);
+  while (!observability_stopped_) {
+    observability_cv_.wait_for(
+        wait_lock,
+        std::chrono::milliseconds(options_.observability_export_interval_ms()),
+        [this] { return observability_stopped_; });
+    if (observability_stopped_) {
+      break;
+    }
+    wait_lock.unlock();
+    export_one_batch();
+
+    const FlowControlSnapshot flow = flow_control_queue_->snapshot();
+    size_t active_requests = 0;
+    {
+      std::lock_guard<std::mutex> request_guard(request_mutex_);
+      active_requests = requests_.size();
+    }
+    GAUGE_SET(xllm_service_v2_queued_requests, flow.queued_requests);
+    GAUGE_SET(xllm_service_v2_dispatched_requests, flow.dispatched_requests);
+    GAUGE_SET(xllm_service_v2_queued_prompt_tokens, flow.queued_prompt_tokens);
+    GAUGE_SET(xllm_service_v2_queued_bytes, flow.queued_bytes);
+    GAUGE_SET(xllm_service_v2_active_requests, active_requests);
+    GAUGE_SET(xllm_service_v2_observability_ring_events,
+              request_event_recorder_->size());
+
+    const observability::RecorderStats stats = request_event_recorder_->stats();
+    if (stats.dropped_capacity > previous_stats.dropped_capacity ||
+        stats.dropped_contention > previous_stats.dropped_contention ||
+        stats.invalid_events > previous_stats.invalid_events) {
+      LOG(WARNING) << "xllm_service_observability_loss "
+                   << "service_incarnation_id=" << service_incarnation_id_
+                   << " dropped_capacity=" << stats.dropped_capacity
+                   << " dropped_contention=" << stats.dropped_contention
+                   << " invalid_events=" << stats.invalid_events
+                   << " buffered=" << request_event_recorder_->size();
+    }
+    previous_stats = stats;
+
+    const uint64_t now_ms = monotonic_time_ms();
+    if (last_snapshot_ms == 0 ||
+        now_ms - last_snapshot_ms >=
+            static_cast<uint64_t>(
+                options_.observability_snapshot_interval_ms())) {
+      const provider::ReadinessSnapshot readiness = readiness_status();
+      const SaturationState saturation = flow_saturation_state();
+      const provider::KVRouteMetricsSnapshot kv = kv_route_metrics_.snapshot();
+      const uint64_t successful_terminals =
+          observability_successful_terminals_.load(std::memory_order_relaxed);
+      const uint64_t failed_terminals =
+          observability_failed_terminals_.load(std::memory_order_relaxed);
+      const uint64_t delivered_tokens =
+          observability_delivered_tokens_.load(std::memory_order_relaxed);
+      const uint64_t snapshot_window_ms =
+          last_snapshot_ms == 0 ? 0 : now_ms - last_snapshot_ms;
+      const std::optional<provider::ObservationSnapshot> observation =
+          instance_mgr_->engine_observation_snapshot(now_ms);
+      LOG(INFO)
+          << "xllm_service_cluster_snapshot "
+          << "service_incarnation_id=" << service_incarnation_id_
+          << " build_id=" << options_.observability_build_id()
+          << " readiness=" << provider::readiness_reason_name(readiness.reason)
+          << " accepting_new_requests=" << readiness.accepting_new_requests
+          << " saturation=" << saturation_state_name(saturation)
+          << " observation_mode="
+          << (observation.has_value() ? observation_mode_name(observation->mode)
+                                      : "UNAVAILABLE")
+          << " state_hard_stale_ratio="
+          << (observation.has_value() ? observation->hard_stale_ratio : 1.0)
+          << " engine_members=" << instance_mgr_->engine_member_count()
+          << " engine_states=" << instance_mgr_->engine_state_count()
+          << " engine_links=" << instance_mgr_->engine_link_count()
+          << " snapshot_window_ms=" << snapshot_window_ms
+          << " queued_requests=" << flow.queued_requests
+          << " dispatched_requests=" << flow.dispatched_requests
+          << " active_requests=" << active_requests
+          << " queued_prompt_tokens=" << flow.queued_prompt_tokens
+          << " queued_bytes=" << flow.queued_bytes
+          << " blind_probes_inflight=" << flow.blind_probes_inflight
+          << " successful_terminals=" << successful_terminals
+          << " successful_terminals_delta="
+          << (last_snapshot_ms == 0
+                  ? 0
+                  : counter_delta(successful_terminals,
+                                  previous_successful_terminals))
+          << " failed_terminals=" << failed_terminals
+          << " failed_terminals_delta="
+          << (last_snapshot_ms == 0
+                  ? 0
+                  : counter_delta(failed_terminals, previous_failed_terminals))
+          << " delivered_tokens=" << delivered_tokens
+          << " delivered_tokens_delta="
+          << (last_snapshot_ms == 0
+                  ? 0
+                  : counter_delta(delivered_tokens, previous_delivered_tokens))
+          << " kv_decisions=" << kv.decisions << " kv_decisions_delta="
+          << (last_snapshot_ms == 0
+                  ? 0
+                  : counter_delta(kv.decisions, previous_kv.decisions))
+          << " kv_shadow_decisions=" << kv.shadow_decisions
+          << " kv_enforced_decisions=" << kv.enforced_decisions
+          << " kv_predicted_prefill_hit_tokens="
+          << kv.predicted_prefill_hit_tokens
+          << " kv_predicted_decode_hit_tokens="
+          << kv.predicted_decode_hit_tokens
+          << " kv_predicted_transfer_bytes=" << kv.predicted_transfer_bytes
+          << " kv_shadow_prefill_host_hit_tokens_ub="
+          << kv.shadow_prefill_host_hit_tokens_ub
+          << " kv_shadow_prefill_ssd_hit_tokens_ub="
+          << kv.shadow_prefill_ssd_hit_tokens_ub
+          << " kv_shadow_prefill_store_hit_tokens_ub="
+          << kv.shadow_prefill_store_hit_tokens_ub
+          << " kv_shadow_decode_host_hit_tokens_ub="
+          << kv.shadow_decode_host_hit_tokens_ub
+          << " kv_shadow_decode_ssd_hit_tokens_ub="
+          << kv.shadow_decode_ssd_hit_tokens_ub
+          << " kv_shadow_decode_store_hit_tokens_ub="
+          << kv.shadow_decode_store_hit_tokens_ub
+          << " kv_actual_hit_tokens=" << kv.actual_hit_tokens
+          << " kv_actual_decode_hit_tokens=" << kv.actual_decode_hit_tokens
+          << " kv_skipped_transfer_bytes=" << kv.skipped_transfer_bytes
+          << " kv_overpredicted_requests=" << kv.overpredicted_requests
+          << " kv_decode_overpredicted_requests="
+          << kv.decode_overpredicted_requests
+          << " kv_admission_conflicts=" << kv.admission_conflicts
+          << " events_recorded=" << stats.recorded
+          << " events_dropped_capacity=" << stats.dropped_capacity
+          << " events_dropped_contention=" << stats.dropped_contention
+          << " events_invalid=" << stats.invalid_events
+          << " invalid_metric_samples=" << stats.invalid_metric_samples
+          << " duplicate_terminal_calls=" << stats.duplicate_terminal_calls;
+      previous_successful_terminals = successful_terminals;
+      previous_failed_terminals = failed_terminals;
+      previous_delivered_tokens = delivered_tokens;
+      previous_kv = kv;
+      last_snapshot_ms = now_ms;
+    }
+    wait_lock.lock();
+  }
+  wait_lock.unlock();
+
+  while (export_one_batch() > 0) {
   }
 }
 
@@ -2696,6 +3182,14 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
     }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
+    record_request_event(request,
+                         xllm::proto::REQUEST_EVENT_TYPE_INGRESS,
+                         xllm::proto::EVENT_RESULT_ACCEPTED,
+                         xllm::proto::ERROR_STAGE_NONE,
+                         xllm::proto::EVENT_REASON_NONE,
+                         "",
+                         "",
+                         elapsed_ns_since(request->trace_ingress_time));
   }
 
   {
@@ -2807,6 +3301,14 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
     }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
+    record_request_event(request,
+                         xllm::proto::REQUEST_EVENT_TYPE_INGRESS,
+                         xllm::proto::EVENT_RESULT_ACCEPTED,
+                         xllm::proto::ERROR_STAGE_NONE,
+                         xllm::proto::EVENT_REASON_NONE,
+                         "",
+                         "",
+                         elapsed_ns_since(request->trace_ingress_time));
   }
 
   {
@@ -2890,6 +3392,14 @@ bool Scheduler::record_new_request(
     }
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
+    record_request_event(request,
+                         xllm::proto::REQUEST_EVENT_TYPE_INGRESS,
+                         xllm::proto::EVENT_RESULT_ACCEPTED,
+                         xllm::proto::ERROR_STAGE_NONE,
+                         xllm::proto::EVENT_REASON_NONE,
+                         "",
+                         "",
+                         elapsed_ns_since(request->trace_ingress_time));
   }
 
   {
@@ -2932,6 +3442,15 @@ void Scheduler::finish_request(const std::string& service_request_id,
   flow_dispatch_cv_.notify_one();
 
   if (request != nullptr) {
+    if (!request->trace_terminal_recorded.load(std::memory_order_acquire)) {
+      record_request_terminal(request,
+                              error ? xllm::proto::EVENT_RESULT_FAILED
+                                    : xllm::proto::EVENT_RESULT_SUCCEEDED,
+                              error ? xllm::proto::ERROR_STAGE_OUTPUT
+                                    : xllm::proto::ERROR_STAGE_NONE,
+                              error ? xllm::proto::EVENT_REASON_PROVIDER_ERROR
+                                    : xllm::proto::EVENT_REASON_NONE);
+    }
     record_kv_route_actual(request, nullptr);
     if (error) {
       instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
@@ -3078,6 +3597,10 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
     if (request->output_event_sequencer != nullptr) {
       request->output_event_sequencer->close();
     }
+    record_request_terminal(request,
+                            xllm::proto::EVENT_RESULT_CANCELLED,
+                            xllm::proto::ERROR_STAGE_OUTPUT,
+                            xllm::proto::EVENT_REASON_CANCELLED);
     finish_request(service_request_id, /*error=*/true);
     return GenerationDeliveryResult(
         /*code=*/proto::GENERATION_DELIVERY_CODE_CLIENT_DISCONNECTED,
@@ -3123,6 +3646,8 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
   } else {
     sequence_result.ready_outputs.emplace_back(request_output);
   }
+  MULTI_COUNTER_INC(xllm_service_v2_output_sequence_total,
+                    output_sequence_status_name(sequence_result.status));
 
   if (sequence_result.status == OutputEventSequenceStatus::kBuffered ||
       sequence_result.status == OutputEventSequenceStatus::kDuplicate) {
@@ -3240,6 +3765,11 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
           const bool status_error =
               ready_output.status.has_value() && !ready_output.status->ok();
           const bool finished = ready_output.finished;
+          const std::optional<uint64_t> cumulative_output_tokens =
+              ready_output.usage.has_value()
+                  ? std::optional<uint64_t>(
+                        ready_output.usage->num_generated_tokens)
+                  : std::nullopt;
           const bool crosses_response_boundary =
               request->stream || !ready_output.finished_on_prefill_instance ||
               request->execution_mode ==
@@ -3251,6 +3781,7 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
             return;
           }
           if (crosses_response_boundary) {
+            record_response_boundary(request, cumulative_output_tokens);
             request->first_token_emitted.store(true, std::memory_order_release);
           }
           if (finished) {
@@ -3323,6 +3854,33 @@ void Scheduler::record_kv_route_actual(const std::shared_ptr<Request>& request,
     }
   }
   kv_route_metrics_.record_actual(*request->kv_route_observation, actual);
+  if (!VLOG_IS_ON(1)) {
+    return;
+  }
+  xllm::proto::RequestEvent event = make_request_event_base(request);
+  event.set_event_type(xllm::proto::REQUEST_EVENT_TYPE_KV_TRANSFER);
+  event.set_result(xllm::proto::EVENT_RESULT_SUCCEEDED);
+  event.set_error_stage(xllm::proto::ERROR_STAGE_NONE);
+  event.set_reason(xllm::proto::EVENT_REASON_NONE);
+  event.set_stage_duration_validity(
+      xllm::proto::METRIC_VALIDITY_NOT_APPLICABLE);
+  event.set_stage_duration_invalid_reason(
+      xllm::proto::INVALID_METRIC_REASON_NONE);
+  if (actual.actual_hit_tokens.has_value()) {
+    event.mutable_workload()->set_actual_prefill_hit_tokens(
+        *actual.actual_hit_tokens);
+  }
+  if (actual.actual_decode_hit_tokens.has_value()) {
+    event.mutable_workload()->set_actual_decode_hit_tokens(
+        *actual.actual_decode_hit_tokens);
+  }
+  if (actual.skipped_transfer_bytes.has_value()) {
+    event.mutable_workload()->set_skipped_transfer_bytes(
+        *actual.skipped_transfer_bytes);
+  }
+  MULTI_COUNTER_INC(xllm_service_v2_request_lifecycle_total,
+                    xllm::proto::RequestEventType_Name(event.event_type()));
+  submit_request_event(std::move(event));
 }
 
 provider::KVRouteMetricsSnapshot Scheduler::kv_route_metrics_snapshot() const {
@@ -3341,6 +3899,320 @@ void Scheduler::update_token_latency_metrics(
   } else {
     HISTOGRAM_OBSERVE(inter_token_latency_milliseconds, tbt_milliseconds);
   }
+}
+
+xllm::proto::RequestEvent Scheduler::make_request_event_base(
+    const std::shared_ptr<Request>& request) {
+  xllm::proto::RequestEvent event;
+  event.set_schema_version(observability::kRequestEventSchemaVersion);
+  *event.mutable_correlation() = request->correlation;
+  event.set_event_seq(
+      request->trace_next_event_seq.fetch_add(1, std::memory_order_relaxed));
+  event.set_owner_role(xllm::proto::EVENT_OWNER_ROLE_SERVICE);
+  event.set_owner_incarnation_id(service_incarnation_id_);
+  event.set_build_id(options_.observability_build_id());
+  if (!request->token_ids.empty()) {
+    event.mutable_workload()->set_prompt_tokens(request->token_ids.size());
+  }
+  if (request->canonical_request.has_value()) {
+    event.mutable_workload()->set_effective_max_new_tokens(
+        request->canonical_request->effective_max_new_tokens());
+  }
+  if (request->kv_route_observation.has_value()) {
+    event.mutable_workload()->set_predicted_prefill_hit_tokens(
+        request->kv_route_observation->predicted_prefill_hit_tokens);
+    event.mutable_workload()->set_predicted_decode_hit_tokens(
+        request->kv_route_observation->predicted_decode_hit_tokens);
+    event.mutable_workload()->set_predicted_transfer_bytes(
+        request->kv_route_observation->predicted_transfer_bytes);
+    event.mutable_workload()->set_shadow_prefill_host_hit_tokens_ub(
+        request->kv_route_observation->shadow_prefill_host_hit_tokens_ub);
+    event.mutable_workload()->set_shadow_prefill_ssd_hit_tokens_ub(
+        request->kv_route_observation->shadow_prefill_ssd_hit_tokens_ub);
+    event.mutable_workload()->set_shadow_prefill_store_hit_tokens_ub(
+        request->kv_route_observation->shadow_prefill_store_hit_tokens_ub);
+    event.mutable_workload()->set_shadow_decode_host_hit_tokens_ub(
+        request->kv_route_observation->shadow_decode_host_hit_tokens_ub);
+    event.mutable_workload()->set_shadow_decode_ssd_hit_tokens_ub(
+        request->kv_route_observation->shadow_decode_ssd_hit_tokens_ub);
+    event.mutable_workload()->set_shadow_decode_store_hit_tokens_ub(
+        request->kv_route_observation->shadow_decode_store_hit_tokens_ub);
+  }
+  const uint64_t output_tokens =
+      request->trace_output_tokens.load(std::memory_order_relaxed);
+  if (output_tokens > 0) {
+    event.mutable_workload()->set_output_tokens(output_tokens);
+  }
+
+  const xllm::proto::ProviderDescriptor* descriptor = nullptr;
+  if (request->prefill_provider_descriptor.has_value()) {
+    descriptor = &*request->prefill_provider_descriptor;
+  } else if (request->decode_provider_descriptor.has_value()) {
+    descriptor = &*request->decode_provider_descriptor;
+  }
+  if (descriptor != nullptr &&
+      request->execution_mode != xllm::proto::EXECUTION_MODE_UNSPECIFIED) {
+    xllm::proto::RuntimeProfileIdentity* profile =
+        event.mutable_runtime_profile();
+    profile->set_provider_id(descriptor->identity().provider_id());
+    profile->set_runtime_version(descriptor->identity().runtime_version());
+    profile->set_plugin_version(descriptor->identity().plugin_version());
+    profile->set_hardware_runtime_version(
+        descriptor->identity().hardware_runtime_version());
+    profile->set_profile_digest(descriptor->profile_digest());
+    profile->set_model_revision(descriptor->model().model_revision());
+    profile->set_execution_mode(request->execution_mode);
+  }
+  return event;
+}
+
+void Scheduler::submit_request_event(xllm::proto::RequestEvent event) {
+  const observability::RecordStatus status =
+      request_event_recorder_->record(std::move(event));
+  MULTI_COUNTER_INC(xllm_service_v2_observability_events_total,
+                    observability::record_status_name(status));
+}
+
+void Scheduler::record_request_event(
+    const std::shared_ptr<Request>& request,
+    xllm::proto::RequestEventType event_type,
+    xllm::proto::EventResult result,
+    xllm::proto::ErrorStage error_stage,
+    xllm::proto::EventReason reason,
+    const std::string& target_engine_uid,
+    const std::string& target_incarnation_id,
+    std::optional<uint64_t> stage_duration_ns) {
+  if (request == nullptr) {
+    return;
+  }
+  MULTI_COUNTER_INC(xllm_service_v2_request_lifecycle_total,
+                    xllm::proto::RequestEventType_Name(event_type));
+  if (result == xllm::proto::EVENT_RESULT_REJECTED ||
+      result == xllm::proto::EVENT_RESULT_FAILED ||
+      result == xllm::proto::EVENT_RESULT_CANCELLED ||
+      result == xllm::proto::EVENT_RESULT_DEADLINE_EXCEEDED) {
+    MULTI_COUNTER_INC(xllm_service_v2_request_failure_total,
+                      xllm::proto::EventReason_Name(reason));
+  }
+  // Match the repository's VLOG convention: low-cardinality counters remain
+  // always on, while per-request protobuf construction and ring traffic are
+  // paid only when detailed tracing is explicitly enabled with --v=1.
+  if (!VLOG_IS_ON(1)) {
+    return;
+  }
+  xllm::proto::RequestEvent event = make_request_event_base(request);
+  event.set_event_type(event_type);
+  event.set_result(result);
+  event.set_error_stage(error_stage);
+  event.set_reason(reason);
+  event.set_target_engine_uid(target_engine_uid);
+  event.set_target_incarnation_id(target_incarnation_id);
+  if (stage_duration_ns.has_value()) {
+    event.set_stage_duration_ns(*stage_duration_ns);
+    event.set_stage_duration_validity(xllm::proto::METRIC_VALIDITY_VALID);
+  } else {
+    event.set_stage_duration_validity(
+        xllm::proto::METRIC_VALIDITY_NOT_APPLICABLE);
+  }
+  event.set_stage_duration_invalid_reason(
+      xllm::proto::INVALID_METRIC_REASON_NONE);
+  submit_request_event(std::move(event));
+}
+
+void Scheduler::record_request_metric(const std::shared_ptr<Request>& request,
+                                      xllm::proto::RequestMetric metric) {
+  if (request == nullptr) {
+    return;
+  }
+  if (!VLOG_IS_ON(1)) {
+    return;
+  }
+  xllm::proto::RequestEvent event = make_request_event_base(request);
+  event.set_event_type(xllm::proto::REQUEST_EVENT_TYPE_METRIC_SAMPLE);
+  event.set_result(xllm::proto::EVENT_RESULT_SUCCEEDED);
+  event.set_error_stage(xllm::proto::ERROR_STAGE_NONE);
+  event.set_reason(xllm::proto::EVENT_REASON_NONE);
+  event.set_stage_duration_validity(
+      xllm::proto::METRIC_VALIDITY_NOT_APPLICABLE);
+  event.set_stage_duration_invalid_reason(
+      xllm::proto::INVALID_METRIC_REASON_NONE);
+  *event.mutable_metric() = std::move(metric);
+  submit_request_event(std::move(event));
+}
+
+void Scheduler::record_response_boundary(
+    const std::shared_ptr<Request>& request,
+    std::optional<uint64_t> cumulative_output_tokens) {
+  const int64_t now_ns = monotonic_time_ns();
+  if (!cumulative_output_tokens.has_value() || *cumulative_output_tokens == 0) {
+    // A response chunk is not a token. Without the Provider's cumulative
+    // generated-token count, TTFT/ITL/TPOT cannot be reported truthfully.
+    return;
+  }
+  uint64_t observed =
+      request->trace_output_tokens.load(std::memory_order_acquire);
+  while (observed < *cumulative_output_tokens &&
+         !request->trace_output_tokens.compare_exchange_weak(
+             observed,
+             *cumulative_output_tokens,
+             std::memory_order_acq_rel,
+             std::memory_order_acquire)) {
+  }
+  if (observed >= *cumulative_output_tokens) {
+    // Terminal/control chunks can repeat the last cumulative usage. They do
+    // not define a new inter-token boundary.
+    return;
+  }
+  const uint64_t output_tokens = *cumulative_output_tokens;
+  int64_t expected = 0;
+  const bool first = request->trace_first_response_ns.compare_exchange_strong(
+      expected, now_ns, std::memory_order_acq_rel, std::memory_order_acquire);
+  const int64_t previous_ns = request->trace_last_response_ns.exchange(
+      now_ns, std::memory_order_acq_rel);
+  if (first) {
+    request->trace_first_response_output_tokens.store(
+        output_tokens, std::memory_order_release);
+  }
+
+  xllm::proto::RequestMetric metric;
+  metric.set_measurement_boundary("service_response_write");
+  metric.set_output_tokens(output_tokens);
+  metric.set_invalid_reason(xllm::proto::INVALID_METRIC_REASON_NONE);
+  const std::string mode = execution_mode_label(request->execution_mode);
+  if (first) {
+    const std::optional<uint64_t> ttft =
+        elapsed_ns_since(request->trace_ingress_time);
+    metric.set_kind(xllm::proto::REQUEST_METRIC_KIND_SERVER_TTFT);
+    if (ttft.has_value()) {
+      metric.set_validity(xllm::proto::METRIC_VALIDITY_VALID);
+      metric.set_duration_ns(*ttft);
+      MULTI_HISTOGRAM_OBSERVE(xllm_service_v2_ttft_milliseconds,
+                              mode,
+                              static_cast<int64_t>(*ttft / 1000000));
+    } else {
+      metric.set_validity(xllm::proto::METRIC_VALIDITY_INVALID);
+      metric.set_invalid_reason(
+          xllm::proto::INVALID_METRIC_REASON_CLOCK_REGRESSION);
+    }
+    record_request_metric(request, metric);
+    record_request_event(request,
+                         xllm::proto::REQUEST_EVENT_TYPE_FIRST_TOKEN_FLUSH,
+                         xllm::proto::EVENT_RESULT_SUCCEEDED,
+                         xllm::proto::ERROR_STAGE_NONE,
+                         xllm::proto::EVENT_REASON_NONE,
+                         "",
+                         "",
+                         ttft);
+    return;
+  }
+
+  metric.set_kind(xllm::proto::REQUEST_METRIC_KIND_SERVER_ITL);
+  if (previous_ns > 0 && now_ns >= previous_ns) {
+    metric.set_validity(xllm::proto::METRIC_VALIDITY_VALID);
+    metric.set_duration_ns(static_cast<uint64_t>(now_ns - previous_ns));
+  } else {
+    metric.set_validity(xllm::proto::METRIC_VALIDITY_INVALID);
+    metric.set_invalid_reason(
+        xllm::proto::INVALID_METRIC_REASON_CLOCK_REGRESSION);
+  }
+  record_request_metric(request, std::move(metric));
+}
+
+void Scheduler::record_request_terminal(const std::shared_ptr<Request>& request,
+                                        xllm::proto::EventResult result,
+                                        xllm::proto::ErrorStage error_stage,
+                                        xllm::proto::EventReason reason) {
+  bool expected = false;
+  if (request == nullptr ||
+      !request->trace_terminal_recorded.compare_exchange_strong(
+          expected,
+          true,
+          std::memory_order_acq_rel,
+          std::memory_order_acquire)) {
+    if (request != nullptr) {
+      request_event_recorder_->note_duplicate_terminal();
+      MULTI_COUNTER_INC(xllm_service_v2_observability_events_total,
+                        "duplicate_terminal");
+    }
+    return;
+  }
+  MULTI_COUNTER_INC(xllm_service_v2_request_terminal_total,
+                    xllm::proto::EventResult_Name(result));
+  if (result == xllm::proto::EVENT_RESULT_SUCCEEDED) {
+    saturated_atomic_add(&observability_successful_terminals_, 1);
+  } else {
+    saturated_atomic_add(&observability_failed_terminals_, 1);
+  }
+  saturated_atomic_add(
+      &observability_delivered_tokens_,
+      request->trace_output_tokens.load(std::memory_order_acquire));
+  const std::optional<uint64_t> e2e =
+      elapsed_ns_since(request->trace_ingress_time);
+  record_request_event(request,
+                       xllm::proto::REQUEST_EVENT_TYPE_REQUEST_TERMINAL,
+                       result,
+                       error_stage,
+                       reason,
+                       "",
+                       "",
+                       e2e);
+
+  xllm::proto::RequestMetric metric;
+  metric.set_kind(xllm::proto::REQUEST_METRIC_KIND_SERVER_E2E);
+  metric.set_measurement_boundary("service_request_terminal");
+  metric.set_output_tokens(
+      request->trace_output_tokens.load(std::memory_order_acquire));
+  if (e2e.has_value()) {
+    metric.set_validity(xllm::proto::METRIC_VALIDITY_VALID);
+    metric.set_invalid_reason(xllm::proto::INVALID_METRIC_REASON_NONE);
+    metric.set_duration_ns(*e2e);
+    MULTI_HISTOGRAM_OBSERVE(xllm_service_v2_e2e_milliseconds,
+                            execution_mode_label(request->execution_mode),
+                            static_cast<int64_t>(*e2e / 1000000));
+  } else {
+    metric.set_validity(xllm::proto::METRIC_VALIDITY_INVALID);
+    metric.set_invalid_reason(
+        xllm::proto::INVALID_METRIC_REASON_CLOCK_REGRESSION);
+  }
+  record_request_metric(request, std::move(metric));
+
+  const uint64_t first_response_output_tokens =
+      request->trace_first_response_output_tokens.load(
+          std::memory_order_acquire);
+  const uint64_t output_tokens =
+      request->trace_output_tokens.load(std::memory_order_acquire);
+  const int64_t first_ns =
+      request->trace_first_response_ns.load(std::memory_order_acquire);
+  const int64_t last_ns =
+      request->trace_last_response_ns.load(std::memory_order_acquire);
+  metric.Clear();
+  metric.set_kind(xllm::proto::REQUEST_METRIC_KIND_SERVER_TPOT);
+  metric.set_measurement_boundary("service_response_write");
+  metric.set_output_tokens(output_tokens);
+  if (output_tokens <= first_response_output_tokens) {
+    metric.set_validity(xllm::proto::METRIC_VALIDITY_NOT_APPLICABLE);
+    metric.set_invalid_reason(
+        xllm::proto::INVALID_METRIC_REASON_INSUFFICIENT_OUTPUT_TOKENS);
+  } else if (last_ns < first_ns || first_ns <= 0) {
+    metric.set_validity(xllm::proto::METRIC_VALIDITY_INVALID);
+    metric.set_invalid_reason(
+        xllm::proto::INVALID_METRIC_REASON_CLOCK_REGRESSION);
+  } else {
+    const uint64_t tpot_ns = static_cast<uint64_t>(last_ns - first_ns) /
+                             (output_tokens - first_response_output_tokens);
+    if (tpot_ns == 0) {
+      metric.set_validity(xllm::proto::METRIC_VALIDITY_INVALID);
+      metric.set_invalid_reason(xllm::proto::INVALID_METRIC_REASON_ZERO_TPOT);
+    } else {
+      metric.set_validity(xllm::proto::METRIC_VALIDITY_VALID);
+      metric.set_invalid_reason(xllm::proto::INVALID_METRIC_REASON_NONE);
+      metric.set_duration_ns(tpot_ns);
+      MULTI_HISTOGRAM_OBSERVE(xllm_service_v2_tpot_milliseconds,
+                              execution_mode_label(request->execution_mode),
+                              static_cast<int64_t>(tpot_ns / 1000000));
+    }
+  }
+  record_request_metric(request, std::move(metric));
 }
 
 bool Scheduler::has_available_instances() const {

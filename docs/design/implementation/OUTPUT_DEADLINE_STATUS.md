@@ -18,7 +18,7 @@ limitations under the License.
 ## 基本信息
 
 - Owner：xLLM Service V2
-- 状态：PARTIAL
+- 状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
 - 关联设计/Requirement ID：G2、02 §3.2/§5.1/§7/§11/§14.1、F21、F33、F39
 - 最近验证基线：xLLM 与 xllm-service `service_dev` 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
@@ -32,13 +32,11 @@ limitations under the License.
 | xLLM Service | `REMOTE_PD` | 缺口 watchdog 和失败收敛 | CPU_VERIFIED | steady clock、弱引用 watchlist、seq=0 同 incarnation Query 精确恢复；Query 失败后仅在首输出、attempt、device-time 和剩余 deadline 四重预算允许时收敛旧 D、递增 attempt 并重选 P/D；迟到旧 attempt 被隔离 |
 | xLLM Service + xLLM Native | `REMOTE_PD` | 请求截止时间 | CPU_VERIFIED | Chat/Completion 显式 remaining duration 或 Service 默认 300 s 均转换为逐跳本地 monotonic deadline；Service 有界 deadline/断连队列、P/D hop 重算、D reservation 截断和 Engine 调度边界停止均已接生产路径并完成 CPU 编译/单测 |
 | Legacy / 非远程 P-D | 既有输出路径 | 全部 | COMPATIBLE | 未安装 V2 sequencer 时维持原有单发送方亲和线程路径；新增 wire 字段为 additive |
-| `LOCAL_PREFILL_DECODE` / `PREFILL_ONLY` | xLLM V2 首发模式 | 全部 | NOT_IMPLEMENTED | 尚未接对应生产输出源和统一 deadline/watchdog |
+| `LOCAL_PREFILL_DECODE` / `PREFILL_ONLY` | xLLM V2 首发模式 | 全部 | CPU_VERIFIED / NPU_PENDING | mode-specific 输出、commit/terminal、统一 deadline/watchdog 与稳定拒绝已接入 |
 | vLLM-Ascend `AGGREGATED` | Agent HTTP/SSE | contract v1 | CPU_VERIFIED / NPU_PENDING | Service 传播剩余 deadline，Agent 本地 monotonic expiry/abort 与流终态接线完成；真实 SSE/NPU 资源释放待验证 |
 
-这里的 `CPU_VERIFIED` 限定在 xLLM Native `REMOTE_PD` 的 CPU 控制面、真实本地 brpc
-loopback、Torch CPU 持有语义和生产编译；不代表 NPU/RDMA 数据面。G2 文档整体仍因
-xLLM local/prefill-only mode、统一 Gateway/profile 策略和 NPU 故障矩阵未完成而保持
-`PARTIAL`。
+这里的 `CPU_VERIFIED` 覆盖 xLLM Native 三种首发模式与 vLLM AGGREGATED 的 CPU
+控制面、本地 brpc loopback、Torch CPU 持有语义和生产编译；不代表 NPU/RDMA 数据面。
 
 ## 实现
 
@@ -140,9 +138,9 @@ xLLM local/prefill-only mode、统一 Gateway/profile 策略和 NPU 故障矩阵
   零容量、非正 timer、Query timeout 大于 gap timeout、deadline 零容量/零批次、
   scan interval 大于 gap timeout、不完整的启用重试预算，或 retry budget 与 margin 之和
   超过 gap timeout。
-- 明确不支持范围：Gateway、租户策略和 profile 尚未提供统一 deadline 策略；xLLM
-  local/prefill-only mode 尚未接入；attempt 替换尚缺包含真实 Scheduler/InstanceMgr 和两组
-  Engine 的完整多进程故障 loopback；配置尚未接 profile；无 sanitizer 全链、NPU、RDMA
+- 明确不支持范围：Gateway/profile 尚未提供动态 deadline 策略；仓库已有保守默认值和
+  逐跳本地 deadline。attempt 替换尚缺包含真实 Scheduler/InstanceMgr 和两组
+  Engine 的完整多进程硬件故障 loopback；无 NPU、RDMA
   或真实流式数据面故障矩阵结论。稳定 per-item delivery reason 已进入 additive wire，
   但对应 reason/重试/device-time 指标仍未完整接入观测系统。
 
@@ -166,7 +164,7 @@ xLLM local/prefill-only mode、统一 Gateway/profile 策略和 NPU 故障矩阵
 | G2 首输出前 attempt 替换 | 8 项 fake monotonic budget 覆盖次数、首输出、deadline、累计 device time、时钟回退、禁用和非法配置；production 接线覆盖旧 hold Cancel fence、递增 attempt、重选 P/D、sequencer/hold 重建、旧 attempt fencing 和 attempt-scoped dispatch failure | N/A，纯控制/RPC | 待真实两组 P/D 故障注入 | PASS（CPU 核心与生产接线）；完整 Scheduler loopback 待补 |
 | G2 主动客户端断连 | 5 项覆盖预留容量、幂等有界通知、弱引用回收、并发 exactly-once 和 close；brpc callback 接入 request watchdog 同一终止路径 | N/A，纯控制 | 待真实客户端断流与 KV 回收 | PASS（CPU 核心与生产接线） |
 | G2 Service 关键竞态稳定性 | 首事件 loopback、断连、重试预算、delivery wire 和 pre-dispatch hold 回滚共 22 项各重复 100 轮，共 2200 次 | N/A | N/A | PASS |
-| 双仓回归 | xLLM 默认 CPU 七目标 103/103，另有 output queue 14/14、protocol 14/14；Service pinned/override 均为 304/304；vLLM Agent/sidecar 60/60；Service 三个生产二进制 build/link verify | Torch CPU queue/所有权测试通过 | N/A | PASS |
+| 双仓回归 | xLLM 当前八目标 118/118，含 simulated HBM 12/12、Provider 9/9、RequestEvent 14/14，另有 output queue 既有 14/14；Service pinned/override 均为 380/380；vLLM Agent/sidecar 60/60；Service 三个生产二进制 build/link verify | Torch CPU queue/所有权测试通过 | N/A | PASS |
 
 ## 完善情况
 
@@ -191,9 +189,7 @@ xLLM local/prefill-only mode、统一 Gateway/profile 策略和 NPU 故障矩阵
   投递有 request/event/retained-byte 三重上限；watchdog 只扫描活跃 gap、断连或到期
   deadline，deadline/断连索引有 65,536 record 和 1,024/轮双上限。尚无 1 万并发请求
   扫描开销、buffer/deadline 水位、delivery/gap reason 和迟到事件的完整 metrics。
-- 当前 `REMOTE_PD` 与 vLLM `AGGREGATED` CPU_VERIFIED 之后仍需完成：完整 Scheduler
-  双 P/D fault loop、Gateway/profile deadline 策略、xLLM 其余 mode 接入、稳定
-  reason/预算指标和 profile
-  配置化；这些是后续大阶段，不回退本批 CPU 结论。
+- 当前所有 V2 首发 mode CPU_VERIFIED 后仍需完成：真实 Scheduler 双 P/D fault loop、
+  Gateway/profile 动态 deadline 策略和硬件容量校准；这些不回退本批 CPU 结论。
 - 达到 VERIFIED 仍需完成：NPU P→D 流式乱序、Cancel 丢失、Engine 重启/incarnation
   变化、deadline 资源释放和 1 万次故障门禁。

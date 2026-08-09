@@ -20,5 +20,6 @@ cc_library(
   SRCS
     request_event_recorder.cpp
   DEPS
+    nlohmann_json::nlohmann_json
     proto_xllm
 )

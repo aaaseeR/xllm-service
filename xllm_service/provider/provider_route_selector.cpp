@@ -48,7 +48,26 @@ bool descriptor_matches_candidate(const ProviderRouteCandidate& candidate) {
              candidate.provider_id &&
          candidate.descriptor->identity().engine_uid() ==
              candidate.engine_uid &&
-         candidate.descriptor->serving().role() == candidate.role;
+         candidate.descriptor->serving().role() == candidate.role &&
+         (candidate.model_revision.empty() ||
+          candidate.descriptor->model().model_revision() ==
+              candidate.model_revision);
+}
+
+bool model_matches(const ProviderRouteCandidate& candidate,
+                   const std::string& required_model_revision) {
+  if (required_model_revision.empty()) {
+    return true;
+  }
+  if (candidate.descriptor != nullptr) {
+    return candidate.descriptor->model().model_revision() ==
+           required_model_revision;
+  }
+  // Contract-v0 registrations do not publish a model identity and retain
+  // their historical BEST_EFFORT behavior. V2 multi-model guarantees apply
+  // only to immutable Descriptor-backed pools.
+  return candidate.model_revision.empty() ||
+         candidate.model_revision == required_model_revision;
 }
 
 bool remote_pd_compatible(const ProviderRouteCandidate& prefill,
@@ -79,7 +98,8 @@ bool ProviderRouteSelector::select(
     xllm::proto::ProviderId required_provider_id,
     uint64_t prefill_start_index,
     uint64_t decode_start_index,
-    ProviderRouteSelection* selection) {
+    ProviderRouteSelection* selection,
+    const std::string& required_model_revision) {
   if (selection == nullptr || prefill_candidates.empty()) {
     return false;
   }
@@ -95,6 +115,7 @@ bool ProviderRouteSelector::select(
     if (!prefill.schedulable || prefill.engine_uid.empty() ||
         !is_supported_provider(prefill.provider_id) ||
         !provider_matches(prefill.provider_id, required_provider_id) ||
+        !model_matches(prefill, required_model_revision) ||
         !descriptor_matches_candidate(prefill)) {
       continue;
     }
@@ -125,6 +146,7 @@ bool ProviderRouteSelector::select(
       if (!decode.schedulable || decode.engine_uid.empty() ||
           decode.role != xllm::proto::ENGINE_ROLE_DECODE ||
           decode.provider_id != prefill.provider_id ||
+          !model_matches(decode, required_model_revision) ||
           !descriptor_matches_candidate(decode) ||
           !remote_pd_compatible(prefill, decode)) {
         continue;
@@ -147,7 +169,8 @@ bool ProviderRouteSelector::select_candidates(
     xllm::proto::ProviderId required_provider_id,
     size_t max_selections,
     std::vector<ProviderRouteSelection>* selections,
-    bool* truncated) {
+    bool* truncated,
+    const std::string& required_model_revision) {
   if (selections == nullptr || truncated == nullptr || max_selections == 0) {
     return false;
   }
@@ -172,6 +195,7 @@ bool ProviderRouteSelector::select_candidates(
     if (!prefill.schedulable || prefill.engine_uid.empty() ||
         !is_supported_provider(prefill.provider_id) ||
         !provider_matches(prefill.provider_id, required_provider_id) ||
+        !model_matches(prefill, required_model_revision) ||
         !descriptor_matches_candidate(prefill)) {
       continue;
     }
@@ -189,6 +213,7 @@ bool ProviderRouteSelector::select_candidates(
       if (!decode.schedulable || decode.engine_uid.empty() ||
           decode.role != xllm::proto::ENGINE_ROLE_DECODE ||
           decode.provider_id != prefill.provider_id ||
+          !model_matches(decode, required_model_revision) ||
           !descriptor_matches_candidate(decode) ||
           !remote_pd_compatible(prefill, decode)) {
         continue;

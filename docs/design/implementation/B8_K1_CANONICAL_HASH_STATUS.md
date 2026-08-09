@@ -64,9 +64,12 @@ Master 启动时稳定拒绝，避免“配置已生效”的错误假设。
 
 ## 明确边界与后续门
 
-- 当前 descriptor namespace 使用 `single-tenant-default`。B10 必须把经鉴权得到的
-  tenant isolation salt 和动态 adapter identity 纳入每请求 hash domain；输入不可验证时
-  关闭该请求 KV credit，不能使用客户端自报值。
+- descriptor namespace 仍描述 Engine 不可变 cache semantics；B10 已在其上增加
+  `xkvns-request-v1` 的请求级派生域。默认不信任租户头，使用 request UID 派生域且
+  关闭跨请求 KV credit；只有部署显式开启 `--trusted_tenant_headers_enabled`、并保证
+  Gateway 已鉴权且替换租户/flow 头时，才以 tenant isolation domain 开放同租户复用。
+  派生函数已为可信动态 adapter identity 保留长度分隔输入；当前 V2 API 没有动态
+  LoRA/adapter 请求字段，因此该输入为空，未来增加时必须先接入该字段再开放 credit。
 - canonical Engine helper已支持逐 block `block_extra`；当前 Service V2 ingress 只对纯文本
   开放 K1。未来多模态 ingress 必须先生成相同的 block-local digest/range 才能开放 credit。
 - Direct legacy 请求产生的旧 hash 与 Service-routed canonical hash 位于不同键空间，最多

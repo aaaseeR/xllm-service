@@ -282,6 +282,13 @@ int main(int argc, char* argv[]) {
       .native_prefill_only_enabled(FLAGS_native_prefill_only_enabled)
       .native_prefill_only_output_token_cap(
           FLAGS_native_prefill_only_output_token_cap)
+      .trusted_tenant_headers_enabled(FLAGS_trusted_tenant_headers_enabled)
+      .observability_event_capacity(FLAGS_observability_event_capacity)
+      .observability_export_batch_size(FLAGS_observability_export_batch_size)
+      .observability_export_interval_ms(FLAGS_observability_export_interval_ms)
+      .observability_snapshot_interval_ms(
+          FLAGS_observability_snapshot_interval_ms)
+      .observability_build_id(FLAGS_observability_build_id)
       .xxh3_128bits_seed(FLAGS_xxh3_128bits_seed)
       .service_name(xllm_service::utils::get_local_ip() + ":" +
                     std::to_string(FLAGS_rpc_server_port))

@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace xllm_service::provider {
@@ -27,12 +28,14 @@ namespace {
 ProviderRouteCandidate candidate(const std::string& engine_uid,
                                  xllm::proto::ProviderId provider_id,
                                  xllm::proto::EngineRole role,
-                                 bool schedulable = true) {
+                                 bool schedulable = true,
+                                 std::string model_revision = "") {
   return ProviderRouteCandidate{
       .engine_uid = engine_uid,
       .provider_id = provider_id,
       .role = role,
       .schedulable = schedulable,
+      .model_revision = std::move(model_revision),
   };
 }
 
@@ -187,6 +190,52 @@ TEST(ProviderRouteSelectorTest, RejectsUnknownProvider) {
 
   EXPECT_FALSE(ProviderRouteSelector::select(
       prefills, {}, xllm::proto::PROVIDER_ID_UNSPECIFIED, 0, 0, &selection));
+}
+
+TEST(ProviderRouteSelectorTest, SelectsOnlyTheRequestedModelPool) {
+  const std::vector<ProviderRouteCandidate> prefills = {
+      candidate("model-a-p",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_PREFILL,
+                true,
+                "model-a"),
+      candidate("model-b-p",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_PREFILL,
+                true,
+                "model-b")};
+  const std::vector<ProviderRouteCandidate> decodes = {
+      candidate("model-a-d",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_DECODE,
+                true,
+                "model-a"),
+      candidate("model-b-d",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_DECODE,
+                true,
+                "model-b")};
+  ProviderRouteSelection selection;
+
+  ASSERT_TRUE(
+      ProviderRouteSelector::select(prefills,
+                                    decodes,
+                                    xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                                    0,
+                                    0,
+                                    &selection,
+                                    "model-b"));
+  EXPECT_EQ(selection.prefill_engine_uid, "model-b-p");
+  EXPECT_EQ(selection.decode_engine_uid, "model-b-d");
+
+  EXPECT_FALSE(
+      ProviderRouteSelector::select(prefills,
+                                    decodes,
+                                    xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                                    0,
+                                    0,
+                                    &selection,
+                                    "model-c"));
 }
 
 TEST(ProviderRouteSelectorTest, EnumeratesOnlyCompleteHardFilteredPlans) {

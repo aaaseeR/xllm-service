@@ -76,10 +76,26 @@ struct Request {
   // anonymous fallback is intentionally explicit and remains locally bounded.
   std::string tenant_id = "anonymous";
   std::string flow_id = "anonymous";
+  // KV reuse is enabled only when the isolation domain was injected by a
+  // trusted ingress. Otherwise the request UID is used as a one-request hash
+  // domain, preserving P/D correctness without cross-request cache credit.
+  std::string kv_isolation_domain;
+  bool kv_isolation_reusable = false;
   std::atomic<RequestQueueState> queue_state{RequestQueueState::RECEIVED};
   std::atomic<bool> dispatch_ready{false};
   std::optional<std::chrono::steady_clock::time_point> enqueue_time;
   FlowControlStatus admission_status = FlowControlStatus::INVALID_ARGUMENT;
+
+  // Service-owned monotonic timing and event sequencing. These fields never
+  // carry prompt/output content and remain valid across attempt replacement.
+  const std::chrono::steady_clock::time_point trace_ingress_time =
+      std::chrono::steady_clock::now();
+  std::atomic<uint64_t> trace_next_event_seq{0};
+  std::atomic<int64_t> trace_first_response_ns{0};
+  std::atomic<int64_t> trace_last_response_ns{0};
+  std::atomic<uint64_t> trace_first_response_output_tokens{0};
+  std::atomic<uint64_t> trace_output_tokens{0};
+  std::atomic<bool> trace_terminal_recorded{false};
 
   // input prompt
   std::string prompt;

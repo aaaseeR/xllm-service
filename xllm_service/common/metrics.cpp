@@ -26,9 +26,52 @@ DEFINE_COUNTER(attempt_control_rpc_failed_total,
 DEFINE_COUNTER(attempt_control_non_terminal_total,
                "Attempt-control replies that did not prove convergence");
 
+DEFINE_GAUGE(xllm_service_v2_queued_requests, "Current queued V2 requests");
+DEFINE_GAUGE(xllm_service_v2_dispatched_requests,
+             "Current dispatched V2 requests");
+DEFINE_GAUGE(xllm_service_v2_queued_prompt_tokens,
+             "Current queued V2 prompt tokens");
+DEFINE_GAUGE(xllm_service_v2_queued_bytes,
+             "Current queued normalized V2 request bytes");
+DEFINE_GAUGE(xllm_service_v2_active_requests,
+             "Current Service-owned request contexts");
+DEFINE_GAUGE(xllm_service_v2_observability_ring_events,
+             "Current buffered request events");
+
+DEFINE_MULTI_COUNTER(xllm_service_v2_request_lifecycle_total,
+                     "phase",
+                     "Request lifecycle transitions by bounded phase");
+DEFINE_MULTI_COUNTER(xllm_service_v2_request_failure_total,
+                     "reason",
+                     "Request failures by bounded protocol reason");
+DEFINE_MULTI_COUNTER(xllm_service_v2_request_terminal_total,
+                     "result",
+                     "Request terminal transitions by bounded result");
+DEFINE_MULTI_COUNTER(xllm_service_v2_execution_mode_total,
+                     "mode",
+                     "Dispatched requests by execution mode");
+DEFINE_MULTI_COUNTER(xllm_service_v2_observability_events_total,
+                     "outcome",
+                     "Request-event recorder outcomes");
+DEFINE_MULTI_COUNTER(xllm_service_v2_output_sequence_total,
+                     "outcome",
+                     "Output sequencing outcomes");
+
 // ttft latency histogram
 DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,
                  "Histogram of time to first token latency in milliseconds");
 // inter token latency histogram
 DEFINE_HISTOGRAM(inter_token_latency_milliseconds,
                  "Histogram of inter token latency in milliseconds");
+DEFINE_MULTI_HISTOGRAM(xllm_service_v2_queue_wait_milliseconds,
+                       "mode",
+                       "Service queue wait by execution mode");
+DEFINE_MULTI_HISTOGRAM(xllm_service_v2_ttft_milliseconds,
+                       "mode",
+                       "Server TTFT by execution mode");
+DEFINE_MULTI_HISTOGRAM(xllm_service_v2_tpot_milliseconds,
+                       "mode",
+                       "Server TPOT by execution mode");
+DEFINE_MULTI_HISTOGRAM(xllm_service_v2_e2e_milliseconds,
+                       "mode",
+                       "Server E2E by execution mode");

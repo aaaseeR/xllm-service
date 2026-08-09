@@ -33,6 +33,12 @@ KVRouteObservation observation() {
       .predicted_decode_hit_tokens = 32,
       .predicted_effective_prefill_tokens = 80,
       .predicted_transfer_bytes = 4096,
+      .shadow_prefill_host_hit_tokens_ub = 48,
+      .shadow_prefill_ssd_hit_tokens_ub = 32,
+      .shadow_prefill_store_hit_tokens_ub = 16,
+      .shadow_decode_host_hit_tokens_ub = 40,
+      .shadow_decode_ssd_hit_tokens_ub = 24,
+      .shadow_decode_store_hit_tokens_ub = 8,
   };
 }
 
@@ -58,6 +64,12 @@ TEST(KVRouteMetricsTest, SeparatesMissingFromValidZero) {
   const KVRouteMetricsSnapshot snapshot = metrics.snapshot();
   EXPECT_EQ(snapshot.decisions, 1u);
   EXPECT_EQ(snapshot.shadow_decisions, 1u);
+  EXPECT_EQ(snapshot.shadow_prefill_host_hit_tokens_ub, 48u);
+  EXPECT_EQ(snapshot.shadow_prefill_ssd_hit_tokens_ub, 32u);
+  EXPECT_EQ(snapshot.shadow_prefill_store_hit_tokens_ub, 16u);
+  EXPECT_EQ(snapshot.shadow_decode_host_hit_tokens_ub, 40u);
+  EXPECT_EQ(snapshot.shadow_decode_ssd_hit_tokens_ub, 24u);
+  EXPECT_EQ(snapshot.shadow_decode_store_hit_tokens_ub, 8u);
   EXPECT_EQ(snapshot.missing_prefix_observations, 1u);
   EXPECT_EQ(snapshot.missing_decode_prefix_observations, 1u);
   EXPECT_EQ(snapshot.actual_hit_tokens, 0u);

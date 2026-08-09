@@ -30,12 +30,38 @@ TEST(HashUtilTest, CanonicalNamespaceMatchesEngineGolden) {
       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   std::vector<int32_t> tokens(32);
   std::iota(tokens.begin(), tokens.end(), 0);
-  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> first_golden = {
-      0x0f, 0x25, 0xfd, 0x58, 0xe8, 0x7f, 0xcf, 0x41,
-      0x01, 0xe0, 0xa7, 0xd3, 0x2b, 0xd0, 0x89, 0xfa};
-  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> second_golden = {
-      0x22, 0x22, 0x5f, 0x22, 0xbb, 0xea, 0x94, 0x1b,
-      0x15, 0xe6, 0x4c, 0x1a, 0xfe, 0x9b, 0x6f, 0x04};
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> first_golden = {0x0f,
+                                                                         0x25,
+                                                                         0xfd,
+                                                                         0x58,
+                                                                         0xe8,
+                                                                         0x7f,
+                                                                         0xcf,
+                                                                         0x41,
+                                                                         0x01,
+                                                                         0xe0,
+                                                                         0xa7,
+                                                                         0xd3,
+                                                                         0x2b,
+                                                                         0xd0,
+                                                                         0x89,
+                                                                         0xfa};
+  const std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> second_golden = {0x22,
+                                                                          0x22,
+                                                                          0x5f,
+                                                                          0x22,
+                                                                          0xbb,
+                                                                          0xea,
+                                                                          0x94,
+                                                                          0x1b,
+                                                                          0x15,
+                                                                          0xe6,
+                                                                          0x4c,
+                                                                          0x1a,
+                                                                          0xfe,
+                                                                          0x9b,
+                                                                          0x6f,
+                                                                          0x04};
   std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> first{};
   std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> second{};
   const Slice<int32_t> token_slice(tokens);
@@ -64,6 +90,22 @@ TEST(HashUtilTest, CanonicalNamespaceMatchesEngineGolden) {
                     /*block_extra=*/{},
                     isolated.data());
   EXPECT_NE(isolated, first);
+}
+
+TEST(HashUtilTest, RequestNamespaceStrictlyIsolatesTenantAndAdapter) {
+  const std::string tenant_a =
+      derive_request_kv_namespace("base", "tenant-a", "");
+  const std::string tenant_a_repeat =
+      derive_request_kv_namespace("base", "tenant-a", "");
+  ASSERT_FALSE(tenant_a.empty());
+  EXPECT_EQ(tenant_a, tenant_a_repeat);
+  EXPECT_NE(tenant_a, derive_request_kv_namespace("base", "tenant-b", ""));
+  EXPECT_NE(tenant_a,
+            derive_request_kv_namespace("base", "tenant-a", "lora-a"));
+  EXPECT_NE(tenant_a, derive_request_kv_namespace("other", "tenant-a", ""));
+  EXPECT_TRUE(derive_request_kv_namespace("", "tenant-a", "").empty());
+  EXPECT_TRUE(
+      derive_request_kv_namespace("base", std::string(257, 'x'), "").empty());
 }
 
 }  // namespace

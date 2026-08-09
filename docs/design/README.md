@@ -2,7 +2,7 @@
 
 本目录是 xLLM Service 设计的唯一入口。xLLM Service 本身就是推理控制面，不是“上层 LLM Service”之外的另一个控制面，也不是无状态 HTTP Proxy。
 
-**当前现状：** 已有多副本接入、全量 Engine Registry 和 xLLM 逐请求动态 P/D，也有 vLLM HTTP 中继；但两者仍由全局 `backend_type` 分支拼接，vLLM-Ascend 还不是可参加统一调度的 Provider。选点、准入、deadline、故障隔离、资源回收和阶段观测也没有形成生产闭环。
+**当前实现状态：** V2-B0 至 B10 的双仓代码与 CPU/simulated HBM 门已完成：xLLM Native 与 vLLM-Ascend 通过统一 Provider Contract、Registry、State/KV Stream、逐请求计划、有界流控和故障框架运行；多模型、HBM KV-aware、执行模式与端到端观测已有 CPU 证据。真实 NPU、CANN/Link、真实多 Service/P/D/etcd 集群、长时 soak 和线上阈值校准仍待验证，因此当前状态是 `CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`，不是生产硬件 `VERIFIED`。
 
 **首个交付版本：V2。** 不设置独立 V1 产品版本。原 V1 规格中的 Provider SPI、State Stream、原子准入、deadline、fencing、资源回收和观测闭环全部并入 V2 基础能力；首发还必须同时完成 V2 的多模型、精确 HBM KV-aware、有界流控、优先级/租户公平和逐请求执行模式。xLLM Native 与 vLLM-Ascend 进入同一 Registry、State Stream、调度和故障框架，能力不足的执行模式 fail closed。
 

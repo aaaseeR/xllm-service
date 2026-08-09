@@ -18,7 +18,7 @@ limitations under the License.
 ## 基本信息
 
 - Owner：xLLM Service V2
-- 状态：PARTIAL
+- 状态：`CPU_VERIFIED / NPU_PENDING`
 - 关联设计/Requirement ID：G1、02 §3.2/§5.1/§5.3/§6、09 §2.1、F83
 - 最近验证基线：xLLM 与 xllm-service `service_dev` 本状态文档所在提交
 - 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
@@ -29,13 +29,13 @@ limitations under the License.
 | --- | --- | --- | --- | --- |
 | xLLM Native | `REMOTE_PD` | Engine attempt/resource protocol CPU core | CPU_VERIFIED | 20 个状态机测试 + 2 个 fingerprint 测试；并发幂等准入、cancel fence、TTL、GenerationCommit、output gate、tombstone 和精确释放通过 |
 | xLLM Native | `REMOTE_PD` | P/D 生产控制路径 | CPU_VERIFIED | 已接真实 D KV allocator/scheduler、P dispatch/handoff、四个 V2 RPC、P/D 输出门禁、Service hold、seq 重排、默认/显式 request deadline、有界输出投递、真实 brpc seq=0 Query 恢复和 Query 失败后的预算内 attempt 替换；尚缺 NPU 数据面故障矩阵 |
-| xLLM Native | `LOCAL_PREFILL_DECODE` / `PREFILL_ONLY` | 公共 attempt schema | PARTIAL | 状态和 reason 可表达；尚未接入对应 allocator/scheduler |
+| xLLM Native | `LOCAL_PREFILL_DECODE` / `PREFILL_ONLY` | mode-specific execution/hold/commit | CPU_VERIFIED / NPU_PENDING | capability 选择、输出上限、holder 与 commit 语义进入生产 Scheduler；真实 allocator/NPU 行为待验 |
 | xLLM Service | Provider-neutral 全模式 | `ExecutionResourceHold` / cleanup capacity | CPU_VERIFIED | 26 个测试；dispatch 前 token、pre-dispatch rollback、单 hold、候选收敛、旧 attempt/incarnation fencing、record/byte 上限和有界公平重试批次通过 |
-| xLLM Service + xLLM Native | `REMOTE_PD` | 生产 dispatch/输出/取消/进程终止 hold | PARTIAL | Request 直接持有 hold；选定 D incarnation 在 RPC 前安装；P commit、D terminal、Cancel fence、后台 Query/Cancel 重试和精确进程终止驱动收敛；暂缺 loopback race 测试与稳定错误映射 |
+| xLLM Service + xLLM Native | `REMOTE_PD` | 生产 dispatch/输出/取消/进程终止 hold | CPU_VERIFIED / NPU_PENDING | Request 直接持有 hold；dispatch 前安装；P commit、D terminal、Cancel fence、后台 Query/Cancel、首事件 loopback 和稳定错误映射闭环 |
 | vLLM-Ascend | `AGGREGATED` | strict Agent + Service hold | CPU_VERIFIED / NPU_PENDING | dispatch 前安装单 holder hold；Submit/Query/Cancel、cancel-before-create、deadline 和 cleanup 收敛已完成 CPU loopback |
 
-这里的 `CPU_VERIFIED` 只描述可独立运行的协议核心，不表示对应生产 mode 已开放。
-整个 G1 在生产调用链接入和真实 allocator 完成前保持 `PARTIAL`。
+这里的 `CPU_VERIFIED` 表示公共协议和所有 V2 首发 mode 的生产控制路径已接入并通过
+CPU/simulated HBM 门；不表示真实 NPU allocator、DMA/Link 或故障矩阵已验证。
 
 ## 实现
 
@@ -112,9 +112,9 @@ limitations under the License.
   `SERVICE_CLEANUP_CAPACITY_RETRYABLE` 映射；当前 5 分钟 Engine
   reservation 上限已在显式 request deadline 存在时截断，但 30 秒 transfer-start TTL
   尚未从 deadline/profile 推导；
-  `BeginTransfer` 在 P 接受 admission 后触发，尚未绑定首个 DMA primitive；未实现
-  local production hold 和 deadline，也未提供 NPU、RDMA 或端到端故障注入
-  结论。REMOTE_PD output seq/reorder、gap watchdog 和默认/显式 request deadline 已进入
+  `BeginTransfer` 在 P 接受 admission 后触发，真实 DMA primitive 仍由 NPU backend
+  验证；local/prefill-only 已使用 mode-specific holder/commit/deadline，不提供 NPU、
+  RDMA 或端到端硬件故障注入结论。REMOTE_PD output seq/reorder、gap watchdog 和默认/显式 request deadline 已进入
   G2 生产路径，详细边界见 `OUTPUT_DEADLINE_STATUS.md`。
 
 ## 需求与测试追踪
@@ -139,7 +139,7 @@ limitations under the License.
 | 内存/未定义行为 | GCC 13 ASan+UBSan 定向运行 Engine 17 项与 Service hold 19 项 | N/A | N/A | PASS；Clang sanitizer runtime 未随 ARM64 镜像安装 |
 | deadline 约束 reservation/调度 | optional wire、fake monotonic、Service 有界并发索引；D admission/reservation cap、P 三个边界和六类 Engine 调度路径生产 TU 以 `-Werror` 编译 | 公共测试目标使用 Torch CPU；无 tensor 数值变化 | 待真实 KV/transfer | PASS（CPU 核心与生产编译）；loopback 待补 |
 | G1/G2 exact 首事件保留与恢复 | xLLM adapter/protocol/4 MiB/field 24；Service Query state、D/P incarnation、attempt、seq、payload 和 index fail-closed；7 项真实 brpc loopback 覆盖并发、timeout、D restart 和 live race | adapter 目标链接 Torch CPU；无 tensor 数值变化 | 待 P/D 数据面故障注入 | PASS（CPU loopback） |
-| 双仓回归 | xLLM 默认七目标 103/103，另有 queue 14/14、protocol 14/14；Service pinned/override 均为 304/304；vLLM Agent/sidecar 60/60；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | 本批不修改 KV/HBM 数据面，simulated HBM 不适用 | PASS |
+| 双仓回归 | xLLM 当前八目标 118/118，含 simulated HBM 12/12、Provider 9/9、RequestEvent 14/14，另有 queue 既有 14/14；Service pinned/override 均为 380/380；vLLM Agent/sidecar 60/60；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | simulated HBM 证明固定容量/所有权/地址/内容与并发回收，不代表真实 HBM | PASS |
 
 ## 完善情况
 
@@ -164,9 +164,5 @@ limitations under the License.
   分配、迁移、淘汰或内容时，必须增加 simulated HBM 的固定容量、block 地址/所有权、
   内容/checksum、OOM/碎片和故障回收测试；本批成员租约与 EngineState 协议修复不触碰
   KV/HBM 数据面，因此该层为不适用，而非已验证。
-- 达到全 G1 CPU_VERIFIED 仍需完成：cleanup worker metrics 与
-  reservation/deadline profile 配置化和 Gateway deadline 策略；补齐 CPU
-  多进程端到端 cleanup/deadline/fault loop；接入 local hold，并确保所有开放 mode
-  共用一套权威资源账本。
 - 达到 VERIFIED 仍需完成：NPU KV/credit/slot 原子分配、P→D transfer、取消/超时/
   进程终止故障矩阵、1 万次故障门禁和容量/性能发布证据。

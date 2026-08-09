@@ -56,10 +56,12 @@ class InstanceMgr final {
 
   InstanceMetaInfo get_instance_info(const std::string& instance_name);
 
-  bool get_next_provider(xllm::proto::ProviderId* provider_id);
+  bool get_next_provider(const std::string& model_revision,
+                         xllm::proto::ProviderId* provider_id);
 
   bool get_next_instance_pair(Routing* routing,
-                              xllm::proto::ProviderId provider_id);
+                              xllm::proto::ProviderId provider_id,
+                              const std::string& model_revision);
 
   std::vector<std::string> get_static_decode_list(
       const std::string& instance_name);
@@ -117,6 +119,9 @@ class InstanceMgr final {
   bool has_accepted_engine_state_full_snapshot() const;
   std::optional<provider::ObservationSnapshot> engine_observation_snapshot(
       uint64_t receiver_monotonic_ms) const;
+  size_t engine_member_count() const;
+  size_t engine_state_count() const;
+  size_t engine_link_count() const;
 
   void require_provider_link_recheck();
 

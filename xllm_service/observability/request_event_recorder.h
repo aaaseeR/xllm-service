@@ -50,6 +50,12 @@ enum class RecordStatus {
   kDuplicateTerminal,
 };
 
+const char* record_status_name(RecordStatus status);
+
+// Stable JSON payload written after the normal glog prefix. RequestEvent has
+// no prompt, token IDs, output text, host address, or unbounded labels.
+std::string format_request_event_log(const xllm::proto::RequestEvent& event);
+
 struct RecorderStats {
   uint64_t recorded = 0;
   uint64_t dropped_capacity = 0;
@@ -74,12 +80,12 @@ class RequestEventRecorder {
   RecorderStats stats() const;
 
   AdmissionAttempt begin_admission(xllm::proto::RequestEvent base_event);
+  void note_duplicate_terminal();
 
  private:
   friend class AdmissionAttempt;
 
   void note_admission_terminal();
-  void note_duplicate_terminal();
 
   size_t capacity_;
   const MonotonicClock& clock_;

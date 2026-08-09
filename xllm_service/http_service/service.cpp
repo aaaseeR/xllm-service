@@ -658,14 +658,21 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
   request->model = req_pb->model();
   request->correlation =
       observability::make_request_correlation(correlation_input(controller));
-  request->tenant_id =
+  const std::string tenant_header =
       first_header_value(controller, {"x-tenant-id", "x-jd-tenant-id"});
-  if (request->tenant_id.empty()) {
+  if (options_.trusted_tenant_headers_enabled() && !tenant_header.empty()) {
+    request->tenant_id = tenant_header;
+    request->flow_id = first_header_value(controller, {"x-flow-id"});
+    if (request->flow_id.empty()) {
+      request->flow_id = request->tenant_id;
+    }
+    request->kv_isolation_domain = request->tenant_id;
+    request->kv_isolation_reusable = true;
+  } else {
     request->tenant_id = "anonymous";
-  }
-  request->flow_id = first_header_value(controller, {"x-flow-id"});
-  if (request->flow_id.empty()) {
-    request->flow_id = request->tenant_id;
+    request->flow_id = "anonymous";
+    request->kv_isolation_domain = request->correlation.request_uid();
+    request->kv_isolation_reusable = false;
   }
   request->first_event_retry_policy =
       xllm::FirstEventRetryPolicy::from_durations_ms(
@@ -764,7 +771,8 @@ void handle_get_model_response(brpc::Controller* cntl,
     LOG(ERROR) << "ProtoMessageToJson failed: " << err_msg;
     return;
   }
-  LOG(INFO) << "ProtoMessageToJson: " << json_output;
+  VLOG(1) << "Serialized serving-model response, response_bytes="
+          << json_output.size();
   call_data->write_and_finish(json_output);
 }
 }  // namespace

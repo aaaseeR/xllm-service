@@ -18,8 +18,8 @@ limitations under the License.
 namespace xllm_service {
 
 bool RoundRobin::select_instances_pair(std::shared_ptr<Request> request) {
-  return instance_mgr_->get_next_instance_pair(&request->routing,
-                                               request->provider_id);
+  return instance_mgr_->get_next_instance_pair(
+      &request->routing, request->provider_id, request->model);
 }
 
 }  // namespace xllm_service

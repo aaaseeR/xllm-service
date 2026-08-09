@@ -24,6 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/xllm/uuid.h"
+#include "nlohmann/json.hpp"
 
 namespace xllm_service::observability {
 namespace {
@@ -218,6 +219,147 @@ int64_t SteadyMonotonicClock::now_ns() const {
 const MonotonicClock& default_monotonic_clock() {
   static const SteadyMonotonicClock clock;
   return clock;
+}
+
+const char* record_status_name(RecordStatus status) {
+  switch (status) {
+    case RecordStatus::kRecorded:
+      return "recorded";
+    case RecordStatus::kInvalid:
+      return "invalid";
+    case RecordStatus::kDroppedCapacity:
+      return "dropped_capacity";
+    case RecordStatus::kDroppedContention:
+      return "dropped_contention";
+    case RecordStatus::kDuplicateTerminal:
+      return "duplicate_terminal";
+  }
+  return "unknown";
+}
+
+std::string format_request_event_log(const xllm::proto::RequestEvent& event) {
+  nlohmann::json output{
+      {"schema_version", event.schema_version()},
+      {"event_seq",
+       event.has_event_seq() ? nlohmann::json(event.event_seq())
+                             : nlohmann::json(nullptr)},
+      {"event_type", xllm::proto::RequestEventType_Name(event.event_type())},
+      {"owner_role", xllm::proto::EventOwnerRole_Name(event.owner_role())},
+      {"owner_incarnation_id", event.owner_incarnation_id()},
+      {"result", xllm::proto::EventResult_Name(event.result())},
+      {"error_stage", xllm::proto::ErrorStage_Name(event.error_stage())},
+      {"reason", xllm::proto::EventReason_Name(event.reason())},
+      {"build_id", event.build_id()},
+  };
+  if (event.has_correlation()) {
+    const xllm::proto::RequestCorrelation& correlation = event.correlation();
+    output["global_request_id"] = correlation.global_request_id();
+    output["trace_id"] = correlation.trace_id();
+    output["request_uid"] = correlation.request_uid();
+    output["attempt_seq"] = correlation.has_attempt_seq()
+                                ? nlohmann::json(correlation.attempt_seq())
+                                : nlohmann::json(nullptr);
+  }
+  output["stage_duration_ns"] = event.has_stage_duration_ns()
+                                    ? nlohmann::json(event.stage_duration_ns())
+                                    : nlohmann::json(nullptr);
+  output["stage_duration_validity"] =
+      xllm::proto::MetricValidity_Name(event.stage_duration_validity());
+  output["stage_duration_invalid_reason"] =
+      xllm::proto::InvalidMetricReason_Name(
+          event.stage_duration_invalid_reason());
+  if (!event.target_engine_uid().empty()) {
+    output["target_engine_uid"] = event.target_engine_uid();
+    output["target_incarnation_id"] = event.target_incarnation_id();
+  }
+  if (event.has_runtime_profile()) {
+    const xllm::proto::RuntimeProfileIdentity& profile =
+        event.runtime_profile();
+    output["provider_id"] = xllm::proto::ProviderId_Name(profile.provider_id());
+    output["runtime_version"] = profile.runtime_version();
+    output["plugin_version"] = profile.plugin_version();
+    output["hardware_runtime_version"] = profile.hardware_runtime_version();
+    output["profile_digest"] = profile.profile_digest();
+    output["model_revision"] = profile.model_revision();
+    output["execution_mode"] =
+        xllm::proto::ExecutionMode_Name(profile.execution_mode());
+  }
+  const xllm::proto::WorkloadShape& workload = event.workload();
+  if (workload.has_prompt_tokens()) {
+    output["prompt_tokens"] = workload.prompt_tokens();
+  }
+  if (workload.has_output_tokens()) {
+    output["output_tokens"] = workload.output_tokens();
+  }
+  if (workload.has_effective_max_new_tokens()) {
+    output["effective_max_new_tokens"] = workload.effective_max_new_tokens();
+  }
+  if (workload.has_kv_blocks()) {
+    output["kv_blocks"] = workload.kv_blocks();
+  }
+  if (workload.has_batch_size()) {
+    output["batch_size"] = workload.batch_size();
+  }
+  if (workload.has_predicted_prefill_hit_tokens()) {
+    output["predicted_prefill_hit_tokens"] =
+        workload.predicted_prefill_hit_tokens();
+  }
+  if (workload.has_predicted_decode_hit_tokens()) {
+    output["predicted_decode_hit_tokens"] =
+        workload.predicted_decode_hit_tokens();
+  }
+  if (workload.has_predicted_transfer_bytes()) {
+    output["predicted_transfer_bytes"] = workload.predicted_transfer_bytes();
+  }
+  if (workload.has_actual_prefill_hit_tokens()) {
+    output["actual_prefill_hit_tokens"] = workload.actual_prefill_hit_tokens();
+  }
+  if (workload.has_actual_decode_hit_tokens()) {
+    output["actual_decode_hit_tokens"] = workload.actual_decode_hit_tokens();
+  }
+  if (workload.has_skipped_transfer_bytes()) {
+    output["skipped_transfer_bytes"] = workload.skipped_transfer_bytes();
+  }
+  if (workload.has_shadow_prefill_host_hit_tokens_ub()) {
+    output["shadow_prefill_host_hit_tokens_ub"] =
+        workload.shadow_prefill_host_hit_tokens_ub();
+  }
+  if (workload.has_shadow_prefill_ssd_hit_tokens_ub()) {
+    output["shadow_prefill_ssd_hit_tokens_ub"] =
+        workload.shadow_prefill_ssd_hit_tokens_ub();
+  }
+  if (workload.has_shadow_prefill_store_hit_tokens_ub()) {
+    output["shadow_prefill_store_hit_tokens_ub"] =
+        workload.shadow_prefill_store_hit_tokens_ub();
+  }
+  if (workload.has_shadow_decode_host_hit_tokens_ub()) {
+    output["shadow_decode_host_hit_tokens_ub"] =
+        workload.shadow_decode_host_hit_tokens_ub();
+  }
+  if (workload.has_shadow_decode_ssd_hit_tokens_ub()) {
+    output["shadow_decode_ssd_hit_tokens_ub"] =
+        workload.shadow_decode_ssd_hit_tokens_ub();
+  }
+  if (workload.has_shadow_decode_store_hit_tokens_ub()) {
+    output["shadow_decode_store_hit_tokens_ub"] =
+        workload.shadow_decode_store_hit_tokens_ub();
+  }
+  if (event.has_metric()) {
+    const xllm::proto::RequestMetric& metric = event.metric();
+    output["metric_kind"] = xllm::proto::RequestMetricKind_Name(metric.kind());
+    output["metric_validity"] =
+        xllm::proto::MetricValidity_Name(metric.validity());
+    output["metric_invalid_reason"] =
+        xllm::proto::InvalidMetricReason_Name(metric.invalid_reason());
+    output["metric_duration_ns"] = metric.has_duration_ns()
+                                       ? nlohmann::json(metric.duration_ns())
+                                       : nlohmann::json(nullptr);
+    output["measurement_boundary"] = metric.measurement_boundary();
+    if (metric.has_output_tokens()) {
+      output["metric_output_tokens"] = metric.output_tokens();
+    }
+  }
+  return output.dump();
 }
 
 RequestEventRecorder::RequestEventRecorder(size_t capacity,

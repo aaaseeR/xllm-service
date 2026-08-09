@@ -29,6 +29,7 @@ struct ProviderRouteCandidate {
   xllm::proto::ProviderId provider_id = xllm::proto::PROVIDER_ID_UNSPECIFIED;
   xllm::proto::EngineRole role = xllm::proto::ENGINE_ROLE_UNSPECIFIED;
   bool schedulable = false;
+  std::string model_revision;
   // Non-owning immutable view valid for the duration of select(). nullptr is
   // the explicit BEST_EFFORT legacy registration path.
   const xllm::proto::ProviderDescriptor* descriptor = nullptr;
@@ -54,7 +55,8 @@ class ProviderRouteSelector final {
       xllm::proto::ProviderId required_provider_id,
       uint64_t prefill_start_index,
       uint64_t decode_start_index,
-      ProviderRouteSelection* selection);
+      ProviderRouteSelection* selection,
+      const std::string& required_model_revision = "");
 
   // Enumerates only complete plans that pass the same Provider, Descriptor,
   // lifecycle/capability and incarnation-scoped LinkState hard filters as
@@ -66,7 +68,8 @@ class ProviderRouteSelector final {
       xllm::proto::ProviderId required_provider_id,
       size_t max_selections,
       std::vector<ProviderRouteSelection>* selections,
-      bool* truncated);
+      bool* truncated,
+      const std::string& required_model_revision = "");
 };
 
 }  // namespace xllm_service::provider
