@@ -129,6 +129,11 @@ class Options {
   // tokenizer options
   PROPERTY(std::string, tokenizer_path);
 
+  // Digest of the complete local tokenizer + template rendering contract.
+  // STRICT Native requests compare this independently configured value with
+  // the immutable Provider Descriptor; an empty value fails closed.
+  PROPERTY(std::string, native_renderer_digest);
+
   // trace options
   PROPERTY(bool, enable_request_trace) = false;
 

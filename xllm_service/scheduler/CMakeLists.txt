@@ -65,6 +65,7 @@ cc_library(
     :common
     :etcd_client
     :execution_hold
+    :execution_plan_builder
     :loadbalance_policy
     :managers
     :request

@@ -86,6 +86,16 @@ struct Request {
   std::string prefill_incarnation_id;
   std::string decode_incarnation_id;
 
+  // V2 request pipeline. CanonicalRequest is created once at HTTP ingress;
+  // the encoded representation and immutable plan are created only after a
+  // concrete Provider incarnation route is bound. Descriptor-less legacy
+  // registrations leave the latter fields empty as explicit BEST_EFFORT.
+  std::optional<xllm::proto::CanonicalRequest> canonical_request;
+  std::optional<xllm::proto::EncodedRequest> encoded_request;
+  std::optional<xllm::proto::ExecutionPlan> execution_plan;
+  std::optional<xllm::proto::ProviderDescriptor> prefill_provider_descriptor;
+  std::optional<xllm::proto::ProviderDescriptor> decode_provider_descriptor;
+
   // At most one outcome-unknown execution resource holder is permitted for
   // the current attempt. Its cleanup-capacity token is reserved before the
   // request is dispatched.

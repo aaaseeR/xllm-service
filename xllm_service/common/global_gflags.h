@@ -83,6 +83,7 @@ DECLARE_int32(default_request_deadline_ms);
 DECLARE_int32(block_size);
 
 DECLARE_string(tokenizer_path);
+DECLARE_string(native_renderer_digest);
 
 DECLARE_bool(enable_request_trace);
 

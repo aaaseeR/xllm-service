@@ -6,10 +6,13 @@ cc_test(
   SRCS
     provider_contract_test.cpp
   DEPS
+    :canonical_request_builder
+    :execution_plan_builder
     :provider_contract
     :provider_registry
     :provider_route_selector
     GTest::gtest_main
+    nlohmann_json::nlohmann_json
     proto_xllm
 )
 

@@ -479,6 +479,8 @@ bool InstanceMgr::bind_request_instance_incarnations(
   // Bind the selected routing to a concrete incarnation before dispatch.
   request->prefill_incarnation_id.clear();
   request->decode_incarnation_id.clear();
+  request->prefill_provider_descriptor.reset();
+  request->decode_provider_descriptor.reset();
 
   if (request->routing.prefill_name.empty()) {
     LOG(ERROR) << "Selected route has no prefill or aggregated engine.";
@@ -504,6 +506,8 @@ bool InstanceMgr::bind_request_instance_incarnations(
       return false;
     }
     request->prefill_incarnation_id = prefill_it->second.incarnation_id;
+    request->prefill_provider_descriptor =
+        prefill_it->second.provider_descriptor;
   }
 
   if (!request->routing.decode_name.empty()) {
@@ -525,6 +529,7 @@ bool InstanceMgr::bind_request_instance_incarnations(
       return false;
     }
     request->decode_incarnation_id = decode_it->second.incarnation_id;
+    request->decode_provider_descriptor = decode_it->second.provider_descriptor;
   }
 
   const auto selected_prefill_it =

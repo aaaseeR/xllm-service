@@ -35,6 +35,7 @@ limitations under the License.
 #include "loadbalance_policy/cache_aware_routing.h"
 #include "loadbalance_policy/round_robin.h"
 #include "loadbalance_policy/slo_aware_policy.h"
+#include "provider/execution_plan_builder.h"
 #include "provider/provider_adapter.h"
 #include "rpc_service/first_event_recovery_client.h"
 #include "scheduler/xllm_chat_parse_bridge.h"
@@ -351,6 +352,9 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
                << request->routing.debug_string();
     return false;
   }
+  if (!prepare_v2_execution_plan(request)) {
+    return false;
+  }
   DLOG(INFO) << request->routing.debug_string();
 
   // update request metrics
@@ -358,6 +362,91 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
     instance_mgr_->update_request_metrics(request, RequestAction::SCHEDULE);
   }
 
+  return true;
+}
+
+bool Scheduler::prepare_v2_execution_plan(
+    const std::shared_ptr<Request>& request) {
+  request->encoded_request.reset();
+  request->execution_plan.reset();
+  if (!request->canonical_request.has_value()) {
+    return true;
+  }
+
+  // A route is either wholly STRICT (immutable descriptors on every selected
+  // role) or wholly BEST_EFFORT legacy. The route selector already rejects a
+  // one-sided STRICT P/D pair; preserve that invariant at the codec boundary.
+  if (!request->prefill_provider_descriptor.has_value()) {
+    if (request->decode_provider_descriptor.has_value()) {
+      LOG(ERROR) << "Selected route mixes strict and legacy descriptors.";
+      return false;
+    }
+    return true;
+  }
+  if (!request->request_deadline.has_value()) {
+    LOG(ERROR) << "V2 execution plan has no request deadline.";
+    return false;
+  }
+  const uint64_t remaining_deadline_ms =
+      request->request_deadline->remaining_ms();
+  if (remaining_deadline_ms == 0 || !request->correlation.has_attempt_seq()) {
+    LOG(ERROR) << "V2 execution plan deadline or attempt is invalid.";
+    return false;
+  }
+
+  xllm::proto::CanonicalRequest canonical = *request->canonical_request;
+  canonical.set_attempt_seq(request->correlation.attempt_seq());
+  canonical.set_remaining_deadline_ms(remaining_deadline_ms);
+  const xllm::proto::ProviderDescriptor& primary =
+      *request->prefill_provider_descriptor;
+  if (primary.identity().provider_id() != request->provider_id) {
+    LOG(ERROR) << "Bound Provider Descriptor changed before encoding.";
+    return false;
+  }
+
+  std::unique_ptr<provider::ProviderAdapter> adapter;
+  switch (request->provider_id) {
+    case xllm::proto::PROVIDER_ID_XLLM_NATIVE:
+      adapter = std::make_unique<provider::XllmNativeAdapter>(
+          primary,
+          std::make_unique<provider::XllmNativePreparedRequestRenderer>(
+              &request->token_ids,
+              request->correlation.request_uid(),
+              request->correlation.attempt_seq(),
+              options_.native_renderer_digest()));
+      break;
+    case xllm::proto::PROVIDER_ID_VLLM_ASCEND:
+      adapter = std::make_unique<provider::VllmAscendAdapter>(primary);
+      break;
+    default:
+      LOG(ERROR) << "Selected Provider has no V2 RequestCodec.";
+      return false;
+  }
+
+  xllm::proto::EncodedRequest encoded;
+  const provider::ContractResult encoded_result =
+      adapter->request_codec().encode(canonical, &encoded);
+  if (!encoded_result.ok()) {
+    LOG(ERROR) << "V2 Provider request encoding failed: "
+               << encoded_result.message();
+    return false;
+  }
+  const xllm::proto::ProviderDescriptor* decode =
+      request->decode_provider_descriptor.has_value()
+          ? &request->decode_provider_descriptor.value()
+          : nullptr;
+  xllm::proto::ExecutionPlan plan;
+  const provider::ContractResult plan_result = provider::build_execution_plan(
+      canonical, encoded, primary, decode, &plan);
+  if (!plan_result.ok()) {
+    LOG(ERROR) << "V2 ExecutionPlan construction failed: "
+               << plan_result.message();
+    return false;
+  }
+
+  request->canonical_request = std::move(canonical);
+  request->encoded_request = std::move(encoded);
+  request->execution_plan = std::move(plan);
   return true;
 }
 
@@ -635,6 +724,7 @@ bool Scheduler::converge_execution_hold_for_retry_locked(
 
 bool Scheduler::select_retry_instances(
     const std::shared_ptr<Request>& request) {
+  const bool requires_strict_route = request->execution_plan.has_value();
   request->routing = Routing();
   request->prefill_incarnation_id.clear();
   request->decode_incarnation_id.clear();
@@ -643,7 +733,10 @@ bool Scheduler::select_retry_instances(
     return false;
   }
   if (request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND ||
-      request->routing.decode_name.empty()) {
+      request->routing.decode_name.empty() ||
+      (requires_strict_route &&
+       (!request->prefill_provider_descriptor.has_value() ||
+        !request->decode_provider_descriptor.has_value()))) {
     LOG(ERROR) << "First-output retry selected an incompatible execution "
                   "mode, routing="
                << request->routing.debug_string();
@@ -698,6 +791,11 @@ bool Scheduler::retry_first_output_attempt_locked(
     return false;
   }
   request->correlation.set_attempt_seq(request->correlation.attempt_seq() + 1);
+  if (!prepare_v2_execution_plan(request)) {
+    *failure_message =
+        "First-output retry could not rebuild the V2 ExecutionPlan";
+    return false;
+  }
   request->prefill_stage_finished.store(false, std::memory_order_release);
   request->latest_generate_time = absl::Now();
   request->output_event_sequencer.reset();

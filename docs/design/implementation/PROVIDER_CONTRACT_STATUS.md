@@ -36,7 +36,8 @@ limitations under the License.
 ## 实现
 
 - 代码入口与核心接口：`xllm_service/provider/provider_contract.*`、
-  `provider_adapter.h`、`provider_registry.*`。
+  `canonical_request_builder.*`、`provider_adapter.*`、
+  `execution_plan_builder.*`、`provider_registry.*`。
 - 已实现可注册的 `XllmNativeAdapter` 与 `VllmAscendAdapter`。Native Adapter
   通过显式 renderer 接口取得原生 payload、精确 token 数和实际 renderer
   digest；vLLM-Ascend Adapter 只接受 `openai.http.json.v1`，保留原始 JSON
@@ -61,13 +62,24 @@ limitations under the License.
   仅为旧部署参数兼容保留且不参与运行时决策。Round-robin、CAR、SLO 指标入口、
   静态 peer 列表和 Engine Link/Unlink 均按 Provider 隔离。Native `P+D` 与 vLLM
   `AGGREGATED` route shape 由同一个纯 CPU selector 决定，禁止跨 Provider 拼接。
+- HTTP ingress 已在解析完成后构造不可变 `CanonicalRequest`，保留 correlation、API
+  kind、model revision、原始 schema/payload、有效输出上限、`n/best_of`、priority、
+  deadline 与可选 SLO。Scheduler 绑定 P/D Descriptor 快照后调用生产
+  `RequestCodec` 并生成 `ExecutionPlan`；retry 会递增 `attempt_seq`、重算剩余
+  deadline 并重新编码/建计划，禁止 STRICT 请求降级到 legacy route。
+- Native renderer 复用 ingress 已完成的 tokenization，发布精确 token 数，并以
+  `--native_renderer_digest` 提供的独立部署摘要与 Descriptor 交叉校验；摘要为空时
+  STRICT Native fail closed。vLLM relay 在 STRICT 路径实际发送
+  `ExecutionPlan.provider_payload`，prompt token 未知时 KV block 估算保持未知值 0，
+  并记录 `prompt-token-count-unknown`，不以低估值做容量承诺。
 - STRICT Native P/D 使用显式兼容矩阵，不要求两端 `profile_digest` 相等，但要求
   runtime/protocol、model revision/quantization、KV layout/dtype/block/cache group、
   Connector/version、layerwise transfer 和可证明 topology 一致，并生成确定性的
   compatibility proof。STRICT 与 BEST_EFFORT legacy 不能单边混配；矩阵同时用于
   route、readiness、静态 peer 与 Link/Unlink 候选。
-- 明确不支持范围：本批次尚未让生产 Scheduler 只消费
-  `CanonicalRequest/ExecutionPlan`，也没有实现
+- 明确不支持范围：Descriptor-less Engine 仍作为显式 BEST_EFFORT 兼容入口，不生成
+  V2 artifacts；Native `ExecutionPlan` 尚未写入 xLLM 请求 wire 并由 Engine 校验消费，
+  Adapter registry 尚未接管生产请求的 codec 生命周期。也没有实现
   Submit、Stream、Cancel、Reserve 和 State Stream；不声称任何真实 NPU
   Provider 已通过 conformance。
 
@@ -83,11 +95,12 @@ limitations under the License.
 | EngineState schema | UNKNOWN 与 0、per-DP、ratio、histogram 负向测试 | N/A | 待 State Stream | PASS |
 | Adapter registry | ownership、lookup、重复 key 与非法 Descriptor | N/A | N/A | PASS |
 | 生产 RequestCodec | Native 精确计数/renderer、vLLM 原始 JSON/UNKNOWN 计数、错误 Provider/schema/空 renderer 负向测试 | N/A，无 tensor 逻辑 | 待真实 tokenizer/runtime | PASS |
+| Canonical/Plan 生产接入 | ingress 语义保留、Native REMOTE_PD 与 vLLM AGGREGATED plan、renderer identity/digest、UNKNOWN KV estimate | N/A，无 tensor 逻辑 | 待真实 Provider wire | PASS，4 项新增测试 |
 | Provider route 隔离 | Native P/D、vLLM SINGLE、跨 Provider、无完整 plan、suspect、未知 Provider、RR cursor 正负测试 | N/A，无 tensor 逻辑 | 待真实混合池 | PASS，8/8 |
 | STRICT P/D 兼容 | 不同 profile 正向；model、KV/Connector、topology、runtime 与 strict/legacy 单边混配负向测试 | N/A，无 tensor 逻辑 | 待真实 P/D handshake | PASS |
 
-Service 的 `ProviderContractTest` 当前为 26 项，`InstanceMetaInfoTest` 为 13 项；
-当前全量 service CPU 回归为 226/226，vLLM sidecar CPU 回归为 29/29（其中
+Service 的 `ProviderContractTest` 当前为 30 项，`InstanceMetaInfoTest` 为 13 项；
+当前全量 service CPU 回归为 230/230，vLLM sidecar CPU 回归为 29/29（其中
 metadata 11/11），xLLM CPU 公共路径基线为 96/96。
 
 ## 完善情况
@@ -97,11 +110,13 @@ metadata 11/11），xLLM CPU 公共路径基线为 96/96。
   ExecutionPlan 校验；`attempt_seq=0` 与缺失字段可区分；线程安全、只增不删的
   Adapter registry；两个首发 Provider 的 RequestCodec 与 dispatch identity；CPU
   conformance；生产 Scheduler 的 per-request Provider dispatch、跨 Provider route
-  隔离与 STRICT P/D 显式兼容矩阵。
+  隔离、STRICT P/D 显式兼容矩阵，以及真实 ingress→CanonicalRequest→RequestCodec→
+  ExecutionPlan 构建；vLLM STRICT 数据面已消费 plan payload。
 - 已知缺口/风险：当前 schema 尚无可校验的 topology-transform proof，因此非相同
   topology 保守拒绝；per-pair `LinkState=READY`、失败隔离和周期对账属于 G3。
-  CanonicalRequest、ExecutionPlan 与 Adapter codec 的端到端接入仍属于后续 B1
-  批次；G3 的
+  Native ExecutionPlan wire 与 Engine 侧消费校验、生产 Adapter cache 仍属于 B1
+  的下一批次；客户端 model alias 到权威 model revision 的映射也需由 catalog 明确，
+  当前 STRICT 路径按字符串完全一致 fail closed。G3 的
   `(provider_id, profile_digest, incarnation_id)` Engine Registry 尚未实现；当前
   不证明硬件 Runtime 行为。
 - 回滚与兼容：协议为全新 additive schema；旧二进制不会读取这些消息。V2

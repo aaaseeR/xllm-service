@@ -173,6 +173,10 @@ DEFINE_int32(block_size,
 
 DEFINE_string(tokenizer_path, "", "tokenizer config path.");
 
+DEFINE_string(native_renderer_digest,
+              "",
+              "Digest of the local tokenizer and chat rendering contract.");
+
 DEFINE_bool(enable_request_trace, false, "Whether to enable request trace");
 
 DEFINE_int32(target_ttft,

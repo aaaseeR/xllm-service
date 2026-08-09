@@ -22,11 +22,14 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "provider/canonical_request_builder.h"
+#include "provider/execution_plan_builder.h"
 #include "provider/provider_registry.h"
 #include "provider/provider_route_selector.h"
 
@@ -661,6 +664,38 @@ TEST(ProviderContractTest, XllmNativeAdapterFailsClosedWithoutRenderer) {
             xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED);
 }
 
+TEST(ProviderContractTest, PreparedNativeRendererPreservesCanonicalAndTokens) {
+  const std::vector<int32_t> token_ids = {11, 22, 33};
+  xllm::proto::CanonicalRequest canonical = make_request();
+  XllmNativeAdapter adapter(make_descriptor(kOpenModeCases[0]),
+                            std::make_unique<XllmNativePreparedRequestRenderer>(
+                                &token_ids, "request-1", 0, "renderer-sha256"));
+  xllm::proto::EncodedRequest encoded;
+
+  ContractResult result = adapter.request_codec().encode(canonical, &encoded);
+  ASSERT_TRUE(result.ok()) << result.message();
+  EXPECT_EQ(encoded.prompt_tokens(), 3u);
+  const nlohmann::json payload =
+      nlohmann::json::parse(encoded.provider_payload());
+  EXPECT_EQ(payload.at("canonical_payload_schema"), "json-v1");
+  EXPECT_EQ(payload.at("canonical_request"), nlohmann::json::object());
+  EXPECT_EQ(payload.at("token_ids"), token_ids);
+
+  canonical.set_attempt_seq(1);
+  EXPECT_EQ(adapter.request_codec().encode(canonical, &encoded).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+
+  XllmNativeAdapter missing_digest_adapter(
+      make_descriptor(kOpenModeCases[0]),
+      std::make_unique<XllmNativePreparedRequestRenderer>(
+          &token_ids, "request-1", 0, ""));
+  canonical.set_attempt_seq(0);
+  EXPECT_EQ(missing_digest_adapter.request_codec()
+                .encode(canonical, &encoded)
+                .error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED);
+}
+
 TEST(ProviderContractTest, VllmAscendAdapterPreservesCanonicalPayload) {
   ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[3]);
   VllmAscendAdapter adapter(descriptor);
@@ -808,6 +843,92 @@ TEST(ProviderContractTest, StrictRouteSelectorUsesCompatibilityMatrix) {
                                     0,
                                     0,
                                     &selection));
+}
+
+TEST(ProviderContractTest, CanonicalBuilderPreservesIngressSemantics) {
+  CanonicalRequestInput input;
+  input.correlation.set_global_request_id("global-1");
+  input.correlation.set_trace_id("trace-1");
+  input.correlation.set_request_uid("request-1");
+  input.correlation.set_attempt_seq(0);
+  input.api_kind = xllm::proto::API_KIND_CHAT_COMPLETIONS;
+  input.model_revision = "model-r1";
+  input.payload_schema = kOpenAiHttpJsonSchema;
+  input.payload = R"({"model":"model-r1","messages":[]})";
+  input.effective_max_new_tokens = 128;
+  input.n = 1;
+  input.best_of = 2;
+  input.priority = 3;
+  input.remaining_deadline_ms = 1000;
+  input.ttft_slo_ms = 100;
+
+  xllm::proto::CanonicalRequest request;
+  ASSERT_TRUE(build_canonical_request(input, &request).ok());
+  EXPECT_TRUE(request.strict());
+  EXPECT_EQ(request.attempt_seq(), 0u);
+  EXPECT_EQ(request.best_of(), 2u);
+  ASSERT_TRUE(request.has_ttft_slo_ms());
+  EXPECT_EQ(request.ttft_slo_ms(), 100u);
+
+  input.correlation.clear_attempt_seq();
+  EXPECT_EQ(build_canonical_request(input, &request).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD);
+  input.correlation.set_attempt_seq(0);
+  input.best_of = 0;
+  EXPECT_EQ(build_canonical_request(input, &request).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
+}
+
+TEST(ProviderContractTest, ExecutionPlanBuilderBuildsRemotePdPlan) {
+  auto [prefill, decode] = make_remote_pd_descriptors();
+  const xllm::proto::CanonicalRequest canonical = make_request();
+  const xllm::proto::EncodedRequest encoded = make_encoded_request(prefill);
+  xllm::proto::ExecutionPlan plan;
+
+  ContractResult result =
+      build_execution_plan(canonical, encoded, prefill, &decode, &plan);
+  ASSERT_TRUE(result.ok()) << result.message();
+  ASSERT_EQ(plan.selected_roles_size(), 2);
+  EXPECT_EQ(plan.selected_roles(0).engine_uid(), "engine-p");
+  EXPECT_EQ(plan.selected_roles(1).engine_uid(), "engine-d");
+  EXPECT_EQ(plan.mode(), xllm::proto::EXECUTION_MODE_REMOTE_PD);
+  EXPECT_EQ(plan.resource_estimate().prompt_tokens(), 4u);
+  EXPECT_EQ(plan.resource_estimate().output_tokens(), 128u);
+  EXPECT_EQ(plan.resource_estimate().kv_blocks(), 9u);
+  EXPECT_NE(plan.compatibility_proof().find("remote-pd-v1"), std::string::npos);
+
+  decode.mutable_identity()->set_runtime_version("incompatible");
+  EXPECT_EQ(
+      build_execution_plan(canonical, encoded, prefill, &decode, &plan).error(),
+      xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+}
+
+TEST(ProviderContractTest, ExecutionPlanBuilderBuildsAggregatedPlan) {
+  ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[3]);
+  xllm::proto::CanonicalRequest canonical = make_request();
+  canonical.set_canonical_payload_schema(kOpenAiHttpJsonSchema);
+  xllm::proto::EncodedRequest encoded;
+  VllmAscendAdapter adapter(descriptor);
+  ASSERT_TRUE(adapter.request_codec().encode(canonical, &encoded).ok());
+  xllm::proto::ExecutionPlan plan;
+
+  ContractResult result =
+      build_execution_plan(canonical, encoded, descriptor, nullptr, &plan);
+  ASSERT_TRUE(result.ok()) << result.message();
+  ASSERT_EQ(plan.selected_roles_size(), 1);
+  EXPECT_EQ(plan.selected_roles(0).role(), xllm::proto::ENGINE_ROLE_AGGREGATED);
+  EXPECT_EQ(plan.mode(), xllm::proto::EXECUTION_MODE_AGGREGATED);
+  EXPECT_EQ(plan.provider_payload(), canonical.canonical_payload());
+  EXPECT_EQ(plan.resource_estimate().kv_blocks(), 0u);
+  EXPECT_EQ(plan.reason_codes(plan.reason_codes_size() - 1),
+            "prompt-token-count-unknown");
+  EXPECT_NE(plan.compatibility_proof().find("aggregated-v1"),
+            std::string::npos);
+
+  EXPECT_EQ(
+      build_execution_plan(canonical, encoded, descriptor, &descriptor, &plan)
+          .error(),
+      xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_SELECTED_ROLES);
 }
 
 }  // namespace

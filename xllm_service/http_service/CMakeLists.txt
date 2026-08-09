@@ -81,6 +81,7 @@ cc_library(
     request_tracer.cpp
   DEPS
     :anthropic_adapter
+    :canonical_request_builder
     :chat_json_parser
     :common
     :request_identity

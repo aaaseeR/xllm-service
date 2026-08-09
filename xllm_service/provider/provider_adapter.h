@@ -19,13 +19,12 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "provider.pb.h"
 #include "provider/provider_contract.h"
 
 namespace xllm_service::provider {
-
-inline constexpr char kOpenAiHttpJsonSchema[] = "openai.http.json.v1";
 
 // The scheduler and HTTP layer branch on this stable Adapter-owned semantic,
 // never on legacy registration strings such as backend_type.
@@ -65,6 +64,29 @@ class XllmNativeRequestRenderer {
                                 std::string* provider_payload,
                                 uint64_t* prompt_tokens,
                                 std::string* renderer_digest) const = 0;
+};
+
+// Production Service bridge for a CanonicalRequest whose chat template and
+// tokenization were already performed once on the selected Native path. The
+// token vector is a non-owning view and must outlive the synchronous encode().
+class XllmNativePreparedRequestRenderer final
+    : public XllmNativeRequestRenderer {
+ public:
+  XllmNativePreparedRequestRenderer(const std::vector<int32_t>* token_ids,
+                                    std::string request_uid,
+                                    uint64_t attempt_seq,
+                                    std::string renderer_digest);
+
+  ContractResult render(const xllm::proto::CanonicalRequest& request,
+                        std::string* provider_payload,
+                        uint64_t* prompt_tokens,
+                        std::string* renderer_digest) const override;
+
+ private:
+  const std::vector<int32_t>* token_ids_;
+  std::string request_uid_;
+  uint64_t attempt_seq_;
+  std::string renderer_digest_;
 };
 
 class XllmNativeAdapter final : public ProviderAdapter {

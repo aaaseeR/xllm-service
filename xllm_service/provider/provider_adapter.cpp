@@ -17,9 +17,12 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <utility>
+
+#include "provider/canonical_request_builder.h"
 
 namespace xllm_service::provider {
 namespace {
@@ -115,6 +118,52 @@ std::optional<ProviderDispatchKind> resolve_provider_dispatch_kind(
     default:
       return std::nullopt;
   }
+}
+
+XllmNativePreparedRequestRenderer::XllmNativePreparedRequestRenderer(
+    const std::vector<int32_t>* token_ids,
+    std::string request_uid,
+    uint64_t attempt_seq,
+    std::string renderer_digest)
+    : token_ids_(token_ids),
+      request_uid_(std::move(request_uid)),
+      attempt_seq_(attempt_seq),
+      renderer_digest_(std::move(renderer_digest)) {}
+
+ContractResult XllmNativePreparedRequestRenderer::render(
+    const xllm::proto::CanonicalRequest& request,
+    std::string* provider_payload,
+    uint64_t* prompt_tokens,
+    std::string* renderer_digest) const {
+  if (token_ids_ == nullptr || provider_payload == nullptr ||
+      prompt_tokens == nullptr || renderer_digest == nullptr ||
+      renderer_digest_.empty()) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED,
+        "Native prepared renderer dependencies are unavailable");
+  }
+  if (request.request_uid() != request_uid_ || !request.has_attempt_seq() ||
+      request.attempt_seq() != attempt_seq_) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+        "Native prepared renderer request identity changed");
+  }
+
+  nlohmann::json canonical_payload = nlohmann::json::parse(
+      request.canonical_payload(), nullptr, /*allow_exceptions=*/false);
+  if (canonical_payload.is_discarded()) {
+    return ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_ENCODING_FAILED,
+        "Native canonical JSON payload is invalid");
+  }
+  nlohmann::json payload = nlohmann::json::object();
+  payload["canonical_payload_schema"] = request.canonical_payload_schema();
+  payload["canonical_request"] = std::move(canonical_payload);
+  payload["token_ids"] = *token_ids_;
+  *provider_payload = payload.dump();
+  *prompt_tokens = token_ids_->size();
+  *renderer_digest = renderer_digest_;
+  return ContractResult::success();
 }
 
 XllmNativeAdapter::XllmNativeAdapter(

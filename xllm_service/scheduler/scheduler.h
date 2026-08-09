@@ -126,6 +126,7 @@ class Scheduler final {
       const std::shared_ptr<Request>& request,
       std::string* failure_message);
   bool select_retry_instances(const std::shared_ptr<Request>& request);
+  bool prepare_v2_execution_plan(const std::shared_ptr<Request>& request);
   void cancel_or_detach_execution_hold_locked(
       const std::shared_ptr<Request>& request);
   void fail_output_dispatch_locked(const std::shared_ptr<Request>& request,

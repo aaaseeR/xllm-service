@@ -42,6 +42,7 @@ limitations under the License.
 #include "http_service/anthropic_adapter.h"
 #include "http_service/chat_json_parser.h"
 #include "observability/request_identity.h"
+#include "provider/canonical_request_builder.h"
 #include "scheduler/scheduler.h"
 #include "xllm_rpc_service.pb.h"
 #include "xllm_service.pb.h"
@@ -471,7 +472,10 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
 template <typename T>
 std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
     T* req_pb,
-    brpc::Controller* controller) {
+    brpc::Controller* controller,
+    xllm::proto::ApiKind api_kind,
+    const std::string& payload_schema,
+    const std::string& payload) {
   auto request = std::make_shared<Request>();
   request->model = req_pb->model();
   request->correlation =
@@ -505,6 +509,47 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
           request_tracer_->log(service_request_id, message);
         };
   }
+
+  if ((req_pb->has_ttft_slo_ms() && req_pb->ttft_slo_ms() <= 0) ||
+      (req_pb->has_tpot_slo_ms() && req_pb->tpot_slo_ms() <= 0)) {
+    LOG(ERROR) << "Request SLO durations must be positive.";
+    return nullptr;
+  }
+  if (!request->request_deadline.has_value()) {
+    LOG(ERROR) << "Canonical request has no local deadline.";
+    return nullptr;
+  }
+
+  const uint32_t n = req_pb->has_n() ? req_pb->n() : 1;
+  provider::CanonicalRequestInput canonical_input;
+  canonical_input.correlation = request->correlation;
+  canonical_input.api_kind = api_kind;
+  canonical_input.model_revision = req_pb->model();
+  canonical_input.payload_schema = payload_schema;
+  canonical_input.payload = payload;
+  canonical_input.effective_max_new_tokens =
+      req_pb->has_max_tokens() ? req_pb->max_tokens() : 5120;
+  canonical_input.n = n;
+  canonical_input.best_of = req_pb->has_best_of() ? req_pb->best_of() : n;
+  canonical_input.priority =
+      req_pb->has_priority() ? static_cast<int32_t>(req_pb->priority()) : 0;
+  canonical_input.remaining_deadline_ms =
+      request->request_deadline->remaining_ms();
+  if (req_pb->has_ttft_slo_ms()) {
+    canonical_input.ttft_slo_ms = static_cast<uint64_t>(req_pb->ttft_slo_ms());
+  }
+  if (req_pb->has_tpot_slo_ms()) {
+    canonical_input.tpot_slo_ms = static_cast<uint64_t>(req_pb->tpot_slo_ms());
+  }
+  xllm::proto::CanonicalRequest canonical;
+  const provider::ContractResult canonical_result =
+      provider::build_canonical_request(canonical_input, &canonical);
+  if (!canonical_result.ok()) {
+    LOG(ERROR) << "Canonical request validation failed: "
+               << canonical_result.message();
+    return nullptr;
+  }
+  request->canonical_request = std::move(canonical);
 
   return request;
 }
@@ -620,7 +665,15 @@ void XllmHttpServiceImpl::Completions(
     return;
   }
 
-  auto service_request = generate_request(req_pb, cntl);
+  auto service_request = generate_request(req_pb,
+                                          cntl,
+                                          xllm::proto::API_KIND_COMPLETIONS,
+                                          provider::kOpenAiHttpJsonSchema,
+                                          attachment);
+  if (service_request == nullptr) {
+    cntl->SetFailed("Canonical request validation failed!");
+    return;
+  }
 
   if (!req_pb->prompt().empty()) {
     service_request->prompt = req_pb->prompt();
@@ -638,6 +691,10 @@ void XllmHttpServiceImpl::Completions(
 
   // vLLM backend: relay the raw client JSON over HTTP, skip xllm-only fields.
   if (service_request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
+    const std::string& provider_payload =
+        service_request->execution_plan.has_value()
+            ? service_request->execution_plan->provider_payload()
+            : attachment;
     auto call_data = std::make_shared<CompletionCallData>(
         cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
     handle_vllm(call_data,
@@ -645,7 +702,7 @@ void XllmHttpServiceImpl::Completions(
                 service_request->routing.prefill_name,
                 "/v1/completions",
                 /*is_post=*/true,
-                attachment,
+                provider_payload,
                 service_request->stream,
                 service_request->correlation);
     return;
@@ -720,7 +777,16 @@ void XllmHttpServiceImpl::ChatCompletions(
     return;
   }
 
-  auto service_request = generate_request(req_pb, cntl);
+  auto service_request =
+      generate_request(req_pb,
+                       cntl,
+                       xllm::proto::API_KIND_CHAT_COMPLETIONS,
+                       provider::kOpenAiHttpJsonSchema,
+                       attachment);
+  if (service_request == nullptr) {
+    cntl->SetFailed("Canonical request validation failed!");
+    return;
+  }
 
   if (req_pb->messages_size() > 0) {
     service_request->messages.reserve(req_pb->messages_size());
@@ -770,6 +836,10 @@ void XllmHttpServiceImpl::ChatCompletions(
 
   // vLLM backend: relay the raw client JSON over HTTP, skip xllm-only fields.
   if (service_request->provider_id == xllm::proto::PROVIDER_ID_VLLM_ASCEND) {
+    const std::string& provider_payload =
+        service_request->execution_plan.has_value()
+            ? service_request->execution_plan->provider_payload()
+            : attachment;
     auto call_data = std::make_shared<ChatCallData>(
         cntl, service_request->stream, done_guard.release(), req_pb, resp_pb);
     handle_vllm(call_data,
@@ -777,7 +847,7 @@ void XllmHttpServiceImpl::ChatCompletions(
                 service_request->routing.prefill_name,
                 "/v1/chat/completions",
                 /*is_post=*/true,
-                attachment,
+                provider_payload,
                 service_request->stream,
                 service_request->correlation);
     return;
@@ -852,7 +922,16 @@ void XllmHttpServiceImpl::AnthropicMessages(
   }
   req_pb->set_request_id(new_anthropic_id());
 
-  auto service_request = generate_request(req_pb, cntl);
+  auto service_request =
+      generate_request(req_pb,
+                       cntl,
+                       xllm::proto::API_KIND_ANTHROPIC_MESSAGES,
+                       provider::kAnthropicHttpJsonSchema,
+                       attachment);
+  if (service_request == nullptr) {
+    cntl->SetFailed("Canonical request validation failed!");
+    return;
+  }
   auto tracer = make_anthropic_tracer(service_request);
   tracer.trace("raw_http_request", attachment);
   tracer.trace("anthropic_request_pb", proto_json(*anthropic_req_pb));

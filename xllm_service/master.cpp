@@ -250,6 +250,7 @@ int main(int argc, char* argv[]) {
       .enable_request_trace(FLAGS_enable_request_trace)
       .block_size(FLAGS_block_size)
       .tokenizer_path(FLAGS_tokenizer_path)
+      .native_renderer_digest(FLAGS_native_renderer_digest)
       .tool_call_parser(FLAGS_tool_call_parser)
       .reasoning_parser(FLAGS_reasoning_parser)
       .vllm_http_timeout_ms(FLAGS_vllm_http_timeout_ms)

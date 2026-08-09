@@ -13,6 +13,18 @@ cc_library(
 
 cc_library(
   NAME
+    canonical_request_builder
+  HDRS
+    canonical_request_builder.h
+  SRCS
+    canonical_request_builder.cpp
+  DEPS
+    :provider_contract
+    proto_xllm
+)
+
+cc_library(
+  NAME
     provider_registry
   HDRS
     provider_adapter.h
@@ -21,7 +33,9 @@ cc_library(
     provider_adapter.cpp
     provider_registry.cpp
   DEPS
+    :canonical_request_builder
     :provider_contract
+    nlohmann_json::nlohmann_json
     proto_xllm
 )
 
@@ -32,6 +46,18 @@ cc_library(
     provider_route_selector.h
   SRCS
     provider_route_selector.cpp
+  DEPS
+    :provider_contract
+    proto_xllm
+)
+
+cc_library(
+  NAME
+    execution_plan_builder
+  HDRS
+    execution_plan_builder.h
+  SRCS
+    execution_plan_builder.cpp
   DEPS
     :provider_contract
     proto_xllm

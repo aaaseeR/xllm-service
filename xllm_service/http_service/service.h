@@ -86,7 +86,10 @@ class XllmHttpServiceImpl : public proto::XllmHttpService {
  private:
   template <typename T>
   std::shared_ptr<Request> generate_request(T* req_pb,
-                                            brpc::Controller* controller);
+                                            brpc::Controller* controller,
+                                            xllm::proto::ApiKind api_kind,
+                                            const std::string& payload_schema,
+                                            const std::string& payload);
 
   template <typename T>
   void handle(std::shared_ptr<T> call_data,
