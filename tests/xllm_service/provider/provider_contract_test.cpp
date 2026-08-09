@@ -262,6 +262,9 @@ xllm::proto::EngineState make_state(const ProviderDescriptor& descriptor) {
   xllm::proto::EngineState state;
   state.set_engine_uid(descriptor.identity().engine_uid());
   state.set_incarnation_id(descriptor.identity().incarnation_id());
+  state.set_provider_id(descriptor.identity().provider_id());
+  state.set_profile_digest(descriptor.profile_digest());
+  state.set_model_revision(descriptor.model().model_revision());
   state.set_state_seq(1);
   state.set_observed_at_unix_ms(1000);
   state.set_lifecycle(xllm::proto::ENGINE_LIFECYCLE_READY);
@@ -970,6 +973,25 @@ TEST(ProviderContractTest, StrictRouteSelectorUsesCompatibilityMatrix) {
   decode_descriptor = make_remote_pd_descriptors().second;
   decode.descriptor = nullptr;
   EXPECT_FALSE(
+      ProviderRouteSelector::select({prefill},
+                                    {decode},
+                                    xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                                    0,
+                                    0,
+                                    &selection));
+
+  decode.descriptor = &decode_descriptor;
+  prefill.link_state_required = true;
+  EXPECT_FALSE(
+      ProviderRouteSelector::select({prefill},
+                                    {decode},
+                                    xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                                    0,
+                                    0,
+                                    &selection));
+
+  prefill.ready_peer_engine_uids.emplace_back(decode.engine_uid);
+  EXPECT_TRUE(
       ProviderRouteSelector::select({prefill},
                                     {decode},
                                     xllm::proto::PROVIDER_ID_XLLM_NATIVE,

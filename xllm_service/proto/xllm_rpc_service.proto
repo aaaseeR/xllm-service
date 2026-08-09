@@ -18,6 +18,8 @@ syntax = "proto3";
 package xllm_service.proto;
 option cc_generic_services = true;
 
+import "provider.proto";
+
 message Empty {}
 
 enum GenerationDeliveryCode {
@@ -185,6 +187,7 @@ service XllmRpcService {
   rpc RegisterInstance(InstanceMetaInfo) returns (StatusCode) {}
   rpc GetInstanceInfo(InstanceID) returns (InstanceMetaInfo) {}
   rpc Heartbeat(HeartbeatRequest) returns (Status) {}
+  rpc PushEngineState(xllm.proto.StateBatch) returns (Status) {}
   rpc GetStaticDecodeList(InstanceID) returns (InstanceIDs) {}
   rpc GetStaticPrefillList(InstanceID) returns (InstanceIDs) {}
 

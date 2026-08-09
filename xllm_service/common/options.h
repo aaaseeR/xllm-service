@@ -69,6 +69,20 @@ class Options {
 
   PROPERTY(int32_t, lease_lost_heartbeat_timeout_ms) = 3000;
 
+  // V2 immutable Engine Registry and State Stream cache bounds. These are
+  // injected into InstanceMgr and do not create new global FLAGS dependencies.
+  PROPERTY(size_t, engine_registry_max_members) = 4096;
+
+  PROPERTY(size_t, engine_registry_max_links) = 16384;
+
+  PROPERTY(uint64_t, engine_state_soft_ttl_ms) = 3000;
+
+  PROPERTY(uint64_t, engine_state_hard_ttl_ms) = 10000;
+
+  PROPERTY(uint64_t, engine_heartbeat_hard_ttl_ms) = 10000;
+
+  PROPERTY(uint64_t, engine_link_hard_ttl_ms) = 10000;
+
   // scheduler options
   PROPERTY(std::string, load_balance_policy);
 

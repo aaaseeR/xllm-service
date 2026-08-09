@@ -62,19 +62,54 @@ uint64_t current_time_ms() {
       absl::ToInt64Milliseconds(absl::Now() - absl::UnixEpoch()));
 }
 
-bool is_instance_schedulable(const xllm_service::InstanceMetaInfo& info) {
-  // LEASE_LOST instances can still be reused while heartbeats continue.
-  return info.runtime_state != InstanceRuntimeState::SUSPECT;
+uint64_t monotonic_time_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+xllm_service::provider::EngineRegistryConfig engine_registry_config(
+    const xllm_service::Options& options) {
+  return xllm_service::provider::EngineRegistryConfig{
+      .max_members = options.engine_registry_max_members(),
+      .max_links = options.engine_registry_max_links(),
+      .state_soft_ttl_ms = options.engine_state_soft_ttl_ms(),
+      .state_hard_ttl_ms = options.engine_state_hard_ttl_ms(),
+      .heartbeat_hard_ttl_ms = options.engine_heartbeat_hard_ttl_ms(),
+      .link_hard_ttl_ms = options.engine_link_hard_ttl_ms(),
+  };
+}
+
+bool is_instance_schedulable(
+    const xllm_service::InstanceMetaInfo& info,
+    const xllm_service::provider::EngineRegistry& registry,
+    uint64_t now_monotonic_ms) {
+  if (info.runtime_state == InstanceRuntimeState::SUSPECT) {
+    return false;
+  }
+  if (!info.provider_descriptor.has_value() ||
+      !registry.has_current_full_snapshot()) {
+    // Rolling migration fallback until the first valid State Stream FULL.
+    return true;
+  }
+  return registry.is_schedulable(
+      xllm_service::provider::make_provider_engine_key(
+          *info.provider_descriptor),
+      now_monotonic_ms);
 }
 
 size_t count_schedulable_instances(
     const std::unordered_map<std::string, xllm_service::InstanceMetaInfo>&
         instances,
-    const std::vector<std::string>& index) {
+    const std::vector<std::string>& index,
+    const xllm_service::provider::EngineRegistry& registry,
+    uint64_t now_monotonic_ms) {
   size_t count = 0;
   for (const auto& name : index) {
     auto it = instances.find(name);
-    if (it == instances.end() || !is_instance_schedulable(it->second)) {
+    if (it == instances.end() ||
+        !is_instance_schedulable(it->second, registry, now_monotonic_ms)) {
       continue;
     }
     ++count;
@@ -114,7 +149,9 @@ std::vector<xllm_service::provider::ProviderRouteCandidate>
 make_route_candidates(
     const std::unordered_map<std::string, xllm_service::InstanceMetaInfo>&
         instances,
-    const std::vector<std::string>& index) {
+    const std::vector<std::string>& index,
+    const xllm_service::provider::EngineRegistry& registry,
+    uint64_t now_monotonic_ms) {
   std::vector<xllm_service::provider::ProviderRouteCandidate> candidates;
   candidates.reserve(index.size());
   for (const std::string& engine_uid : index) {
@@ -124,7 +161,8 @@ make_route_candidates(
     if (instance_it != instances.end()) {
       candidate.provider_id = instance_it->second.provider_id;
       candidate.role = get_engine_role(instance_it->second);
-      candidate.schedulable = is_instance_schedulable(instance_it->second);
+      candidate.schedulable = is_instance_schedulable(
+          instance_it->second, registry, now_monotonic_ms);
       if (instance_it->second.provider_descriptor.has_value()) {
         candidate.descriptor = &instance_it->second.provider_descriptor.value();
       }
@@ -134,14 +172,48 @@ make_route_candidates(
   return candidates;
 }
 
+void apply_link_readiness(
+    std::vector<xllm_service::provider::ProviderRouteCandidate>* prefills,
+    const std::vector<xllm_service::provider::ProviderRouteCandidate>& decodes,
+    const xllm_service::provider::EngineRegistry& registry,
+    uint64_t now_monotonic_ms) {
+  if (prefills == nullptr || !registry.has_current_full_snapshot()) {
+    return;
+  }
+  for (xllm_service::provider::ProviderRouteCandidate& prefill : *prefills) {
+    if (prefill.descriptor == nullptr ||
+        prefill.role != xllm::proto::ENGINE_ROLE_PREFILL) {
+      continue;
+    }
+    prefill.link_state_required = true;
+    for (const xllm_service::provider::ProviderRouteCandidate& decode :
+         decodes) {
+      if (decode.descriptor == nullptr ||
+          decode.role != xllm::proto::ENGINE_ROLE_DECODE) {
+        continue;
+      }
+      if (registry.is_link_ready(
+              xllm_service::provider::make_provider_engine_key(
+                  *prefill.descriptor),
+              xllm_service::provider::make_provider_engine_key(
+                  *decode.descriptor),
+              now_monotonic_ms)) {
+        prefill.ready_peer_engine_uids.emplace_back(decode.engine_uid);
+      }
+    }
+  }
+}
+
 xllm_service::provider::ProviderRouteCandidate make_route_candidate(
     const std::string& engine_uid,
-    const xllm_service::InstanceMetaInfo& info) {
+    const xllm_service::InstanceMetaInfo& info,
+    const xllm_service::provider::EngineRegistry& registry,
+    uint64_t now_monotonic_ms) {
   return xllm_service::provider::ProviderRouteCandidate{
       .engine_uid = engine_uid,
       .provider_id = info.provider_id,
       .role = get_engine_role(info),
-      .schedulable = is_instance_schedulable(info),
+      .schedulable = is_instance_schedulable(info, registry, now_monotonic_ms),
       .descriptor = info.provider_descriptor.has_value()
                         ? &info.provider_descriptor.value()
                         : nullptr,
@@ -150,11 +222,52 @@ xllm_service::provider::ProviderRouteCandidate make_route_candidate(
 
 bool are_remote_pd_peers_compatible(
     const xllm_service::InstanceMetaInfo& prefill,
+    const xllm_service::InstanceMetaInfo& decode,
+    const xllm_service::provider::EngineRegistry& registry,
+    uint64_t now_monotonic_ms) {
+  const std::vector<xllm_service::provider::ProviderRouteCandidate> prefills = {
+      make_route_candidate(prefill.name, prefill, registry, now_monotonic_ms)};
+  const std::vector<xllm_service::provider::ProviderRouteCandidate> decodes = {
+      make_route_candidate(decode.name, decode, registry, now_monotonic_ms)};
+  xllm_service::provider::ProviderRouteSelection selection;
+  if (!xllm_service::provider::ProviderRouteSelector::select(
+          prefills, decodes, prefill.provider_id, 0, 0, &selection)) {
+    return false;
+  }
+  if (!registry.has_current_full_snapshot() ||
+      !prefill.provider_descriptor.has_value() ||
+      !decode.provider_descriptor.has_value()) {
+    return true;
+  }
+  return registry.is_link_ready(
+      xllm_service::provider::make_provider_engine_key(
+          *prefill.provider_descriptor),
+      xllm_service::provider::make_provider_engine_key(
+          *decode.provider_descriptor),
+      now_monotonic_ms);
+}
+
+bool are_remote_pd_descriptors_compatible(
+    const xllm_service::InstanceMetaInfo& prefill,
     const xllm_service::InstanceMetaInfo& decode) {
   const std::vector<xllm_service::provider::ProviderRouteCandidate> prefills = {
-      make_route_candidate(prefill.name, prefill)};
+      xllm_service::provider::ProviderRouteCandidate{
+          .engine_uid = prefill.name,
+          .provider_id = prefill.provider_id,
+          .role = get_engine_role(prefill),
+          .schedulable = true,
+          .descriptor = prefill.provider_descriptor.has_value()
+                            ? &prefill.provider_descriptor.value()
+                            : nullptr}};
   const std::vector<xllm_service::provider::ProviderRouteCandidate> decodes = {
-      make_route_candidate(decode.name, decode)};
+      xllm_service::provider::ProviderRouteCandidate{
+          .engine_uid = decode.name,
+          .provider_id = decode.provider_id,
+          .role = get_engine_role(decode),
+          .schedulable = true,
+          .descriptor = decode.provider_descriptor.has_value()
+                            ? &decode.provider_descriptor.value()
+                            : nullptr}};
   xllm_service::provider::ProviderRouteSelection selection;
   return xllm_service::provider::ProviderRouteSelector::select(
       prefills, decodes, prefill.provider_id, 0, 0, &selection);
@@ -170,6 +283,7 @@ InstanceMgr::InstanceMgr(const Options& options,
     : options_(options),
       is_master_service_(is_master_service),
       etcd_client_(etcd_client),
+      engine_registry_(engine_registry_config(options)),
       scheduler_(scheduler) {
   auto handle_instance_metainfo =
       std::bind(&InstanceMgr::update_instance_metainfo,
@@ -252,10 +366,17 @@ bool InstanceMgr::get_next_provider(xllm::proto::ProviderId* provider_id) {
     return false;
   }
 
-  const std::vector<provider::ProviderRouteCandidate> prefill_candidates =
-      make_route_candidates(instances_, prefill_index_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
+  std::vector<provider::ProviderRouteCandidate> prefill_candidates =
+      make_route_candidates(
+          instances_, prefill_index_, engine_registry_, now_monotonic_ms);
   const std::vector<provider::ProviderRouteCandidate> decode_candidates =
-      make_route_candidates(instances_, decode_index_);
+      make_route_candidates(
+          instances_, decode_index_, engine_registry_, now_monotonic_ms);
+  apply_link_readiness(&prefill_candidates,
+                       decode_candidates,
+                       engine_registry_,
+                       now_monotonic_ms);
   provider::ProviderRouteSelection selection;
   if (!provider::ProviderRouteSelector::select(
           prefill_candidates,
@@ -280,10 +401,17 @@ bool InstanceMgr::get_next_instance_pair(Routing* routing,
     return false;
   }
 
-  const std::vector<provider::ProviderRouteCandidate> prefill_candidates =
-      make_route_candidates(instances_, prefill_index_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
+  std::vector<provider::ProviderRouteCandidate> prefill_candidates =
+      make_route_candidates(
+          instances_, prefill_index_, engine_registry_, now_monotonic_ms);
   const std::vector<provider::ProviderRouteCandidate> decode_candidates =
-      make_route_candidates(instances_, decode_index_);
+      make_route_candidates(
+          instances_, decode_index_, engine_registry_, now_monotonic_ms);
+  apply_link_readiness(&prefill_candidates,
+                       decode_candidates,
+                       engine_registry_,
+                       now_monotonic_ms);
   provider::ProviderRouteSelection selection;
   if (!provider::ProviderRouteSelector::select(prefill_candidates,
                                                decode_candidates,
@@ -308,14 +436,19 @@ std::vector<std::string> InstanceMgr::get_static_decode_list(
     const std::string& instance_name) {
   std::vector<std::string> decode_list;
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
   const auto source_it = instances_.find(instance_name);
   if (source_it == instances_.end()) {
     return decode_list;
   }
   for (const auto& inst : instances_) {
     if (get_engine_role(inst.second) == xllm::proto::ENGINE_ROLE_DECODE &&
-        is_instance_schedulable(inst.second) &&
-        are_remote_pd_peers_compatible(source_it->second, inst.second)) {
+        is_instance_schedulable(
+            inst.second, engine_registry_, now_monotonic_ms) &&
+        are_remote_pd_peers_compatible(source_it->second,
+                                       inst.second,
+                                       engine_registry_,
+                                       now_monotonic_ms)) {
       decode_list.emplace_back(inst.second.name);
     }
   }
@@ -328,14 +461,19 @@ std::vector<std::string> InstanceMgr::get_static_prefill_list(
     const std::string& instance_name) {
   std::vector<std::string> prefill_list;
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
   const auto source_it = instances_.find(instance_name);
   if (source_it == instances_.end()) {
     return prefill_list;
   }
   for (const auto& inst : instances_) {
     if (get_engine_role(inst.second) == xllm::proto::ENGINE_ROLE_PREFILL &&
-        is_instance_schedulable(inst.second) &&
-        are_remote_pd_peers_compatible(inst.second, source_it->second)) {
+        is_instance_schedulable(
+            inst.second, engine_registry_, now_monotonic_ms) &&
+        are_remote_pd_peers_compatible(inst.second,
+                                       source_it->second,
+                                       engine_registry_,
+                                       now_monotonic_ms)) {
       prefill_list.emplace_back(inst.second.name);
     }
   }
@@ -347,6 +485,7 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos,
                                    xllm::proto::ProviderId provider_id) {
   std::shared_lock<std::shared_mutex> inst_lock(cluster_mutex_);
   std::shared_lock<std::shared_mutex> metric_lock(metrics_mutex_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
 
   for (auto name : infos->overlap_scores.instances) {
     auto it = load_metrics_.find(name);
@@ -356,7 +495,8 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos,
     auto instance_it = instances_.find(name);
     if (instance_it == instances_.end() ||
         instance_it->second.provider_id != provider_id ||
-        !is_instance_schedulable(instance_it->second)) {
+        !is_instance_schedulable(
+            instance_it->second, engine_registry_, now_monotonic_ms)) {
       continue;
     }
 
@@ -384,7 +524,8 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos,
       auto instance_it = instances_.find(metric.first);
       if (instance_it == instances_.end() ||
           instance_it->second.provider_id != provider_id ||
-          !is_instance_schedulable(instance_it->second)) {
+          !is_instance_schedulable(
+              instance_it->second, engine_registry_, now_monotonic_ms)) {
         continue;
       }
       if (instance_it->second.type != InstanceType::DECODE) {
@@ -452,6 +593,21 @@ bool InstanceMgr::upload_load_metrics() {
   return status;
 }
 
+provider::ContractResult InstanceMgr::set_engine_state_registry_view(
+    bool registry_known,
+    std::string master_incarnation) {
+  return engine_registry_.set_registry_view(registry_known,
+                                            std::move(master_incarnation));
+}
+
+provider::ContractResult InstanceMgr::apply_engine_state_batch(
+    const xllm::proto::StateBatch& batch,
+    uint64_t receiver_monotonic_ms,
+    bool* applied) {
+  return engine_registry_.apply_state_batch(
+      batch, receiver_monotonic_ms, applied);
+}
+
 void InstanceMgr::set_as_master() {
   is_master_service_ = true;
   etcd_client_->remove_watch(ETCD_LOADMETRICS_PREFIX);
@@ -470,6 +626,7 @@ std::shared_ptr<brpc::Channel> InstanceMgr::get_channel(
 bool InstanceMgr::bind_request_instance_incarnations(
     const std::shared_ptr<Request>& request) {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
 
   if (request->provider_id == xllm::proto::PROVIDER_ID_UNSPECIFIED) {
     LOG(ERROR) << "Request provider is not selected before route binding.";
@@ -494,7 +651,8 @@ bool InstanceMgr::bind_request_instance_incarnations(
                  << request->routing.prefill_name;
       return false;
     }
-    if (!is_instance_schedulable(prefill_it->second)) {
+    if (!is_instance_schedulable(
+            prefill_it->second, engine_registry_, now_monotonic_ms)) {
       LOG(ERROR) << "Prefill instance is not schedulable when binding request: "
                  << request->routing.prefill_name << ", state: "
                  << runtime_state_name(prefill_it->second.runtime_state);
@@ -517,7 +675,8 @@ bool InstanceMgr::bind_request_instance_incarnations(
                  << request->routing.decode_name;
       return false;
     }
-    if (!is_instance_schedulable(decode_it->second)) {
+    if (!is_instance_schedulable(
+            decode_it->second, engine_registry_, now_monotonic_ms)) {
       LOG(ERROR) << "Decode instance is not schedulable when binding request: "
                  << request->routing.decode_name << ", state: "
                  << runtime_state_name(decode_it->second.runtime_state);
@@ -536,14 +695,21 @@ bool InstanceMgr::bind_request_instance_incarnations(
       instances_.find(request->routing.prefill_name);
   std::vector<provider::ProviderRouteCandidate> selected_prefill = {
       make_route_candidate(selected_prefill_it->first,
-                           selected_prefill_it->second)};
+                           selected_prefill_it->second,
+                           engine_registry_,
+                           now_monotonic_ms)};
   std::vector<provider::ProviderRouteCandidate> selected_decode;
   if (!request->routing.decode_name.empty()) {
     const auto selected_decode_it =
         instances_.find(request->routing.decode_name);
-    selected_decode.emplace_back(make_route_candidate(
-        selected_decode_it->first, selected_decode_it->second));
+    selected_decode.emplace_back(
+        make_route_candidate(selected_decode_it->first,
+                             selected_decode_it->second,
+                             engine_registry_,
+                             now_monotonic_ms));
   }
+  apply_link_readiness(
+      &selected_prefill, selected_decode, engine_registry_, now_monotonic_ms);
   provider::ProviderRouteSelection validated_selection;
   if (!provider::ProviderRouteSelector::select(selected_prefill,
                                                selected_decode,
@@ -564,21 +730,36 @@ bool InstanceMgr::bind_request_instance_incarnations(
 bool InstanceMgr::validate_request_instance_incarnations(
     const std::shared_ptr<Request>& request) const {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
   const auto matches_bound_incarnation =
-      [this](const std::string& instance_name,
-             const std::string& expected_incarnation_id) {
+      [this, now_monotonic_ms](const std::string& instance_name,
+                               const std::string& expected_incarnation_id) {
         if (instance_name.empty()) {
           return expected_incarnation_id.empty();
         }
         const auto it = instances_.find(instance_name);
-        return it != instances_.end() && is_instance_schedulable(it->second) &&
+        return it != instances_.end() &&
+               is_instance_schedulable(
+                   it->second, engine_registry_, now_monotonic_ms) &&
                !expected_incarnation_id.empty() &&
                it->second.incarnation_id == expected_incarnation_id;
       };
-  return matches_bound_incarnation(request->routing.prefill_name,
-                                   request->prefill_incarnation_id) &&
-         matches_bound_incarnation(request->routing.decode_name,
-                                   request->decode_incarnation_id);
+  if (!matches_bound_incarnation(request->routing.prefill_name,
+                                 request->prefill_incarnation_id) ||
+      !matches_bound_incarnation(request->routing.decode_name,
+                                 request->decode_incarnation_id)) {
+    return false;
+  }
+  if (request->routing.decode_name.empty() ||
+      !engine_registry_.has_current_full_snapshot() ||
+      !request->prefill_provider_descriptor.has_value() ||
+      !request->decode_provider_descriptor.has_value()) {
+    return true;
+  }
+  return engine_registry_.is_link_ready(
+      provider::make_provider_engine_key(*request->prefill_provider_descriptor),
+      provider::make_provider_engine_key(*request->decode_provider_descriptor),
+      now_monotonic_ms);
 }
 
 bool InstanceMgr::record_instance_heartbeat(const std::string& instance_name,
@@ -1050,7 +1231,7 @@ bool InstanceMgr::select_instance_pair_on_slo(
     std::shared_ptr<Request> request) {
   std::scoped_lock<std::shared_mutex, std::shared_mutex> lock(cluster_mutex_,
                                                               metrics_mutex_);
-  const bool has_unschedulable_instances = !suspect_instances_.empty();
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
 
   std::string min_prefill_instance;
   int64_t min_prefill_time = std::numeric_limits<int64_t>::max();
@@ -1060,8 +1241,8 @@ bool InstanceMgr::select_instance_pair_on_slo(
     const auto instance_it = instances_.find(prefill_instance);
     if (instance_it == instances_.end() ||
         instance_it->second.provider_id != request->provider_id ||
-        (has_unschedulable_instances &&
-         !is_instance_schedulable(instance_it->second))) {
+        !is_instance_schedulable(
+            instance_it->second, engine_registry_, now_monotonic_ms)) {
       continue;
     }
 
@@ -1089,8 +1270,8 @@ bool InstanceMgr::select_instance_pair_on_slo(
     const auto instance_it = instances_.find(decode_instance);
     if (instance_it == instances_.end() ||
         instance_it->second.provider_id != request->provider_id ||
-        (has_unschedulable_instances &&
-         !is_instance_schedulable(instance_it->second))) {
+        !is_instance_schedulable(
+            instance_it->second, engine_registry_, now_monotonic_ms)) {
       continue;
     }
 
@@ -1167,7 +1348,9 @@ bool InstanceMgr::select_instance_pair_on_slo(
 }
 
 void InstanceMgr::flip_prefill_to_decode(std::string& instance_name) {
-  if (count_schedulable_instances(instances_, prefill_index_) <= 1) {
+  if (count_schedulable_instances(
+          instances_, prefill_index_, engine_registry_, monotonic_time_ms()) <=
+      1) {
     // Ensure there is at least one prefill instance.
     return;
   }
@@ -1188,7 +1371,9 @@ void InstanceMgr::flip_prefill_to_decode(std::string& instance_name) {
 }
 
 void InstanceMgr::flip_decode_to_prefill(std::string& instance_name) {
-  if (count_schedulable_instances(instances_, decode_index_) <= 1) {
+  if (count_schedulable_instances(
+          instances_, decode_index_, engine_registry_, monotonic_time_ms()) <=
+      1) {
     // Ensure there is at least one decode instance.
     return;
   }
@@ -1366,6 +1551,20 @@ bool InstanceMgr::register_instance(const std::string& name,
     cached_channels_[name] = std::move(channel);
   }
 
+  bool registry_member_installed = false;
+  if (info.provider_descriptor.has_value()) {
+    const provider::ContractResult registry_result =
+        engine_registry_.upsert_member(*info.provider_descriptor);
+    if (!registry_result.ok()) {
+      LOG(ERROR) << "Fail to add strict instance to Engine Registry: " << name
+                 << ", error: " << registry_result.message();
+      std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
+      cached_channels_.erase(name);
+      return false;
+    }
+    registry_member_installed = true;
+  }
+
   add_instance_resources(name, info);
 
   std::vector<std::pair<std::string, InstanceMetaInfo>> link_ops;
@@ -1373,6 +1572,10 @@ bool InstanceMgr::register_instance(const std::string& name,
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
     if (!gather_link_operations(info, &link_ops)) {
       remove_instance_resources(name);
+      if (registry_member_installed) {
+        engine_registry_.remove_member(
+            provider::make_provider_engine_key(*info.provider_descriptor));
+      }
       return false;
     }
   }
@@ -1380,6 +1583,10 @@ bool InstanceMgr::register_instance(const std::string& name,
   if (!run_link_operations(link_ops)) {
     std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
     remove_instance_resources(name);
+    if (registry_member_installed) {
+      engine_registry_.remove_member(
+          provider::make_provider_engine_key(*info.provider_descriptor));
+    }
     return false;
   }
 
@@ -1436,6 +1643,11 @@ void InstanceMgr::deregister_instance(
     remove_instance_from_index(name, it->second);
   }
 
+  if (info.provider_descriptor.has_value()) {
+    engine_registry_.remove_member(
+        provider::make_provider_engine_key(*info.provider_descriptor));
+  }
+
   scheduler_->clear_requests_on_failed_instance(
       name, info.incarnation_id, get_cleanup_type(info));
 
@@ -1487,7 +1699,7 @@ bool InstanceMgr::gather_link_operations(
       for (const std::string& decode_name : decode_index_) {
         const InstanceMetaInfo& peer_info = instances_[decode_name];
         if (get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_DECODE &&
-            are_remote_pd_peers_compatible(info, peer_info)) {
+            are_remote_pd_descriptors_compatible(info, peer_info)) {
           out_ops->emplace_back(peer_info.rpc_address, info);
         }
       }
@@ -1497,7 +1709,7 @@ bool InstanceMgr::gather_link_operations(
       for (const std::string& prefill_name : prefill_index_) {
         const InstanceMetaInfo& peer_info = instances_[prefill_name];
         if (get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_PREFILL &&
-            are_remote_pd_peers_compatible(peer_info, info)) {
+            are_remote_pd_descriptors_compatible(peer_info, info)) {
           out_ops->emplace_back(info.rpc_address, peer_info);
         }
       }
@@ -1511,8 +1723,8 @@ bool InstanceMgr::gather_link_operations(
         }
         const bool compatible =
             get_engine_role(info) == xllm::proto::ENGINE_ROLE_PREFILL
-                ? are_remote_pd_peers_compatible(info, peer_info)
-                : are_remote_pd_peers_compatible(peer_info, info);
+                ? are_remote_pd_descriptors_compatible(info, peer_info)
+                : are_remote_pd_descriptors_compatible(peer_info, info);
         if (!compatible) {
           continue;
         }
@@ -1550,7 +1762,7 @@ void InstanceMgr::gather_unlink_operations(
     for (const std::string& decode_name : decode_index_) {
       const InstanceMetaInfo& peer_info = instances_[decode_name];
       if (get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_DECODE &&
-          are_remote_pd_peers_compatible(info, peer_info)) {
+          are_remote_pd_descriptors_compatible(info, peer_info)) {
         out_ops->emplace_back(peer_info.rpc_address, info);
       }
     }
@@ -1558,7 +1770,7 @@ void InstanceMgr::gather_unlink_operations(
     for (const std::string& prefill_name : prefill_index_) {
       const InstanceMetaInfo& peer_info = instances_[prefill_name];
       if (get_engine_role(peer_info) == xllm::proto::ENGINE_ROLE_PREFILL &&
-          are_remote_pd_peers_compatible(peer_info, info)) {
+          are_remote_pd_descriptors_compatible(peer_info, info)) {
         out_ops->emplace_back(peer_info.rpc_address, info);
       }
     }
@@ -1570,8 +1782,8 @@ void InstanceMgr::gather_unlink_operations(
       }
       const bool compatible =
           get_engine_role(info) == xllm::proto::ENGINE_ROLE_PREFILL
-              ? are_remote_pd_peers_compatible(info, peer_info)
-              : are_remote_pd_peers_compatible(peer_info, info);
+              ? are_remote_pd_descriptors_compatible(info, peer_info)
+              : are_remote_pd_descriptors_compatible(peer_info, info);
       if (!compatible) {
         continue;
       }
@@ -1649,10 +1861,17 @@ void InstanceMgr::remove_instance_from_index(const std::string& name,
 
 bool InstanceMgr::has_available_instances() const {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
-  const std::vector<provider::ProviderRouteCandidate> prefill_candidates =
-      make_route_candidates(instances_, prefill_index_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
+  std::vector<provider::ProviderRouteCandidate> prefill_candidates =
+      make_route_candidates(
+          instances_, prefill_index_, engine_registry_, now_monotonic_ms);
   const std::vector<provider::ProviderRouteCandidate> decode_candidates =
-      make_route_candidates(instances_, decode_index_);
+      make_route_candidates(
+          instances_, decode_index_, engine_registry_, now_monotonic_ms);
+  apply_link_readiness(&prefill_candidates,
+                       decode_candidates,
+                       engine_registry_,
+                       now_monotonic_ms);
   provider::ProviderRouteSelection selection;
   return provider::ProviderRouteSelector::select(
       prefill_candidates,

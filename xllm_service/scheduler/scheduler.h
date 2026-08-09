@@ -59,6 +59,10 @@ class Scheduler final {
 
   bool handle_instance_heartbeat(const proto::HeartbeatRequest* req);
 
+  provider::ContractResult handle_engine_state_batch(
+      const xllm::proto::StateBatch& batch,
+      bool* applied);
+
   void exited() { exited_ = true; }
 
   // Returns true if at least one valid instance group is available.

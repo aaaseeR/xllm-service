@@ -31,6 +31,7 @@ limitations under the License.
 #include "common/threadpool.h"
 #include "common/time_predictor.h"
 #include "common/types.h"
+#include "provider/engine_registry.h"
 #include "request/request.h"
 #include "scheduler/etcd_client/etcd_client.h"
 #include "xllm_rpc_service.pb.h"
@@ -74,6 +75,14 @@ class InstanceMgr final {
   void record_load_metrics_update(const std::string& instance_name,
                                   const proto::LoadMetrics& load_metrics);
   bool upload_load_metrics();
+
+  provider::ContractResult set_engine_state_registry_view(
+      bool registry_known,
+      std::string master_incarnation);
+  provider::ContractResult apply_engine_state_batch(
+      const xllm::proto::StateBatch& batch,
+      uint64_t receiver_monotonic_ms,
+      bool* applied);
 
   // update the recent token latency metrics for the corresponding instance
   void update_latency_metrics(const std::string& instance_name,
@@ -187,6 +196,7 @@ class InstanceMgr final {
   uint64_t next_provider_index_ = 0;
   std::unordered_map<std::string, std::shared_ptr<brpc::Channel>>
       cached_channels_;
+  provider::EngineRegistry engine_registry_;
 
   // L2 — metrics & predictors (single lock to avoid order ambiguity)
   std::shared_mutex metrics_mutex_;

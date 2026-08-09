@@ -25,6 +25,7 @@ limitations under the License.
 #include "common/xllm/output.h"
 #include "common/xllm/status.h"
 #include "completion.pb.h"
+#include "provider/provider_contract.h"
 #include "xllm_rpc_service.pb.h"
 
 namespace xllm_service {
@@ -38,6 +39,10 @@ class XllmRpcServiceImpl final {
   ~XllmRpcServiceImpl();
 
   bool heartbeat(const proto::HeartbeatRequest* req);
+
+  provider::ContractResult push_engine_state(
+      const xllm::proto::StateBatch& batch,
+      bool* applied);
 
   InstanceMetaInfo get_instance_info(const std::string& instance_name);
 
@@ -88,6 +93,11 @@ class XllmRpcService : public proto::XllmRpcService {
                          const proto::HeartbeatRequest* req,
                          proto::Status* resp,
                          google::protobuf::Closure* done) override;
+
+  virtual void PushEngineState(google::protobuf::RpcController* cntl_base,
+                               const xllm::proto::StateBatch* req,
+                               proto::Status* resp,
+                               google::protobuf::Closure* done) override;
 
   virtual void GetInstanceInfo(google::protobuf::RpcController* cntl_base,
                                const proto::InstanceID* req,

@@ -2,6 +2,16 @@ include(cc_test)
 
 cc_test(
   NAME
+    engine_registry_test
+  SRCS
+    engine_registry_test.cpp
+  DEPS
+    :engine_registry
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     provider_contract_test
   SRCS
     provider_contract_test.cpp

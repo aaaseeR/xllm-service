@@ -31,6 +31,10 @@ struct ProviderRouteCandidate {
   // Non-owning immutable view valid for the duration of select(). nullptr is
   // the explicit BEST_EFFORT legacy registration path.
   const xllm::proto::ProviderDescriptor* descriptor = nullptr;
+  // When a current State Stream FULL exists, a strict Native P candidate
+  // lists only Decode peers whose incarnation-scoped LinkState is READY.
+  bool link_state_required = false;
+  std::vector<std::string> ready_peer_engine_uids;
 };
 
 struct ProviderRouteSelection {

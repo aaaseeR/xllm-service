@@ -1,6 +1,8 @@
 include(grpc_proto_library)
 include(proto_library)
 
+set(PROTOBUF_IMPORT_DIRS ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto)
+
 proto_library(
   NAME
     proto_rpc_service
@@ -40,3 +42,5 @@ proto_library(
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/rerank.proto
     ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm/proto/models.proto
 )
+
+target_link_libraries(proto_rpc_service PUBLIC proto_xllm)

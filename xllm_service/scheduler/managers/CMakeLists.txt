@@ -13,6 +13,7 @@ cc_library(
   DEPS
     :chat_template
     :common
+    :engine_registry
     :etcd_client
     :provider_contract
     :provider_route_selector

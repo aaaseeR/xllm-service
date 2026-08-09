@@ -41,6 +41,18 @@ cc_library(
 
 cc_library(
   NAME
+    engine_registry
+  HDRS
+    engine_registry.h
+  SRCS
+    engine_registry.cpp
+  DEPS
+    :provider_contract
+    proto_xllm
+)
+
+cc_library(
+  NAME
     provider_route_selector
   HDRS
     provider_route_selector.h

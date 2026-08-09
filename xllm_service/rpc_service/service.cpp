@@ -37,6 +37,12 @@ bool XllmRpcServiceImpl::heartbeat(const proto::HeartbeatRequest* req) {
   return scheduler_->handle_instance_heartbeat(req);
 }
 
+provider::ContractResult XllmRpcServiceImpl::push_engine_state(
+    const xllm::proto::StateBatch& batch,
+    bool* applied) {
+  return scheduler_->handle_engine_state_batch(batch, applied);
+}
+
 InstanceMetaInfo XllmRpcServiceImpl::get_instance_info(
     const std::string& instance_name) {
   return scheduler_->get_instance_info(instance_name);
@@ -111,6 +117,22 @@ void XllmRpcService::Heartbeat(google::protobuf::RpcController* cntl_base,
                                google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   resp->set_ok(xllm_rpc_service_impl_->heartbeat(req));
+}
+
+void XllmRpcService::PushEngineState(google::protobuf::RpcController* cntl_base,
+                                     const xllm::proto::StateBatch* req,
+                                     proto::Status* resp,
+                                     google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  bool applied = false;
+  const provider::ContractResult result =
+      xllm_rpc_service_impl_->push_engine_state(*req, &applied);
+  resp->set_ok(result.ok());
+  if (!result.ok()) {
+    resp->set_status_msg(result.message());
+  } else if (!applied) {
+    resp->set_status_msg("stale StateBatch ignored");
+  }
 }
 
 void XllmRpcService::GetStaticDecodeList(

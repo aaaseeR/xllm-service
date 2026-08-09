@@ -20,9 +20,21 @@ limitations under the License.
 
 #include "disagg_pd.pb.h"
 #include "rpc_service/disagg_generation_adapter.h"
+#include "xllm_rpc_service.pb.h"
 
 namespace xllm_service {
 namespace {
+
+TEST(StateStreamProtocolTest, PushRpcUsesSharedStateBatchType) {
+  const google::protobuf::ServiceDescriptor* service =
+      proto::XllmRpcService::descriptor();
+  ASSERT_NE(service, nullptr);
+  const google::protobuf::MethodDescriptor* method =
+      service->FindMethodByName("PushEngineState");
+  ASSERT_NE(method, nullptr);
+  EXPECT_EQ(method->input_type()->full_name(), "xllm.proto.StateBatch");
+  EXPECT_EQ(method->output_type()->full_name(), "xllm_service.proto.Status");
+}
 
 proto::DisaggStreamGeneration make_generation(int32_t num_prompt_tokens,
                                               int32_t num_generated_tokens,

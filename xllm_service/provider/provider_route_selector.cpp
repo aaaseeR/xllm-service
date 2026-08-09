@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "provider/provider_route_selector.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -56,6 +57,12 @@ bool remote_pd_compatible(const ProviderRouteCandidate& prefill,
     return true;
   }
   if (prefill.descriptor == nullptr || decode.descriptor == nullptr) {
+    return false;
+  }
+  if (prefill.link_state_required &&
+      std::find(prefill.ready_peer_engine_uids.begin(),
+                prefill.ready_peer_engine_uids.end(),
+                decode.engine_uid) == prefill.ready_peer_engine_uids.end()) {
     return false;
   }
   std::string compatibility_proof;

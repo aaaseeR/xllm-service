@@ -699,7 +699,10 @@ ContractResult validate_encoded_request(
 ContractResult validate_engine_state(const ProviderDescriptor& descriptor,
                                      const xllm::proto::EngineState& state) {
   if (state.engine_uid() != descriptor.identity().engine_uid() ||
-      state.incarnation_id() != descriptor.identity().incarnation_id()) {
+      state.incarnation_id() != descriptor.identity().incarnation_id() ||
+      state.provider_id() != descriptor.identity().provider_id() ||
+      state.profile_digest() != descriptor.profile_digest() ||
+      state.model_revision() != descriptor.model().model_revision()) {
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
                 "engine state identity does not match descriptor");
   }

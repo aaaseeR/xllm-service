@@ -48,6 +48,13 @@ constexpr int32_t kRegistrationMaxRetries = 5;
 constexpr const char* kEtcdUsernameEnvVar = "ETCD_USERNAME";
 constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
 
+uint64_t monotonic_time_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
 xllm_service::provider::ExecutionHoldCleanupTable::Config execution_hold_config(
     const xllm_service::Options& options) {
   return xllm_service::provider::ExecutionHoldCleanupTable::Config{
@@ -240,6 +247,14 @@ Scheduler::Scheduler(const Options& options)
 
   instance_mgr_ = std::make_shared<InstanceMgr>(
       options, etcd_client_, is_master_service_, this);
+  const provider::ContractResult state_registry_result =
+      instance_mgr_->set_engine_state_registry_view(
+          is_master_service_,
+          is_master_service_ ? service_incarnation_id_ : "");
+  if (!state_registry_result.ok()) {
+    LOG(FATAL) << "Failed to initialize Engine State Registry view: "
+               << state_registry_result.message();
+  }
 
   global_kvcache_mgr_ = std::make_shared<GlobalKVCacheMgr>(
       options, etcd_client_, is_master_service_);
@@ -526,6 +541,18 @@ bool Scheduler::handle_instance_heartbeat(const proto::HeartbeatRequest* req) {
   return true;
 }
 
+provider::ContractResult Scheduler::handle_engine_state_batch(
+    const xllm::proto::StateBatch& batch,
+    bool* applied) {
+  if (exited_) {
+    return provider::ContractResult::failure(
+        xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+        "Scheduler is exiting");
+  }
+  return instance_mgr_->apply_engine_state_batch(
+      batch, monotonic_time_ms(), applied);
+}
+
 void Scheduler::handle_master_service_watch(const etcd::Response& response,
                                             const uint64_t& prefix_len) {
   if (exited_ || response.events().empty()) {
@@ -542,6 +569,13 @@ void Scheduler::handle_master_service_watch(const etcd::Response& response,
 
     global_kvcache_mgr_->set_as_master();
     instance_mgr_->set_as_master();
+    const provider::ContractResult state_registry_result =
+        instance_mgr_->set_engine_state_registry_view(true,
+                                                      service_incarnation_id_);
+    if (!state_registry_result.ok()) {
+      LOG(ERROR) << "Failed to activate Engine State Registry master: "
+                 << state_registry_result.message();
+    }
   }
 }
 
