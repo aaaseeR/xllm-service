@@ -266,10 +266,9 @@ Scheduler::Scheduler(const Options& options)
       },
       service_incarnation_id_);
   const provider::ContractResult state_registry_result =
-      instance_mgr_->set_engine_state_registry_view(
-          is_master_service_ || !observed_master_incarnation.empty(),
-          is_master_service_ ? service_incarnation_id_
-                             : observed_master_incarnation);
+      instance_mgr_->set_engine_state_master(is_master_service_
+                                                 ? service_incarnation_id_
+                                                 : observed_master_incarnation);
   if (!state_registry_result.ok()) {
     LOG(FATAL) << "Failed to initialize Engine State Registry view: "
                << state_registry_result.message();
@@ -530,8 +529,7 @@ void Scheduler::activate_as_master() {
   }
   instance_mgr_->require_provider_link_recheck();
   const provider::ContractResult state_registry_result =
-      instance_mgr_->set_engine_state_registry_view(true,
-                                                    service_incarnation_id_);
+      instance_mgr_->set_engine_state_master(service_incarnation_id_);
   if (!state_registry_result.ok()) {
     LOG(ERROR) << "Failed to activate Engine State Registry master: "
                << state_registry_result.message();
@@ -675,7 +673,7 @@ void Scheduler::run_state_stream_publisher() {
           master_incarnation == service_incarnation_id_;
       if (!still_master) {
         deactivate_as_master();
-        instance_mgr_->set_engine_state_registry_view(false, "");
+        instance_mgr_->set_engine_state_master(master_incarnation);
         continue;
       }
       refresh_state_stream_subscribers();
@@ -876,7 +874,7 @@ void Scheduler::handle_master_identity_watch(const etcd::Response& response,
                          &master_incarnation) ||
       master_address.empty() || master_incarnation.empty()) {
     deactivate_as_master();
-    instance_mgr_->set_engine_state_registry_view(false, "");
+    instance_mgr_->set_engine_state_master("");
     return;
   }
   if (master_address == options_.service_name() &&
@@ -886,7 +884,7 @@ void Scheduler::handle_master_identity_watch(const etcd::Response& response,
   }
   deactivate_as_master();
   const provider::ContractResult result =
-      instance_mgr_->set_engine_state_registry_view(true, master_incarnation);
+      instance_mgr_->set_engine_state_master(master_incarnation);
   if (!result.ok()) {
     LOG(ERROR) << "Failed to update Engine State Registry master view: "
                << result.message();

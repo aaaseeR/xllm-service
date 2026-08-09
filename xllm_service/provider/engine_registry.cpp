@@ -52,12 +52,13 @@ xllm::proto::ProviderEngineKey make_provider_engine_key(
 }
 
 EngineRegistry::EngineRegistry(EngineRegistryConfig config)
-    : config_(std::move(config)) {
+    : config_(config), observation_controller_(config.observation) {
   config_valid_ =
       config_.max_members > 0 && config_.max_links > 0 &&
       config_.state_soft_ttl_ms > 0 && config_.state_hard_ttl_ms > 0 &&
       config_.state_soft_ttl_ms <= config_.state_hard_ttl_ms &&
-      config_.heartbeat_hard_ttl_ms > 0 && config_.link_hard_ttl_ms > 0;
+      config_.heartbeat_hard_ttl_ms > 0 && config_.link_hard_ttl_ms > 0 &&
+      config_.direct_evidence_ttl_ms > 0 && observation_controller_.valid();
 }
 
 bool EngineRegistry::EngineKey::operator<(const EngineKey& other) const {
@@ -143,6 +144,7 @@ ContractResult EngineRegistry::upsert_member(
     const EngineKey old_key = current->second;
     members_.erase(old_key);
     states_.erase(old_key);
+    direct_evidence_.erase(old_key);
     for (auto link = links_.begin(); link != links_.end();) {
       if (same_engine_key(link->first.prefill, old_key) ||
           same_engine_key(link->first.decode, old_key)) {
@@ -175,6 +177,7 @@ bool EngineRegistry::remove_member(
   const std::string engine_uid = member->second.identity().engine_uid();
   members_.erase(member);
   states_.erase(key.value());
+  direct_evidence_.erase(key.value());
   const auto current = current_by_engine_uid_.find(engine_uid);
   if (current != current_by_engine_uid_.end() &&
       same_engine_key(current->second, key.value())) {
@@ -192,22 +195,23 @@ bool EngineRegistry::remove_member(
   return true;
 }
 
-ContractResult EngineRegistry::set_registry_view(
-    bool registry_known,
-    std::string master_incarnation) {
-  if (registry_known && master_incarnation.empty()) {
-    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
-                "Known Registry view must identify the current master");
-  }
+ContractResult EngineRegistry::set_registry_visibility(bool registry_known) {
   if (!config_valid_) {
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
                 "Engine Registry configuration is invalid");
   }
   std::unique_lock lock(mutex_);
   registry_known_ = registry_known;
-  if (!registry_known) {
-    return ContractResult::success();
+  return ContractResult::success();
+}
+
+ContractResult EngineRegistry::set_state_stream_master(
+    std::string master_incarnation) {
+  if (!config_valid_) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "Engine Registry configuration is invalid");
   }
+  std::unique_lock lock(mutex_);
   if (master_incarnation_ != master_incarnation) {
     master_incarnation_ = std::move(master_incarnation);
     full_snapshot_master_incarnation_.clear();
@@ -560,6 +564,7 @@ ContractResult EngineRegistry::apply_state_batch(
     states_ = std::move(incoming_states);
     links_ = std::move(incoming_links);
     full_snapshot_master_incarnation_ = master_incarnation_;
+    has_accepted_full_snapshot_ = true;
   } else {
     for (auto& [key, incoming] : incoming_states) {
       const auto existing = states_.find(key);
@@ -570,6 +575,7 @@ ContractResult EngineRegistry::apply_state_batch(
     }
     for (const EngineKey& key : removed) {
       states_.erase(key);
+      direct_evidence_.erase(key);
       for (auto link = links_.begin(); link != links_.end();) {
         if (same_engine_key(link->first.prefill, key) ||
             same_engine_key(link->first.decode, key)) {
@@ -590,6 +596,36 @@ ContractResult EngineRegistry::apply_state_batch(
 
   last_snapshot_seq_ = batch.snapshot_seq();
   *applied = true;
+  return ContractResult::success();
+}
+
+ContractResult EngineRegistry::record_direct_evidence(
+    const xllm::proto::ProviderEngineKey& wire_key,
+    bool success,
+    uint64_t receiver_monotonic_ms) {
+  if (!config_valid_) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "Engine Registry configuration is invalid");
+  }
+  const std::optional<EngineKey> key = to_engine_key(wire_key);
+  if (!key.has_value()) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_MISSING_REQUIRED_FIELD,
+                "Direct evidence Engine key is incomplete");
+  }
+  std::unique_lock lock(mutex_);
+  const auto member = members_.find(key.value());
+  if (member == members_.end() ||
+      member->second.identity().engine_uid() != wire_key.engine_uid()) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
+                "Direct evidence does not match a Registry member");
+  }
+  DirectEvidence& evidence = direct_evidence_[key.value()];
+  std::optional<uint64_t>& timestamp = success
+                                           ? evidence.last_success_monotonic_ms
+                                           : evidence.last_failure_monotonic_ms;
+  if (!timestamp.has_value() || receiver_monotonic_ms > *timestamp) {
+    timestamp = receiver_monotonic_ms;
+  }
   return ContractResult::success();
 }
 
@@ -650,23 +686,73 @@ EngineStateFreshness EngineRegistry::state_freshness(
   return EngineStateFreshness::FRESH;
 }
 
-bool EngineRegistry::is_schedulable(
-    const xllm::proto::ProviderEngineKey& wire_key,
+bool EngineRegistry::has_usable_state_snapshot_locked() const {
+  if (!has_accepted_full_snapshot_ || states_.size() != members_.size()) {
+    return false;
+  }
+  for (const auto& [key, member] : members_) {
+    const auto state = states_.find(key);
+    if (state == states_.end() ||
+        state->second.state.engine_uid() != member.identity().engine_uid()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+ObservationInput EngineRegistry::observation_input_locked(
     uint64_t receiver_monotonic_ms) const {
-  const std::optional<EngineKey> key = to_engine_key(wire_key);
-  if (!key.has_value()) {
-    return false;
+  size_t hard_stale_member_count = 0;
+  for (const auto& [key, member] : members_) {
+    static_cast<void>(member);
+    const auto state = states_.find(key);
+    if (state == states_.end() ||
+        !state->second.state.has_state_age_ms_at_publish() ||
+        !state->second.state.has_heartbeat_age_ms_at_publish()) {
+      ++hard_stale_member_count;
+      continue;
+    }
+    const uint64_t state_age =
+        effective_age_ms(state->second.state.state_age_ms_at_publish(),
+                         state->second.received_monotonic_ms,
+                         receiver_monotonic_ms);
+    const uint64_t heartbeat_age =
+        effective_age_ms(state->second.state.heartbeat_age_ms_at_publish(),
+                         state->second.received_monotonic_ms,
+                         receiver_monotonic_ms);
+    if (state_age > config_.state_hard_ttl_ms ||
+        heartbeat_age > config_.heartbeat_hard_ttl_ms) {
+      ++hard_stale_member_count;
+    }
   }
-  std::shared_lock lock(mutex_);
-  if (!registry_known_ ||
-      full_snapshot_master_incarnation_ != master_incarnation_) {
-    return false;
-  }
-  const auto member = members_.find(key.value());
-  const auto state = states_.find(key.value());
+  return ObservationInput{
+      .registry_known = registry_known_,
+      .has_usable_state_snapshot = has_usable_state_snapshot_locked(),
+      .has_current_full_snapshot =
+          !master_incarnation_.empty() &&
+          full_snapshot_master_incarnation_ == master_incarnation_,
+      .member_count = members_.size(),
+      .hard_stale_member_count = hard_stale_member_count,
+  };
+}
+
+std::optional<ObservationSnapshot> EngineRegistry::update_observation_locked(
+    uint64_t receiver_monotonic_ms) const {
+  std::string error;
+  return observation_controller_.update(
+      observation_input_locked(receiver_monotonic_ms),
+      receiver_monotonic_ms,
+      &error);
+}
+
+bool EngineRegistry::has_unrefuted_cached_state_locked(
+    const EngineKey& key,
+    const std::string& engine_uid) const {
+  const auto member = members_.find(key);
+  const auto state = states_.find(key);
   if (member == members_.end() || state == states_.end() ||
-      member->second.identity().engine_uid() != wire_key.engine_uid() ||
-      state->second.state.engine_uid() != wire_key.engine_uid()) {
+      member->second.identity().engine_uid() != engine_uid ||
+      state->second.state.engine_uid() != engine_uid) {
     return false;
   }
   const xllm::proto::EngineState& engine_state = state->second.state;
@@ -675,7 +761,10 @@ bool EngineRegistry::is_schedulable(
       engine_state.shallow_health() != xllm::proto::HEALTH_STATUS_HEALTHY ||
       engine_state.state_quality() == xllm::proto::STATE_QUALITY_STALE ||
       !engine_state.has_heartbeat_age_ms_at_publish() ||
-      !engine_state.has_state_age_ms_at_publish()) {
+      !engine_state.has_state_age_ms_at_publish() ||
+      engine_state.state_age_ms_at_publish() > config_.state_hard_ttl_ms ||
+      engine_state.heartbeat_age_ms_at_publish() >
+          config_.heartbeat_hard_ttl_ms) {
     return false;
   }
   if (has_capability(member->second,
@@ -683,16 +772,82 @@ bool EngineRegistry::is_schedulable(
       engine_state.deep_health() != xllm::proto::HEALTH_STATUS_HEALTHY) {
     return false;
   }
+
+  const auto evidence = direct_evidence_.find(key);
+  if (evidence == direct_evidence_.end() ||
+      !evidence->second.last_failure_monotonic_ms.has_value()) {
+    return true;
+  }
+  uint64_t latest_positive_ms = state->second.received_monotonic_ms;
+  if (evidence->second.last_success_monotonic_ms.has_value()) {
+    latest_positive_ms = std::max(latest_positive_ms,
+                                  *evidence->second.last_success_monotonic_ms);
+  }
+  return *evidence->second.last_failure_monotonic_ms < latest_positive_ms;
+}
+
+bool EngineRegistry::has_recent_direct_success_locked(
+    const EngineKey& key,
+    uint64_t receiver_monotonic_ms) const {
+  const auto evidence = direct_evidence_.find(key);
+  if (evidence == direct_evidence_.end() ||
+      !evidence->second.last_success_monotonic_ms.has_value() ||
+      receiver_monotonic_ms < *evidence->second.last_success_monotonic_ms ||
+      receiver_monotonic_ms - *evidence->second.last_success_monotonic_ms >
+          config_.direct_evidence_ttl_ms) {
+    return false;
+  }
+  return !evidence->second.last_failure_monotonic_ms.has_value() ||
+         *evidence->second.last_failure_monotonic_ms <
+             *evidence->second.last_success_monotonic_ms;
+}
+
+bool EngineRegistry::is_schedulable_locked(
+    const EngineKey& key,
+    const std::string& engine_uid,
+    uint64_t receiver_monotonic_ms,
+    const ObservationSnapshot& observation) const {
+  if (!has_accepted_full_snapshot_ ||
+      !has_unrefuted_cached_state_locked(key, engine_uid)) {
+    return false;
+  }
+  if (observation.mode == ObservationMode::REGISTRY_BLIND) {
+    return observation.within_grace;
+  }
+  if (observation.mode == ObservationMode::STATE_BLIND) {
+    return observation.within_grace ||
+           has_recent_direct_success_locked(key, receiver_monotonic_ms);
+  }
+
+  const CachedEngineState& cached_state = states_.find(key)->second;
+  const xllm::proto::EngineState& engine_state = cached_state.state;
   const uint64_t state_age =
       effective_age_ms(engine_state.state_age_ms_at_publish(),
-                       state->second.received_monotonic_ms,
+                       cached_state.received_monotonic_ms,
                        receiver_monotonic_ms);
   const uint64_t heartbeat_age =
       effective_age_ms(engine_state.heartbeat_age_ms_at_publish(),
-                       state->second.received_monotonic_ms,
+                       cached_state.received_monotonic_ms,
                        receiver_monotonic_ms);
   return state_age <= config_.state_hard_ttl_ms &&
          heartbeat_age <= config_.heartbeat_hard_ttl_ms;
+}
+
+bool EngineRegistry::is_schedulable(
+    const xllm::proto::ProviderEngineKey& wire_key,
+    uint64_t receiver_monotonic_ms) const {
+  const std::optional<EngineKey> key = to_engine_key(wire_key);
+  if (!key.has_value()) {
+    return false;
+  }
+  std::unique_lock lock(mutex_);
+  const std::optional<ObservationSnapshot> observation =
+      update_observation_locked(receiver_monotonic_ms);
+  if (!observation.has_value()) {
+    return false;
+  }
+  return is_schedulable_locked(
+      key.value(), wire_key.engine_uid(), receiver_monotonic_ms, *observation);
 }
 
 bool EngineRegistry::is_link_ready(
@@ -704,9 +859,18 @@ bool EngineRegistry::is_link_ready(
   if (!prefill_key.has_value() || !decode_key.has_value()) {
     return false;
   }
-  std::shared_lock lock(mutex_);
-  if (!registry_known_ ||
-      full_snapshot_master_incarnation_ != master_incarnation_) {
+  std::unique_lock lock(mutex_);
+  const std::optional<ObservationSnapshot> observation =
+      update_observation_locked(receiver_monotonic_ms);
+  if (!observation.has_value() ||
+      !is_schedulable_locked(prefill_key.value(),
+                             prefill.engine_uid(),
+                             receiver_monotonic_ms,
+                             *observation) ||
+      !is_schedulable_locked(decode_key.value(),
+                             decode.engine_uid(),
+                             receiver_monotonic_ms,
+                             *observation)) {
     return false;
   }
   const auto link = links_.find(
@@ -718,10 +882,21 @@ bool EngineRegistry::is_link_ready(
       !link->second.state.has_age_ms_at_publish()) {
     return false;
   }
-  const uint64_t age = effective_age_ms(link->second.state.age_ms_at_publish(),
-                                        link->second.received_monotonic_ms,
-                                        receiver_monotonic_ms);
-  return age <= config_.link_hard_ttl_ms;
+  if (link->second.state.age_ms_at_publish() > config_.link_hard_ttl_ms) {
+    return false;
+  }
+  if (observation->mode != ObservationMode::NORMAL) {
+    return true;
+  }
+  return effective_age_ms(link->second.state.age_ms_at_publish(),
+                          link->second.received_monotonic_ms,
+                          receiver_monotonic_ms) <= config_.link_hard_ttl_ms;
+}
+
+std::optional<ObservationSnapshot> EngineRegistry::observation_snapshot(
+    uint64_t receiver_monotonic_ms) const {
+  std::unique_lock lock(mutex_);
+  return update_observation_locked(receiver_monotonic_ms);
 }
 
 bool EngineRegistry::registry_known() const {

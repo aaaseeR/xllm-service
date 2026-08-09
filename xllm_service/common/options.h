@@ -83,6 +83,20 @@ class Options {
 
   PROPERTY(uint64_t, engine_link_hard_ttl_ms) = 10000;
 
+  PROPERTY(uint64_t, engine_direct_evidence_ttl_ms) = 3000;
+
+  PROPERTY(double, state_blind_enter_ratio) = 0.5;
+
+  PROPERTY(double, state_blind_exit_ratio) = 0.2;
+
+  PROPERTY(uint64_t, state_blind_enter_hold_ms) = 1000;
+
+  PROPERTY(uint64_t, state_blind_exit_hold_ms) = 3000;
+
+  PROPERTY(uint64_t, state_blind_grace_ms) = 10000;
+
+  PROPERTY(uint64_t, registry_blind_grace_ms) = 3000;
+
   PROPERTY(uint64_t, engine_link_retry_initial_ms) = 1000;
 
   PROPERTY(uint64_t, engine_link_retry_max_ms) = 10000;

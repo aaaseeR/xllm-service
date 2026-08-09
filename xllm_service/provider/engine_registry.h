@@ -23,6 +23,7 @@ limitations under the License.
 #include <string>
 
 #include "provider.pb.h"
+#include "provider/observation_controller.h"
 #include "provider/provider_contract.h"
 
 namespace xllm_service::provider {
@@ -34,6 +35,8 @@ struct EngineRegistryConfig {
   uint64_t state_hard_ttl_ms = 10000;
   uint64_t heartbeat_hard_ttl_ms = 10000;
   uint64_t link_hard_ttl_ms = 10000;
+  uint64_t direct_evidence_ttl_ms = 3000;
+  ObservationControllerConfig observation;
 };
 
 enum class EngineStateFreshness : int8_t {
@@ -56,10 +59,11 @@ class EngineRegistry final {
       const xllm::proto::ProviderDescriptor& descriptor);
   bool remove_member(const xllm::proto::ProviderEngineKey& key);
 
-  // A master change retains the last snapshot for diagnostics but requires a
-  // new FULL before any DELTA or scheduling decision can be accepted.
-  ContractResult set_registry_view(bool registry_known,
-                                   std::string master_incarnation);
+  // Registry visibility and State Stream master identity are independent.
+  // A master change retains the last legal snapshot for conservative routing
+  // but requires a new FULL before subsequent DELTA batches are accepted.
+  ContractResult set_registry_visibility(bool registry_known);
+  ContractResult set_state_stream_master(std::string master_incarnation);
   // Master-side ingestion. These methods update only soft observations for an
   // existing Registry member and report whether a newer sequence was stored.
   ContractResult record_engine_state(const xllm::proto::EngineState& state,
@@ -75,6 +79,10 @@ class EngineRegistry final {
   ContractResult apply_state_batch(const xllm::proto::StateBatch& batch,
                                    uint64_t receiver_monotonic_ms,
                                    bool* applied);
+  ContractResult record_direct_evidence(
+      const xllm::proto::ProviderEngineKey& key,
+      bool success,
+      uint64_t receiver_monotonic_ms);
 
   std::optional<xllm::proto::ProviderDescriptor> find_member(
       const xllm::proto::ProviderEngineKey& key) const;
@@ -88,6 +96,8 @@ class EngineRegistry final {
   bool is_link_ready(const xllm::proto::ProviderEngineKey& prefill,
                      const xllm::proto::ProviderEngineKey& decode,
                      uint64_t receiver_monotonic_ms) const;
+  std::optional<ObservationSnapshot> observation_snapshot(
+      uint64_t receiver_monotonic_ms) const;
 
   bool registry_known() const;
   bool has_current_full_snapshot() const;
@@ -121,6 +131,11 @@ class EngineRegistry final {
     uint64_t received_monotonic_ms = 0;
   };
 
+  struct DirectEvidence {
+    std::optional<uint64_t> last_success_monotonic_ms;
+    std::optional<uint64_t> last_failure_monotonic_ms;
+  };
+
   static std::optional<EngineKey> to_engine_key(
       const xllm::proto::ProviderEngineKey& key);
   static bool same_engine_key(const EngineKey& left, const EngineKey& right);
@@ -130,15 +145,31 @@ class EngineRegistry final {
 
   ContractResult validate_link_state_locked(
       const xllm::proto::LinkState& state) const;
+  ObservationInput observation_input_locked(
+      uint64_t receiver_monotonic_ms) const;
+  std::optional<ObservationSnapshot> update_observation_locked(
+      uint64_t receiver_monotonic_ms) const;
+  bool has_usable_state_snapshot_locked() const;
+  bool is_schedulable_locked(const EngineKey& key,
+                             const std::string& engine_uid,
+                             uint64_t receiver_monotonic_ms,
+                             const ObservationSnapshot& observation) const;
+  bool has_unrefuted_cached_state_locked(const EngineKey& key,
+                                         const std::string& engine_uid) const;
+  bool has_recent_direct_success_locked(const EngineKey& key,
+                                        uint64_t receiver_monotonic_ms) const;
 
   EngineRegistryConfig config_;
   bool config_valid_ = false;
   mutable std::shared_mutex mutex_;
+  mutable ObservationController observation_controller_;
   std::map<EngineKey, xllm::proto::ProviderDescriptor> members_;
   std::map<std::string, EngineKey> current_by_engine_uid_;
   std::map<EngineKey, CachedEngineState> states_;
   std::map<LinkKey, CachedLinkState> links_;
+  std::map<EngineKey, DirectEvidence> direct_evidence_;
   bool registry_known_ = false;
+  bool has_accepted_full_snapshot_ = false;
   std::string master_incarnation_;
   std::string full_snapshot_master_incarnation_;
   uint64_t last_snapshot_seq_ = 0;

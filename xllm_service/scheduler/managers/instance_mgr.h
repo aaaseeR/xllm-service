@@ -78,8 +78,9 @@ class InstanceMgr final {
                                   const proto::LoadMetrics& load_metrics);
   bool upload_load_metrics();
 
-  provider::ContractResult set_engine_state_registry_view(
-      bool registry_known,
+  provider::ContractResult set_engine_state_registry_visibility(
+      bool registry_known);
+  provider::ContractResult set_engine_state_master(
       std::string master_incarnation);
   provider::ContractResult apply_engine_state_batch(
       const xllm::proto::StateBatch& batch,

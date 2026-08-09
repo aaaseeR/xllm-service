@@ -12,6 +12,16 @@ cc_test(
 
 cc_test(
   NAME
+    observation_controller_test
+  SRCS
+    observation_controller_test.cpp
+  DEPS
+    :observation_controller
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     state_stream_outbox_test
   SRCS
     state_stream_outbox_test.cpp

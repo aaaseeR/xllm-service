@@ -164,7 +164,22 @@ EngineRegistryConfig test_config() {
       .state_hard_ttl_ms = 20,
       .heartbeat_hard_ttl_ms = 20,
       .link_hard_ttl_ms = 10,
+      .direct_evidence_ttl_ms = 8,
+      .observation =
+          ObservationControllerConfig{
+              .state_blind_enter_ratio = 0.5,
+              .state_blind_exit_ratio = 0.25,
+              .state_blind_enter_hold_ms = 5,
+              .state_blind_exit_hold_ms = 5,
+              .state_blind_grace_ms = 10,
+              .registry_blind_grace_ms = 4,
+          },
   };
+}
+
+void set_registry_view(EngineRegistry* registry, std::string master) {
+  ASSERT_TRUE(registry->set_registry_visibility(true).ok());
+  ASSERT_TRUE(registry->set_state_stream_master(std::move(master)).ok());
 }
 
 TEST(EngineRegistryTest, RequiresCurrentMasterFullBeforeScheduling) {
@@ -175,7 +190,7 @@ TEST(EngineRegistryTest, RequiresCurrentMasterFullBeforeScheduling) {
       xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
   ASSERT_TRUE(registry.upsert_member(prefill).ok());
   ASSERT_TRUE(registry.upsert_member(decode).ok());
-  ASSERT_TRUE(registry.set_registry_view(true, "master-1").ok());
+  set_registry_view(&registry, "master-1");
 
   bool applied = false;
   xllm::proto::StateBatch delta =
@@ -203,9 +218,9 @@ TEST(EngineRegistryTest, RequiresCurrentMasterFullBeforeScheduling) {
   ASSERT_TRUE(registry.apply_state_batch(full, 101, &applied).ok());
   EXPECT_FALSE(applied);
 
-  ASSERT_TRUE(registry.set_registry_view(true, "master-2").ok());
+  set_registry_view(&registry, "master-2");
   EXPECT_FALSE(registry.has_current_full_snapshot());
-  EXPECT_FALSE(registry.is_schedulable(make_provider_engine_key(prefill), 101));
+  EXPECT_TRUE(registry.is_schedulable(make_provider_engine_key(prefill), 101));
   EXPECT_EQ(registry.apply_state_batch(full, 101, &applied).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
 
@@ -221,7 +236,7 @@ TEST(EngineRegistryTest, UsesReceiverMonotonicAgeAndNeverRegressesState) {
   const xllm::proto::ProviderEngineKey key =
       make_provider_engine_key(descriptor);
   ASSERT_TRUE(registry.upsert_member(descriptor).ok());
-  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+  set_registry_view(&registry, "master");
   xllm::proto::StateBatch full =
       make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
   *full.add_engine_states() =
@@ -261,7 +276,7 @@ TEST(EngineRegistryTest, IncarnationReplacementCannotBeResurrectedByState) {
   xllm::proto::ProviderDescriptor replacement = old_descriptor;
   replacement.mutable_identity()->set_incarnation_id("new-inc");
   ASSERT_TRUE(registry.upsert_member(old_descriptor).ok());
-  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+  set_registry_view(&registry, "master");
   xllm::proto::StateBatch full =
       make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
   *full.add_engine_states() = make_state(old_descriptor, 1);
@@ -292,7 +307,7 @@ TEST(EngineRegistryTest, RejectsIncompleteFullAndDuplicateState) {
       xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
   ASSERT_TRUE(registry.upsert_member(prefill).ok());
   ASSERT_TRUE(registry.upsert_member(decode).ok());
-  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+  set_registry_view(&registry, "master");
 
   xllm::proto::StateBatch full =
       make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
@@ -320,7 +335,7 @@ TEST(EngineRegistryTest, LinkProofLifecycleAndTtlFailClosed) {
       xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
   ASSERT_TRUE(registry.upsert_member(prefill).ok());
   ASSERT_TRUE(registry.upsert_member(decode).ok());
-  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+  set_registry_view(&registry, "master");
   xllm::proto::StateBatch full =
       make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
   *full.add_engine_states() = make_state(prefill, 1);
@@ -358,7 +373,7 @@ TEST(EngineRegistryTest, MasterIngestionBuildsRebasedAuthoritativeFull) {
       xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
   ASSERT_TRUE(registry.upsert_member(prefill).ok());
   ASSERT_TRUE(registry.upsert_member(decode).ok());
-  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+  set_registry_view(&registry, "master");
 
   bool applied = false;
   xllm::proto::EngineState prefill_state =
@@ -410,7 +425,7 @@ TEST(EngineRegistryTest, MasterFullWaitsForEveryMemberObservation) {
       xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
   ASSERT_TRUE(registry.upsert_member(prefill).ok());
   ASSERT_TRUE(registry.upsert_member(decode).ok());
-  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+  set_registry_view(&registry, "master");
   bool applied = false;
   ASSERT_TRUE(
       registry.record_engine_state(make_state(prefill, 1), 100, &applied).ok());
@@ -471,12 +486,128 @@ TEST(EngineRegistryTest, ConcurrentMembershipUpdatesRemainBounded) {
   }
 }
 
+TEST(EngineRegistryTest, ColdReplicaCannotUseStateBeforeFirstFull) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor descriptor = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderEngineKey key =
+      make_provider_engine_key(descriptor);
+  ASSERT_TRUE(registry.upsert_member(descriptor).ok());
+  set_registry_view(&registry, "master");
+  bool applied = false;
+  ASSERT_TRUE(
+      registry.record_engine_state(make_state(descriptor, 1), 100, &applied)
+          .ok());
+  ASSERT_TRUE(applied);
+
+  EXPECT_FALSE(registry.is_schedulable(key, 100));
+  const std::optional<ObservationSnapshot> observation =
+      registry.observation_snapshot(100);
+  ASSERT_TRUE(observation.has_value());
+  EXPECT_EQ(observation->mode, ObservationMode::STATE_BLIND);
+}
+
+TEST(EngineRegistryTest, StateBlindUsesGraceThenFreshDirectEvidence) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor prefill = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderDescriptor decode = make_descriptor(
+      xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
+  const xllm::proto::ProviderEngineKey prefill_key =
+      make_provider_engine_key(prefill);
+  const xllm::proto::ProviderEngineKey decode_key =
+      make_provider_engine_key(decode);
+  ASSERT_TRUE(registry.upsert_member(prefill).ok());
+  ASSERT_TRUE(registry.upsert_member(decode).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(prefill, 1);
+  *full.add_engine_states() = make_state(decode, 1);
+  *full.add_link_states() = make_link(prefill, decode, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  ASSERT_TRUE(applied);
+  ASSERT_TRUE(registry.is_link_ready(prefill_key, decode_key, 100));
+
+  EXPECT_FALSE(registry.is_schedulable(prefill_key, 121));
+  EXPECT_TRUE(registry.is_schedulable(prefill_key, 126));
+  EXPECT_TRUE(registry.is_link_ready(prefill_key, decode_key, 126));
+  EXPECT_FALSE(registry.is_link_ready(prefill_key, decode_key, 136));
+
+  ASSERT_TRUE(registry.record_direct_evidence(prefill_key, true, 136).ok());
+  ASSERT_TRUE(registry.record_direct_evidence(decode_key, true, 136).ok());
+  EXPECT_TRUE(registry.is_link_ready(prefill_key, decode_key, 136));
+  ASSERT_TRUE(registry.record_direct_evidence(decode_key, false, 137).ok());
+  EXPECT_FALSE(registry.is_link_ready(prefill_key, decode_key, 137));
+  ASSERT_TRUE(registry.record_direct_evidence(decode_key, true, 138).ok());
+  EXPECT_TRUE(registry.is_link_ready(prefill_key, decode_key, 138));
+  EXPECT_FALSE(registry.is_link_ready(prefill_key, decode_key, 147));
+}
+
+TEST(EngineRegistryTest, RegistryBlindExpiresAndFailureIsImmediate) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor descriptor = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderEngineKey key =
+      make_provider_engine_key(descriptor);
+  ASSERT_TRUE(registry.upsert_member(descriptor).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(descriptor, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  ASSERT_TRUE(registry.is_schedulable(key, 100));
+
+  ASSERT_TRUE(registry.set_registry_visibility(false).ok());
+  EXPECT_TRUE(registry.is_schedulable(key, 101));
+  ASSERT_TRUE(registry.record_direct_evidence(key, false, 102).ok());
+  EXPECT_FALSE(registry.is_schedulable(key, 102));
+  ASSERT_TRUE(registry.record_direct_evidence(key, true, 103).ok());
+  EXPECT_TRUE(registry.is_schedulable(key, 103));
+  EXPECT_FALSE(registry.is_schedulable(key, 105));
+}
+
+TEST(EngineRegistryTest, CurrentMasterFullAndExitHoldRecoverStateBlind) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor descriptor = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderEngineKey key =
+      make_provider_engine_key(descriptor);
+  ASSERT_TRUE(registry.upsert_member(descriptor).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(descriptor, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  ASSERT_TRUE(registry.is_schedulable(key, 100));
+  EXPECT_FALSE(registry.is_schedulable(key, 121));
+  EXPECT_TRUE(registry.is_schedulable(key, 126));
+
+  xllm::proto::StateBatch recovered =
+      make_batch("master", 2, xllm::proto::STATE_BATCH_KIND_FULL);
+  *recovered.add_engine_states() = make_state(descriptor, 2);
+  ASSERT_TRUE(registry.apply_state_batch(recovered, 130, &applied).ok());
+  ASSERT_TRUE(applied);
+  const std::optional<ObservationSnapshot> recovering =
+      registry.observation_snapshot(130);
+  ASSERT_TRUE(recovering.has_value());
+  EXPECT_EQ(recovering->mode, ObservationMode::STATE_BLIND);
+  const std::optional<ObservationSnapshot> recovered_observation =
+      registry.observation_snapshot(135);
+  ASSERT_TRUE(recovered_observation.has_value());
+  EXPECT_EQ(recovered_observation->mode, ObservationMode::NORMAL);
+  EXPECT_TRUE(registry.is_schedulable(key, 135));
+}
+
 TEST(EngineRegistryTest, PublishAgeOverflowAndMissingAgeAreRejected) {
   EngineRegistry registry(test_config());
   const xllm::proto::ProviderDescriptor descriptor = make_descriptor(
       xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
   ASSERT_TRUE(registry.upsert_member(descriptor).ok());
-  ASSERT_TRUE(registry.set_registry_view(true, "master").ok());
+  set_registry_view(&registry, "master");
   xllm::proto::StateBatch full =
       make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
   *full.add_engine_states() = make_state(descriptor, 1);

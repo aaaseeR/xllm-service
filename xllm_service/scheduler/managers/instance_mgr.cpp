@@ -78,6 +78,16 @@ xllm_service::provider::EngineRegistryConfig engine_registry_config(
       .state_hard_ttl_ms = options.engine_state_hard_ttl_ms(),
       .heartbeat_hard_ttl_ms = options.engine_heartbeat_hard_ttl_ms(),
       .link_hard_ttl_ms = options.engine_link_hard_ttl_ms(),
+      .direct_evidence_ttl_ms = options.engine_direct_evidence_ttl_ms(),
+      .observation =
+          xllm_service::provider::ObservationControllerConfig{
+              .state_blind_enter_ratio = options.state_blind_enter_ratio(),
+              .state_blind_exit_ratio = options.state_blind_exit_ratio(),
+              .state_blind_enter_hold_ms = options.state_blind_enter_hold_ms(),
+              .state_blind_exit_hold_ms = options.state_blind_exit_hold_ms(),
+              .state_blind_grace_ms = options.state_blind_grace_ms(),
+              .registry_blind_grace_ms = options.registry_blind_grace_ms(),
+          },
   };
 }
 
@@ -106,10 +116,8 @@ bool is_instance_schedulable(
   if (info.runtime_state == InstanceRuntimeState::SUSPECT) {
     return false;
   }
-  if (!info.provider_descriptor.has_value() ||
-      !registry.has_current_full_snapshot()) {
-    // Rolling migration fallback until the first valid State Stream FULL.
-    return true;
+  if (!info.provider_descriptor.has_value()) {
+    return false;
   }
   return registry.is_schedulable(
       xllm_service::provider::make_provider_engine_key(
@@ -195,7 +203,7 @@ void apply_link_readiness(
     const std::vector<xllm_service::provider::ProviderRouteCandidate>& decodes,
     const xllm_service::provider::EngineRegistry& registry,
     uint64_t now_monotonic_ms) {
-  if (prefills == nullptr || !registry.has_current_full_snapshot()) {
+  if (prefills == nullptr) {
     return;
   }
   for (xllm_service::provider::ProviderRouteCandidate& prefill : *prefills) {
@@ -252,10 +260,9 @@ bool are_remote_pd_peers_compatible(
           prefills, decodes, prefill.provider_id, 0, 0, &selection)) {
     return false;
   }
-  if (!registry.has_current_full_snapshot() ||
-      !prefill.provider_descriptor.has_value() ||
+  if (!prefill.provider_descriptor.has_value() ||
       !decode.provider_descriptor.has_value()) {
-    return true;
+    return false;
   }
   return registry.is_link_ready(
       xllm_service::provider::make_provider_engine_key(
@@ -337,8 +344,17 @@ InstanceMgr::InstanceMgr(const Options& options,
 
 void InstanceMgr::init() {
   std::unordered_map<std::string, InstanceMetaInfo> loaded_instances;
+  bool registry_known = true;
   for (auto& it : ETCD_KEYS_PREFIX_MAP) {
-    etcd_client_->get_prefix(it.second, &loaded_instances);
+    const bool prefix_known =
+        etcd_client_->get_prefix(it.second, &loaded_instances);
+    registry_known = registry_known && prefix_known;
+  }
+  const provider::ContractResult visibility_result =
+      engine_registry_.set_registry_visibility(registry_known);
+  if (!visibility_result.ok()) {
+    LOG(FATAL) << "Failed to initialize Engine Registry visibility: "
+               << visibility_result.message();
   }
   LOG(INFO) << "Load instance info from etcd:" << loaded_instances.size();
 
@@ -621,11 +637,15 @@ bool InstanceMgr::upload_load_metrics() {
   return status;
 }
 
-provider::ContractResult InstanceMgr::set_engine_state_registry_view(
-    bool registry_known,
+provider::ContractResult InstanceMgr::set_engine_state_registry_visibility(
+    bool registry_known) {
+  return engine_registry_.set_registry_visibility(registry_known);
+}
+
+provider::ContractResult InstanceMgr::set_engine_state_master(
     std::string master_incarnation) {
-  return engine_registry_.set_registry_view(registry_known,
-                                            std::move(master_incarnation));
+  return engine_registry_.set_state_stream_master(
+      std::move(master_incarnation));
 }
 
 provider::ContractResult InstanceMgr::apply_engine_state_batch(
@@ -824,11 +844,12 @@ bool InstanceMgr::validate_request_instance_incarnations(
                                  request->decode_incarnation_id)) {
     return false;
   }
-  if (request->routing.decode_name.empty() ||
-      !engine_registry_.has_current_full_snapshot() ||
-      !request->prefill_provider_descriptor.has_value() ||
-      !request->decode_provider_descriptor.has_value()) {
+  if (request->routing.decode_name.empty()) {
     return true;
+  }
+  if (!request->prefill_provider_descriptor.has_value() ||
+      !request->decode_provider_descriptor.has_value()) {
+    return false;
   }
   return engine_registry_.is_link_ready(
       provider::make_provider_engine_key(*request->prefill_provider_descriptor),
@@ -1123,6 +1144,20 @@ void InstanceMgr::reconcile_instance_states() {
       std::max<int64_t>(1, options_.lease_lost_heartbeat_timeout_ms());
   while (!exited_) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    bool registry_known = true;
+    for (const auto& [instance_type, prefix] : ETCD_KEYS_PREFIX_MAP) {
+      static_cast<void>(instance_type);
+      std::unordered_map<std::string, InstanceMetaInfo> probe;
+      const bool prefix_known = etcd_client_->get_prefix(prefix, &probe);
+      registry_known = registry_known && prefix_known;
+    }
+    const provider::ContractResult visibility_result =
+        engine_registry_.set_registry_visibility(registry_known);
+    if (!visibility_result.ok()) {
+      LOG(ERROR) << "Failed to update Engine Registry visibility: "
+                 << visibility_result.message();
+    }
 
     std::vector<std::pair<std::string, std::string>> to_deregister;
 

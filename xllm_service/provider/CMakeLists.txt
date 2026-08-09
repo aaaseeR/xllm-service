@@ -47,8 +47,18 @@ cc_library(
   SRCS
     engine_registry.cpp
   DEPS
+    :observation_controller
     :provider_contract
     proto_xllm
+)
+
+cc_library(
+  NAME
+    observation_controller
+  HDRS
+    observation_controller.h
+  SRCS
+    observation_controller.cpp
 )
 
 cc_library(
