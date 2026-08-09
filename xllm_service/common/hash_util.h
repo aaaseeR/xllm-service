@@ -44,10 +44,8 @@ struct XXH3Key {
                        XXH3_128BITS_HASH_VALUE_LEN);
   }
 
-  bool operator==(const XXH3Key& other) {
-    return strncmp(reinterpret_cast<const char*>(data),
-                   reinterpret_cast<const char*>(other.data),
-                   XXH3_128BITS_HASH_VALUE_LEN);
+  bool operator==(const XXH3Key& other) const {
+    return memcmp(data, other.data, XXH3_128BITS_HASH_VALUE_LEN) == 0;
   }
 };
 

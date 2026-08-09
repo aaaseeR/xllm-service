@@ -52,6 +52,26 @@ cc_test(
 
 cc_test(
   NAME
+    kv_route_planner_test
+  SRCS
+    kv_route_planner_test.cpp
+  DEPS
+    :kv_route_planner
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    kv_route_metrics_test
+  SRCS
+    kv_route_metrics_test.cpp
+  DEPS
+    :kv_route_metrics
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     kv_state_outbox_test
   SRCS
     kv_state_outbox_test.cpp

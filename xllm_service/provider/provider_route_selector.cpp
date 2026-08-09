@@ -141,4 +141,64 @@ bool ProviderRouteSelector::select(
   return false;
 }
 
+bool ProviderRouteSelector::select_candidates(
+    const std::vector<ProviderRouteCandidate>& prefill_candidates,
+    const std::vector<ProviderRouteCandidate>& decode_candidates,
+    xllm::proto::ProviderId required_provider_id,
+    size_t max_selections,
+    std::vector<ProviderRouteSelection>* selections,
+    bool* truncated) {
+  if (selections == nullptr || truncated == nullptr || max_selections == 0) {
+    return false;
+  }
+  selections->clear();
+  *truncated = false;
+
+  const auto append = [&](const ProviderRouteCandidate& prefill,
+                          const ProviderRouteCandidate* decode) {
+    if (selections->size() == max_selections) {
+      *truncated = true;
+      return false;
+    }
+    selections->emplace_back(ProviderRouteSelection{
+        .prefill_engine_uid = prefill.engine_uid,
+        .decode_engine_uid = decode == nullptr ? "" : decode->engine_uid,
+        .provider_id = prefill.provider_id,
+    });
+    return true;
+  };
+
+  for (const ProviderRouteCandidate& prefill : prefill_candidates) {
+    if (!prefill.schedulable || prefill.engine_uid.empty() ||
+        !is_supported_provider(prefill.provider_id) ||
+        !provider_matches(prefill.provider_id, required_provider_id) ||
+        !descriptor_matches_candidate(prefill)) {
+      continue;
+    }
+    if (prefill.role == xllm::proto::ENGINE_ROLE_AGGREGATED) {
+      if (!append(prefill, nullptr)) {
+        return true;
+      }
+      continue;
+    }
+    if (prefill.role != xllm::proto::ENGINE_ROLE_PREFILL ||
+        prefill.provider_id != xllm::proto::PROVIDER_ID_XLLM_NATIVE) {
+      continue;
+    }
+    for (const ProviderRouteCandidate& decode : decode_candidates) {
+      if (!decode.schedulable || decode.engine_uid.empty() ||
+          decode.role != xllm::proto::ENGINE_ROLE_DECODE ||
+          decode.provider_id != prefill.provider_id ||
+          !descriptor_matches_candidate(decode) ||
+          !remote_pd_compatible(prefill, decode)) {
+        continue;
+      }
+      if (!append(prefill, &decode)) {
+        return true;
+      }
+    }
+  }
+  return !selections->empty();
+}
+
 }  // namespace xllm_service::provider

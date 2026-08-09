@@ -31,6 +31,7 @@ limitations under the License.
 #include "loadbalance_policy/loadbalance_policy.h"
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
+#include "provider/kv_route_metrics.h"
 #include "provider/kv_shadow_index.h"
 #include "provider/kv_state_outbox.h"
 #include "provider/kv_state_replica.h"
@@ -78,6 +79,8 @@ class Scheduler final {
       const xllm::proto::KVEventBatch& batch);
   provider::KVApplyResult handle_kv_state_batch(
       const xllm::proto::KVStateBatch& batch);
+
+  provider::KVRouteMetricsSnapshot kv_route_metrics_snapshot() const;
 
   void exited();
 
@@ -181,6 +184,9 @@ class Scheduler final {
       std::string* failure_message);
   bool select_retry_instances(const std::shared_ptr<Request>& request);
   bool prepare_v2_execution_plan(const std::shared_ptr<Request>& request);
+  void record_kv_route_decision(const std::shared_ptr<Request>& request);
+  void record_kv_route_actual(const std::shared_ptr<Request>& request,
+                              const llm::RequestOutput* output);
   void detach_execution_hold_locked(const std::shared_ptr<Request>& request);
   void fail_output_dispatch_locked(const std::shared_ptr<Request>& request,
                                    llm::StatusCode status_code,
@@ -259,6 +265,7 @@ class Scheduler final {
   std::unique_ptr<std::thread> state_stream_thread_;
 
   std::unique_ptr<provider::KVShadowIndex> kv_shadow_index_;
+  provider::KVRouteMetrics kv_route_metrics_;
   std::unique_ptr<provider::KVStateOutbox> kv_state_outbox_;
   std::unique_ptr<provider::KVStateReplica> kv_state_replica_;
   std::mutex kv_state_wait_mutex_;

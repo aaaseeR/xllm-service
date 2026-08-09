@@ -380,8 +380,8 @@ Scheduler::Scheduler(const Options& options)
       options, etcd_client_, is_master_service_);
 
   if (options.load_balance_policy() == "CAR") {
-    lb_policy_ =
-        std::make_unique<CacheAwareRouting>(instance_mgr_, global_kvcache_mgr_);
+    lb_policy_ = std::make_unique<CacheAwareRouting>(
+        options_, instance_mgr_, kv_shadow_index_.get());
   } else if (options.load_balance_policy() == "SLO_AWARE") {
     lb_policy_ = std::make_unique<SloAwarePolicy>(options, instance_mgr_);
   } else {
@@ -525,6 +525,7 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
   if (!prepare_v2_execution_plan(request)) {
     return false;
   }
+  record_kv_route_decision(request);
   DLOG(INFO) << request->routing.debug_string();
 
   // update request metrics
@@ -1560,6 +1561,7 @@ bool Scheduler::request_cancel_fences_for_retry(
 bool Scheduler::select_retry_instances(
     const std::shared_ptr<Request>& request) {
   const bool requires_strict_route = request->execution_plan.has_value();
+  record_kv_route_actual(request, nullptr);
   request->routing = Routing();
   request->prefill_incarnation_id.clear();
   request->decode_incarnation_id.clear();
@@ -1668,6 +1670,7 @@ bool Scheduler::retry_first_output_attempt_locked(
         "First-output retry could not rebuild the V2 ExecutionPlan";
     return false;
   }
+  record_kv_route_decision(request);
   request->prefill_stage_finished.store(false, std::memory_order_release);
   request->latest_generate_time = absl::Now();
   request->output_event_sequencer.reset();
@@ -2449,6 +2452,7 @@ void Scheduler::finish_request(const std::string& service_request_id,
   }
 
   if (request != nullptr) {
+    record_kv_route_actual(request, nullptr);
     if (error) {
       instance_mgr_->update_request_metrics(request, RequestAction::CANCEL);
     } else {
@@ -2693,6 +2697,9 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
       update_request_metrics(request, finished_on_prefill_instance);
       update_token_latency_metrics(request, finished_on_prefill_instance);
     }
+    if (status_error || ready_output.finished) {
+      record_kv_route_actual(request, &ready_output);
+    }
   }
 
   size_t req_thread_idx = -1;
@@ -2773,6 +2780,46 @@ void Scheduler::update_request_metrics(std::shared_ptr<Request> request,
     // update instance request metrics
     instance_mgr_->update_request_metrics(request, RequestAction::GENERATE);
   }
+}
+
+void Scheduler::record_kv_route_decision(
+    const std::shared_ptr<Request>& request) {
+  if (request == nullptr || !request->kv_route_observation.has_value()) {
+    return;
+  }
+  request->kv_route_actual_recorded.store(false, std::memory_order_release);
+  kv_route_metrics_.record_decision(*request->kv_route_observation);
+}
+
+void Scheduler::record_kv_route_actual(const std::shared_ptr<Request>& request,
+                                       const llm::RequestOutput* output) {
+  if (request == nullptr || !request->kv_route_observation.has_value() ||
+      request->kv_route_actual_recorded.exchange(true,
+                                                 std::memory_order_acq_rel)) {
+    return;
+  }
+  provider::KVRouteActual actual;
+  if (request->kv_route_observation->mode == provider::KVRouteMode::DISABLED) {
+    actual.prefix_state = provider::PrefixMetricState::DISABLED;
+  } else if (output != nullptr && output->usage.has_value() &&
+             output->usage->num_cached_tokens <=
+                 output->usage->num_prompt_tokens) {
+    const uint64_t hit_tokens = output->usage->num_cached_tokens;
+    actual.prefix_state = hit_tokens == 0
+                              ? provider::PrefixMetricState::VALID_ZERO
+                              : provider::PrefixMetricState::VALID_NONZERO;
+    actual.actual_hit_tokens = hit_tokens;
+    actual.actual_prefill_tokens =
+        output->usage->num_prompt_tokens - hit_tokens;
+    // The current Engine result does not expose D remote_shared_num as bytes.
+    // Preserve MISSING until that independent fact reaches the wire.
+    actual.skipped_transfer_bytes = std::nullopt;
+  }
+  kv_route_metrics_.record_actual(*request->kv_route_observation, actual);
+}
+
+provider::KVRouteMetricsSnapshot Scheduler::kv_route_metrics_snapshot() const {
+  return kv_route_metrics_.snapshot();
 }
 
 void Scheduler::update_token_latency_metrics(

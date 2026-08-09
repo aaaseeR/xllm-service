@@ -69,6 +69,13 @@ uint64_t monotonic_time_ms() {
           .count());
 }
 
+uint64_t saturated_add(uint64_t left, uint64_t right) {
+  if (left > std::numeric_limits<uint64_t>::max() - right) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return left + right;
+}
+
 xllm_service::provider::EngineRegistryConfig engine_registry_config(
     const xllm_service::Options& options) {
   return xllm_service::provider::EngineRegistryConfig{
@@ -607,6 +614,145 @@ void InstanceMgr::get_load_metrics(LoadBalanceInfos* infos,
         std::make_pair(least_loaded_decode_instance,
                        load_metrics_[least_loaded_decode_instance]));
   }
+}
+
+bool InstanceMgr::get_kv_route_candidates(
+    xllm::proto::ProviderId provider_id,
+    const std::string& model_revision,
+    size_t max_candidate_plans,
+    std::vector<provider::KVRoutePlanCandidate>* candidates,
+    bool* truncated) {
+  if (provider_id == xllm::proto::PROVIDER_ID_UNSPECIFIED ||
+      model_revision.empty() || max_candidate_plans == 0 ||
+      candidates == nullptr || truncated == nullptr) {
+    return false;
+  }
+  candidates->clear();
+  *truncated = false;
+
+  std::scoped_lock<std::shared_mutex, std::shared_mutex> lock(cluster_mutex_,
+                                                              metrics_mutex_);
+  const uint64_t now_monotonic_ms = monotonic_time_ms();
+  std::vector<provider::ProviderRouteCandidate> prefills =
+      make_route_candidates(
+          instances_, prefill_index_, engine_registry_, now_monotonic_ms);
+  const std::vector<provider::ProviderRouteCandidate> decodes =
+      make_route_candidates(
+          instances_, decode_index_, engine_registry_, now_monotonic_ms);
+  apply_link_readiness(&prefills, decodes, engine_registry_, now_monotonic_ms);
+
+  std::vector<provider::ProviderRouteSelection> selections;
+  if (!provider::ProviderRouteSelector::select_candidates(prefills,
+                                                          decodes,
+                                                          provider_id,
+                                                          max_candidate_plans,
+                                                          &selections,
+                                                          truncated)) {
+    return false;
+  }
+
+  const auto make_candidate = [&](const std::string& engine_uid) {
+    provider::KVRouteEngineCandidate candidate;
+    const auto instance = instances_.find(engine_uid);
+    if (instance == instances_.end()) {
+      return candidate;
+    }
+    const InstanceMetaInfo& info = instance->second;
+    candidate.engine_uid = engine_uid;
+    candidate.role = get_engine_role(info);
+    if (info.provider_descriptor.has_value()) {
+      candidate.engine_key =
+          provider::make_provider_engine_key(*info.provider_descriptor);
+      candidate.model_revision =
+          info.provider_descriptor->model().model_revision();
+      candidate.kv_namespace = "profile:" + info.provider_profile_digest;
+      candidate.cache_group = "group:0";
+      candidate.block_size = info.provider_descriptor->kv().block_size();
+    }
+
+    const auto load = load_metrics_.find(engine_uid);
+    if (load != load_metrics_.end()) {
+      candidate.load_known = true;
+      candidate.waiting_requests = load->second.waiting_requests_num;
+      candidate.kv_used_ratio = std::clamp(
+          static_cast<double>(load->second.gpu_cache_usage_perc), 0.0, 1.0);
+    }
+    const auto pending = request_metrics_.find(engine_uid);
+    if (pending != request_metrics_.end()) {
+      const bool includes_prefill =
+          candidate.role != xllm::proto::ENGINE_ROLE_DECODE;
+      const bool includes_decode =
+          candidate.role != xllm::proto::ENGINE_ROLE_PREFILL;
+      const uint64_t prefill_requests = static_cast<uint64_t>(
+          std::max<int64_t>(0, pending->second.prefill_request_num));
+      const uint64_t decode_requests = static_cast<uint64_t>(
+          std::max<int64_t>(0, pending->second.decode_request_num));
+      const uint64_t prefill_tokens = static_cast<uint64_t>(
+          std::max<int64_t>(0, pending->second.prefill_token_num));
+      const uint64_t decode_tokens = static_cast<uint64_t>(
+          std::max<int64_t>(0, pending->second.decode_token_num));
+      candidate.local_pending_requests =
+          saturated_add(includes_prefill ? prefill_requests : 0,
+                        includes_decode ? decode_requests : 0);
+      candidate.local_pending_tokens =
+          saturated_add(includes_prefill ? prefill_tokens : 0,
+                        includes_decode ? decode_tokens : 0);
+    }
+
+    if (info.provider_descriptor.has_value()) {
+      const std::optional<xllm::proto::EngineState> state =
+          engine_registry_.find_state(candidate.engine_key);
+      if (state.has_value()) {
+        candidate.load_known = true;
+        uint64_t state_waiting = 0;
+        uint64_t state_running = 0;
+        uint64_t free_blocks = std::numeric_limits<uint64_t>::max();
+        bool has_free_blocks = false;
+        for (const xllm::proto::PerDpEngineState& dp : state->per_dp()) {
+          if (dp.has_waiting_capacity()) {
+            state_waiting = saturated_add(state_waiting, dp.waiting_capacity());
+          }
+          if (dp.has_waiting_deferred()) {
+            state_waiting = saturated_add(state_waiting, dp.waiting_deferred());
+          }
+          if (dp.has_running()) {
+            state_running = saturated_add(state_running, dp.running());
+          }
+          if (dp.has_kv_used_ratio()) {
+            candidate.kv_used_ratio =
+                std::max(candidate.kv_used_ratio,
+                         std::clamp(dp.kv_used_ratio(), 0.0, 1.0));
+          }
+          if (dp.has_kv_free_blocks()) {
+            free_blocks = std::min(free_blocks, dp.kv_free_blocks());
+            has_free_blocks = true;
+          }
+        }
+        candidate.waiting_requests =
+            std::max(candidate.waiting_requests, state_waiting);
+        candidate.running_requests = state_running;
+        candidate.kv_free_blocks = has_free_blocks ? free_blocks : 0;
+      }
+    }
+    return candidate;
+  };
+
+  candidates->reserve(selections.size());
+  for (const provider::ProviderRouteSelection& selection : selections) {
+    provider::KVRoutePlanCandidate plan;
+    plan.prefill = make_candidate(selection.prefill_engine_uid);
+    if (plan.prefill.model_revision != model_revision) {
+      continue;
+    }
+    if (!selection.decode_engine_uid.empty()) {
+      plan.decode = make_candidate(selection.decode_engine_uid);
+      if (plan.decode->model_revision != model_revision) {
+        continue;
+      }
+    }
+    candidates->emplace_back(std::move(plan));
+  }
+  return !candidates->empty();
 }
 
 void InstanceMgr::record_load_metrics_update(

@@ -44,6 +44,7 @@ cc_library(
     :common
     :execution_hold
     :first_output_retry_budget
+    :kv_route_planner
     :output_event_sequencer
     proto_xllm
   INCLUDES

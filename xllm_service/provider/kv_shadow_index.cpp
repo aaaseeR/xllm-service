@@ -93,6 +93,18 @@ std::string KVShadowIndex::entry_key(const xllm::proto::KVBlockEntry& entry) {
   return entry.SerializeAsString();
 }
 
+std::string KVShadowIndex::lookup_key(const std::string& block_hash,
+                                      const std::string& cache_group,
+                                      xllm::proto::KVCacheTier tier) {
+  std::string key;
+  key.reserve(block_hash.size() + cache_group.size() + 2);
+  key.append(block_hash);
+  key.push_back('\0');
+  key.append(cache_group);
+  key.push_back(static_cast<char>(tier));
+  return key;
+}
+
 size_t KVShadowIndex::entry_bytes(const xllm::proto::KVBlockEntry& entry) {
   return entry.ByteSizeLong() + kEntryAccountingOverhead;
 }
@@ -147,6 +159,7 @@ void KVShadowIndex::make_unknown_locked(EngineShadow* shadow) {
   index_entries_ -= shadow->live.size();
   index_bytes_ -= shadow->live_bytes;
   shadow->live.clear();
+  shadow->lookup_counts.clear();
   shadow->live_bytes = 0;
   shadow->health = KVShadowHealth::UNKNOWN;
   shadow->recovery.reset();
@@ -174,6 +187,9 @@ bool KVShadowIndex::apply_event_locked(EngineShadow* shadow,
       return false;
     }
     shadow->live.emplace(key, event.block());
+    ++shadow->lookup_counts[lookup_key(event.block().block_hash(),
+                                       event.block().cache_group(),
+                                       event.block().tier())];
     shadow->live_bytes += bytes;
     ++index_entries_;
     index_bytes_ += bytes;
@@ -183,6 +199,13 @@ bool KVShadowIndex::apply_event_locked(EngineShadow* shadow,
     return false;
   }
   if (existing != shadow->live.end()) {
+    const std::string lookup = lookup_key(existing->second.block_hash(),
+                                          existing->second.cache_group(),
+                                          existing->second.tier());
+    auto count = shadow->lookup_counts.find(lookup);
+    if (count != shadow->lookup_counts.end() && --count->second == 0) {
+      shadow->lookup_counts.erase(count);
+    }
     const size_t bytes = entry_bytes(existing->second);
     shadow->live_bytes -= bytes;
     index_bytes_ -= bytes;
@@ -391,6 +414,12 @@ bool KVShadowIndex::replace_live_from_recovery_locked(EngineShadow* shadow) {
     return false;
   }
   shadow->live = std::move(recovery.staging);
+  shadow->lookup_counts.clear();
+  for (const auto& [key, entry] : shadow->live) {
+    static_cast<void>(key);
+    ++shadow->lookup_counts[lookup_key(
+        entry.block_hash(), entry.cache_group(), entry.tier())];
+  }
   shadow->live_bytes = recovery.staging_bytes;
   index_entries_ += shadow->live.size();
   index_bytes_ += shadow->live_bytes;
@@ -569,14 +598,55 @@ bool KVShadowIndex::contains(const xllm::proto::KVStreamIdentity& identity,
       found->second.health != KVShadowHealth::READY) {
     return false;
   }
-  for (const auto& [key, entry] : found->second.live) {
-    static_cast<void>(key);
-    if (entry.block_hash() == block_hash &&
-        entry.cache_group() == cache_group && entry.tier() == tier) {
-      return true;
-    }
+  return found->second.lookup_counts.find(
+             lookup_key(block_hash, cache_group, tier)) !=
+         found->second.lookup_counts.end();
+}
+
+KVPrefixMatch KVShadowIndex::match_contiguous_prefix(
+    const xllm::proto::KVStreamIdentity& identity,
+    const std::vector<std::string>& block_hashes,
+    const std::string& cache_group,
+    xllm::proto::KVCacheTier tier) const {
+  KVPrefixMatch match;
+  if (cache_group.empty() || !xllm::proto::KVCacheTier_IsValid(tier) ||
+      tier == xllm::proto::KV_CACHE_TIER_UNSPECIFIED) {
+    return match;
   }
-  return false;
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto found = streams_.find(stream_key(identity));
+  if (found == streams_.end() ||
+      found->second.identity.cache_epoch() != identity.cache_epoch()) {
+    return match;
+  }
+  match.health = found->second.health;
+  if (match.health != KVShadowHealth::READY) {
+    return match;
+  }
+  for (const std::string& block_hash : block_hashes) {
+    if (block_hash.size() != kBlockHashBytes ||
+        found->second.lookup_counts.find(
+            lookup_key(block_hash, cache_group, tier)) ==
+            found->second.lookup_counts.end()) {
+      break;
+    }
+    ++match.contiguous_blocks;
+  }
+  return match;
+}
+
+KVPrefixMatch KVShadowIndex::match_current_contiguous_prefix(
+    const xllm::proto::ProviderEngineKey& engine,
+    const std::string& model_revision,
+    const std::string& kv_namespace,
+    const std::vector<std::string>& block_hashes,
+    const std::string& cache_group,
+    xllm::proto::KVCacheTier tier) const {
+  xllm::proto::KVStreamIdentity identity;
+  *identity.mutable_engine() = engine;
+  identity.set_model_revision(model_revision);
+  identity.set_kv_namespace(kv_namespace);
+  return match_contiguous_prefix(identity, block_hashes, cache_group, tier);
 }
 
 size_t KVShadowIndex::resident_entries(

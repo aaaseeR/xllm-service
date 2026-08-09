@@ -17,5 +17,7 @@ cc_library(
   DEPS
     :chat_template
     :common
+    :kv_route_planner
+    :kv_shadow_index
     :managers
 )

@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/request/request_deadline.h"
 #include "observability.pb.h"
 #include "provider/execution_hold.h"
+#include "provider/kv_route_planner.h"
 #include "request/first_output_retry_budget.h"
 #include "request/output_event_sequencer.h"
 
@@ -95,6 +96,11 @@ struct Request {
   std::optional<xllm::proto::ExecutionPlan> execution_plan;
   std::optional<xllm::proto::ProviderDescriptor> prefill_provider_descriptor;
   std::optional<xllm::proto::ProviderDescriptor> decode_provider_descriptor;
+
+  // K1 keeps both the route actually used and the shadow alternative. Actual
+  // Engine usage is reconciled against this bounded record at completion.
+  std::optional<provider::KVRouteObservation> kv_route_observation;
+  std::atomic<bool> kv_route_actual_recorded{false};
 
   // At most one outcome-unknown execution resource holder is permitted for
   // the current attempt. Its cleanup-capacity token is reserved before the

@@ -16,17 +16,18 @@ limitations under the License.
 #pragma once
 
 #include "common/macros.h"
+#include "common/options.h"
 #include "loadbalance_policy.h"
-#include "scheduler/managers/global_kvcache_mgr.h"
+#include "provider/kv_route_planner.h"
+#include "provider/kv_shadow_index.h"
 
 namespace xllm_service {
 
 class CacheAwareRouting final : public LoadBalancePolicy {
  public:
-  CacheAwareRouting(std::shared_ptr<InstanceMgr> instance_mgr,
-                    std::shared_ptr<GlobalKVCacheMgr> global_kvcache_mgr)
-      : global_kvcache_mgr_(global_kvcache_mgr),
-        LoadBalancePolicy(instance_mgr) {};
+  CacheAwareRouting(const Options& options,
+                    std::shared_ptr<InstanceMgr> instance_mgr,
+                    provider::KVShadowIndex* kv_shadow_index);
 
   virtual ~CacheAwareRouting() = default;
 
@@ -35,14 +36,12 @@ class CacheAwareRouting final : public LoadBalancePolicy {
  private:
   DISALLOW_COPY_AND_ASSIGN(CacheAwareRouting);
 
-  void cost_function(
-      const std::unordered_map<std::string, uint32_t>& overlap_scores,
-      const uint32_t& max_block_num,
-      const std::unordered_map<std::string, LoadMetrics>& load_metrics,
-      const int64_t& max_waiting_requests_num,
-      std::string* best_choice);
+  bool fallback_load_only(const std::shared_ptr<Request>& request) const;
 
-  std::shared_ptr<GlobalKVCacheMgr> global_kvcache_mgr_;
+  Options options_;
+  provider::KVRoutePlanner planner_;
+  provider::KVRouteMode mode_ = provider::KVRouteMode::DISABLED;
+  provider::KVShadowIndex* kv_shadow_index_ = nullptr;
 };
 
 }  // namespace xllm_service

@@ -189,5 +189,75 @@ TEST(ProviderRouteSelectorTest, RejectsUnknownProvider) {
       prefills, {}, xllm::proto::PROVIDER_ID_UNSPECIFIED, 0, 0, &selection));
 }
 
+TEST(ProviderRouteSelectorTest, EnumeratesOnlyCompleteHardFilteredPlans) {
+  const std::vector<ProviderRouteCandidate> prefills = {
+      candidate("ready-p",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_PREFILL),
+      candidate("stale-p",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_PREFILL,
+                false),
+      candidate("aggregated",
+                xllm::proto::PROVIDER_ID_VLLM_ASCEND,
+                xllm::proto::ENGINE_ROLE_AGGREGATED),
+  };
+  const std::vector<ProviderRouteCandidate> decodes = {
+      candidate("d0",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_DECODE),
+      candidate("foreign-d",
+                xllm::proto::PROVIDER_ID_VLLM_ASCEND,
+                xllm::proto::ENGINE_ROLE_DECODE),
+  };
+  std::vector<ProviderRouteSelection> selections;
+  bool truncated = true;
+
+  ASSERT_TRUE(ProviderRouteSelector::select_candidates(
+      prefills,
+      decodes,
+      xllm::proto::PROVIDER_ID_UNSPECIFIED,
+      8,
+      &selections,
+      &truncated));
+  ASSERT_EQ(selections.size(), 2u);
+  EXPECT_EQ(selections[0].prefill_engine_uid, "ready-p");
+  EXPECT_EQ(selections[0].decode_engine_uid, "d0");
+  EXPECT_EQ(selections[1].prefill_engine_uid, "aggregated");
+  EXPECT_TRUE(selections[1].decode_engine_uid.empty());
+  EXPECT_FALSE(truncated);
+}
+
+TEST(ProviderRouteSelectorTest, CandidateEnumerationReportsTruncation) {
+  const std::vector<ProviderRouteCandidate> prefills = {
+      candidate("p0",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_PREFILL),
+      candidate("p1",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_PREFILL),
+  };
+  const std::vector<ProviderRouteCandidate> decodes = {
+      candidate("d0",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_DECODE),
+      candidate("d1",
+                xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+                xllm::proto::ENGINE_ROLE_DECODE),
+  };
+  std::vector<ProviderRouteSelection> selections;
+  bool truncated = false;
+
+  ASSERT_TRUE(ProviderRouteSelector::select_candidates(
+      prefills,
+      decodes,
+      xllm::proto::PROVIDER_ID_XLLM_NATIVE,
+      2,
+      &selections,
+      &truncated));
+  EXPECT_EQ(selections.size(), 2u);
+  EXPECT_TRUE(truncated);
+}
+
 }  // namespace
 }  // namespace xllm_service::provider

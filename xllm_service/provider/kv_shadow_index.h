@@ -71,6 +71,11 @@ struct KVShadowIndexStats {
   size_t recovery_bytes = 0;
 };
 
+struct KVPrefixMatch {
+  KVShadowHealth health = KVShadowHealth::UNKNOWN;
+  size_t contiguous_blocks = 0;
+};
+
 // Bounded, fail-closed Service-side KV observation. It is deliberately not an
 // allocator or admission ledger: UNKNOWN and RECOVERING always mean zero KV
 // routing credit while normal load routing remains available.
@@ -95,6 +100,18 @@ class KVShadowIndex final {
                 const std::string& block_hash,
                 const std::string& cache_group,
                 xllm::proto::KVCacheTier tier) const;
+  KVPrefixMatch match_contiguous_prefix(
+      const xllm::proto::KVStreamIdentity& identity,
+      const std::vector<std::string>& block_hashes,
+      const std::string& cache_group,
+      xllm::proto::KVCacheTier tier) const;
+  KVPrefixMatch match_current_contiguous_prefix(
+      const xllm::proto::ProviderEngineKey& engine,
+      const std::string& model_revision,
+      const std::string& kv_namespace,
+      const std::vector<std::string>& block_hashes,
+      const std::string& cache_group,
+      xllm::proto::KVCacheTier tier) const;
   size_t resident_entries(const xllm::proto::KVStreamIdentity& identity) const;
   std::vector<xllm::proto::KVStreamIdentity> snapshot_required() const;
   KVShadowIndexStats stats() const;
@@ -118,11 +135,15 @@ class KVShadowIndex final {
     uint64_t last_confirmed_monotonic_ms = 0;
     size_t live_bytes = 0;
     std::unordered_map<std::string, xllm::proto::KVBlockEntry> live;
+    std::unordered_map<std::string, size_t> lookup_counts;
     std::optional<RecoveryState> recovery;
   };
 
   static std::string stream_key(const xllm::proto::KVStreamIdentity& identity);
   static std::string entry_key(const xllm::proto::KVBlockEntry& entry);
+  static std::string lookup_key(const std::string& block_hash,
+                                const std::string& cache_group,
+                                xllm::proto::KVCacheTier tier);
   static size_t entry_bytes(const xllm::proto::KVBlockEntry& entry);
 
   EngineShadow* find_or_create_stream_locked(

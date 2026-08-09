@@ -97,6 +97,29 @@ cc_library(
 
 cc_library(
   NAME
+    kv_route_planner
+  HDRS
+    kv_route_planner.h
+  SRCS
+    kv_route_planner.cpp
+  DEPS
+    :kv_shadow_index
+    proto_xllm
+)
+
+cc_library(
+  NAME
+    kv_route_metrics
+  HDRS
+    kv_route_metrics.h
+  SRCS
+    kv_route_metrics.cpp
+  DEPS
+    :kv_route_planner
+)
+
+cc_library(
+  NAME
     kv_state_outbox
   HDRS
     kv_state_outbox.h

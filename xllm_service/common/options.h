@@ -180,6 +180,37 @@ class Options {
 
   PROPERTY(uint32_t, xxh3_128bits_seed) = 1024;
 
+  // V2-K1 stays in SHADOW by default. ENFORCED is an explicit workload
+  // bucket gate and still falls back to load-only for UNKNOWN/recovery/OOD.
+  PROPERTY(std::string, kv_route_mode) = "SHADOW";
+
+  PROPERTY(size_t, kv_route_max_candidate_plans) = 16384;
+
+  PROPERTY(size_t, kv_route_least_load_shortlist) = 8;
+
+  PROPERTY(size_t, kv_route_top_prefix_shortlist) = 8;
+
+  PROPERTY(uint64_t, kv_route_prefill_queue_cost_us) = 1000;
+
+  PROPERTY(uint64_t, kv_route_decode_request_cost_us) = 1000;
+
+  PROPERTY(uint64_t, kv_route_prefill_token_cost_us) = 10;
+
+  PROPERTY(double, kv_route_transfer_byte_cost_us) = 0.001;
+
+  PROPERTY(uint64_t, kv_route_decode_headroom_cost_us) = 1000;
+
+  PROPERTY(uint64_t, kv_route_prefill_reserve_blocks) = 1;
+
+  PROPERTY(uint64_t, kv_route_margin_us) = 100;
+
+  PROPERTY(uint64_t, kv_route_near_equal_cost_us) = 10;
+
+  // Must come from the target model/profile capacity evidence. Zero keeps D
+  // Prefix bytes in observation-only mode while P Prefix scoring remains
+  // available.
+  PROPERTY(uint64_t, kv_route_bytes_per_token) = 0;
+
   PROPERTY(std::string, service_name);
 
   // V2 execution-hold cleanup capacity. One fixed-size token is reserved

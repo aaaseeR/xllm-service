@@ -154,6 +154,72 @@ TEST(KVShadowIndexTest, AppliesDuplicateStoreAndRemoveIdempotently) {
       identity, block.block_hash(), block.cache_group(), block.tier()));
 }
 
+TEST(KVShadowIndexTest, MatchesContinuousPrefixAndCountsDuplicateLocations) {
+  KVShadowIndex index(make_config());
+  const xllm::proto::KVStreamIdentity identity = make_identity();
+  xllm::proto::KVBlockEntry first_rank_zero = make_block(1, 0);
+  xllm::proto::KVBlockEntry first_rank_one = first_rank_zero;
+  first_rank_one.set_dp_rank(1);
+  const xllm::proto::KVBlockEntry second = make_block(2, 1);
+  const xllm::proto::KVBlockEntry missing = make_block(3, 2);
+
+  EXPECT_EQ(
+      index
+          .apply_event_batch(
+              make_batch(
+                  identity,
+                  {make_event(
+                       1, xllm::proto::KV_EVENT_KIND_STORED, first_rank_zero),
+                   make_event(
+                       2, xllm::proto::KV_EVENT_KIND_STORED, first_rank_one),
+                   make_event(3, xllm::proto::KV_EVENT_KIND_STORED, second)}),
+              100)
+          .code,
+      KVApplyCode::APPLIED);
+
+  const KVPrefixMatch full = index.match_contiguous_prefix(
+      identity,
+      {first_rank_zero.block_hash(), second.block_hash()},
+      first_rank_zero.cache_group(),
+      first_rank_zero.tier());
+  EXPECT_EQ(full.health, KVShadowHealth::READY);
+  EXPECT_EQ(full.contiguous_blocks, 2u);
+
+  const KVPrefixMatch stopped = index.match_contiguous_prefix(
+      identity,
+      {first_rank_zero.block_hash(), missing.block_hash(), second.block_hash()},
+      first_rank_zero.cache_group(),
+      first_rank_zero.tier());
+  EXPECT_EQ(stopped.contiguous_blocks, 1u);
+
+  EXPECT_EQ(index
+                .apply_event_batch(
+                    make_batch(identity,
+                               {make_event(4,
+                                           xllm::proto::KV_EVENT_KIND_REMOVED,
+                                           first_rank_zero)}),
+                    101)
+                .code,
+            KVApplyCode::APPLIED);
+  EXPECT_TRUE(index.contains(identity,
+                             first_rank_zero.block_hash(),
+                             first_rank_zero.cache_group(),
+                             first_rank_zero.tier()));
+  EXPECT_EQ(index
+                .apply_event_batch(
+                    make_batch(identity,
+                               {make_event(5,
+                                           xllm::proto::KV_EVENT_KIND_REMOVED,
+                                           first_rank_one)}),
+                    102)
+                .code,
+            KVApplyCode::APPLIED);
+  EXPECT_FALSE(index.contains(identity,
+                              first_rank_zero.block_hash(),
+                              first_rank_zero.cache_group(),
+                              first_rank_zero.tier()));
+}
+
 TEST(KVShadowIndexTest, GapAndOutOfOrderFailClosed) {
   KVShadowIndex index(make_config());
   const xllm::proto::KVStreamIdentity identity = make_identity();

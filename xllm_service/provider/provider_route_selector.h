@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -54,6 +55,18 @@ class ProviderRouteSelector final {
       uint64_t prefill_start_index,
       uint64_t decode_start_index,
       ProviderRouteSelection* selection);
+
+  // Enumerates only complete plans that pass the same Provider, Descriptor,
+  // lifecycle/capability and incarnation-scoped LinkState hard filters as
+  // select(). The output is bounded; truncation is explicit so callers can
+  // fail closed to their load-only path instead of ranking an incomplete set.
+  static bool select_candidates(
+      const std::vector<ProviderRouteCandidate>& prefill_candidates,
+      const std::vector<ProviderRouteCandidate>& decode_candidates,
+      xllm::proto::ProviderId required_provider_id,
+      size_t max_selections,
+      std::vector<ProviderRouteSelection>* selections,
+      bool* truncated);
 };
 
 }  // namespace xllm_service::provider

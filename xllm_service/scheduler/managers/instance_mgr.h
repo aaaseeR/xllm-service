@@ -36,6 +36,7 @@ limitations under the License.
 #include "common/time_predictor.h"
 #include "common/types.h"
 #include "provider/engine_registry.h"
+#include "provider/kv_route_planner.h"
 #include "provider/link_reconciler.h"
 #include "request/request.h"
 #include "scheduler/etcd_client/etcd_client.h"
@@ -68,6 +69,13 @@ class InstanceMgr final {
 
   void get_load_metrics(LoadBalanceInfos* infos,
                         xllm::proto::ProviderId provider_id);
+
+  bool get_kv_route_candidates(
+      xllm::proto::ProviderId provider_id,
+      const std::string& model_revision,
+      size_t max_candidate_plans,
+      std::vector<provider::KVRoutePlanCandidate>* candidates,
+      bool* truncated);
 
   std::shared_ptr<brpc::Channel> get_channel(const std::string& instance_name);
 
