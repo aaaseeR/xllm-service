@@ -13,7 +13,7 @@
 - 集群 KV 内存层：[Mooncake Store 与跨请求 KV](./05_XLLM_PD_STORE_SESSION_DESIGN.md)
 - 多引擎接入：[Provider 与 Adapter 设计](./11_XLLM_SERVICE_MULTI_ENGINE_PROVIDER_DESIGN.md)
 
-本文只保留确定方案。首个生产版本直接交付 V2，不设置独立 V1 产品版本。原 V1 范围并入 V2 基础能力，必须与 V2 的多模型、精确 HBM KV-aware、有界流控、优先级/租户公平和逐请求执行模式一起完成；后续阶段沿请求调度、执行拓扑和 KV 内存层级三条轴扩展，不改变“Service 软选择和协调、Engine/Store 持有资源与数据真相”的基础边界。
+本文只保留确定方案。首个生产版本直接交付 V2，不设置独立 V1 产品版本。原 V1 范围并入 V2 基础能力，必须与 V2 的多模型、精确 HBM KV-aware、有界流控、优先级/租户公平和逐请求执行模式一起完成；后续阶段沿请求调度、执行拓扑、KV 内存、数据与智能四条轴扩展，不改变“Service 软选择和协调、Engine/Store 持有资源与数据真相”的基础边界。
 
 为保持既有评审、门禁和决策编号可追溯，本文后续残留的 V1、V1-M0/M1/M2 表述均解释为 V2-B0 基础门及其算法层级，不代表独立产品版本或上线里程碑。
 
@@ -39,6 +39,12 @@ xLLM Service 的最终目标与这条主线一致，但不照搬某个框架：V
 ## 2. 当前现状与最终目标
 
 这里的三种形态不是三套系统：当前 xLLM Service 已经是推理控制面，V2 首发在现有实现上一次性补齐基础生产能力和 V2 快环能力，最终形态再把同一个控制面扩展为整个推理集群的调度与资源协调中心。
+
+> 实现状态更新（2026-08-10）：V2 请求快环和 V3 资源慢环已完成代码、CPU、Torch CPU、
+> simulated HBM 与离线多进程集群验证；当前状态是
+> `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`。本节“当前现状”保留的是
+> 设计立项时的问题基线，最新交付状态见
+> [V2/V3 现状与演进蓝图汇报](./13_XLLM_SERVICE_V2_STATUS_AND_ROADMAP_REPORT.md)。
 
 **当前现状**
 
@@ -70,15 +76,28 @@ V2 同时补齐故障与观测闭环：Engine 状态不确定时停止接收新�
 
 最终优化目标不是单独追求设备利用率或峰值吞吐，而是**在 TTFT、TPOT、完成时间、容量、公平性和成本约束下，最大化真正满足 SLO 的请求量，并持续用线上数据校准调度和放置决策。** Service 决定请求应该怎样执行，Engine/Store 决定资源是否真实存在以及能否安全执行；这一边界在所有阶段都不改变。
 
+在上述统一控制面、执行面和 KV 内存层之上，系统的**终极目标是依托 MASS 构建自进化
+推理系统**。MASS 在线服务持续产生真实请求、任务结果、业务 SLO 和用户反馈；统一观测
+把这些业务结果与 xLLM Service 的调度决策、xLLM Engine 的执行/资源事件关联起来；AI
+智能控制面据此发现 Service 与 Engine 的瓶颈或缺陷，生成策略、参数、容量、Runtime 或
+代码优化候选，并经过回放、CPU 端到端压测、真实 NPU、线上灰度、SLO guard 和回滚门后
+受控生效。上线结果再次进入 MASS serving feedback，形成持续学习闭环。
+
+AI 智能控制面不是请求正确性的同步依赖，也没有权力绕过 capability、fencing、原子
+admission、资源所有权、deadline 和输出唯一性等确定性协议。自进化的含义是让诊断与优化
+越来越快、证据越来越完整、策略越来越准确，而不是让 AI 无门禁地直接修改生产系统。
+
 **三者关系与演进轴**
 
-当前到 V2 首发先在内部补齐正确性、可用性和可观测性基础门，再完成流控、精确 HBM KV 和逐请求执行模式；之后继续演进共享 KV、Placement 和跨域能力。演进不是只扩大拓扑的一条直线，而是三条可以独立开发、独立验收的能力轴：
+当前到 V2 首发先在内部补齐正确性、可用性和可观测性基础门，再完成流控、精确 HBM KV 和逐请求执行模式；之后继续演进共享 KV、Placement 和跨域能力。演进不是只扩大拓扑的一条直线，而是四条可以独立开发、独立验收的能力轴：
 
 - **请求调度轴：** V2-B0 硬准入与快速拒绝 → V2 策略感知的有界流控、优先级与租户公平 → 持续演进 SLO goodput 与成本联合优化。
 - **执行拓扑轴：** V2-B0 单域单模型、多 Provider（xLLM 动态 P/D + vLLM-Ascend 聚合）→ V2 多模型与逐请求执行模式 → V3 模型与角色自动放置 → V4 跨域整请求溢出 → V5 收益可证明的有限跨域 P/D。
 - **KV 内存轴：** V2-B0 Engine 本地 HBM → V2 精确 Prefix 位置索引 → V2.5 DRAM、SSD 与共享 Store → V2.5 跨请求恢复、复用与放置。
+- **数据与智能轴：** 统一 request/attempt/engine 观测 → MASS serving feedback 与业务效果
+  对账 → AI shadow 诊断/建议 → 人审发布与自动调参 → 有 SLO guard 和回滚的受控自治。
 
-箭头只表示同一轴内部的能力成熟顺序，不表示三条轴之间存在全序依赖。例如 V2.5 KV 内存层与 V3 Placement 可以并行开发和独立上线。三条轴共用一个不变边界：**Service 做软选择和协调，Engine/Store 持有资源与数据真相。**
+箭头只表示同一轴内部的能力成熟顺序，不表示四条轴之间存在全序依赖。例如 V2.5 KV 内存层与 V3 Placement 可以并行开发和独立上线，MASS 数据契约与 AI shadow 分析也可以在 NPU 线上验证阶段同步建设。四条轴共用一个不变边界：**Service 做软选择和协调，Engine/Store 持有资源与数据真相；AI 只能通过验证和发布门改变策略、配置或实现。**
 
 **明确不做**
 
@@ -169,7 +188,7 @@ xLLM Native 与 vLLM-Ascend 可以共享 Registry、State Stream、选择器和�
 
 ## 4. 总体架构：组件拓扑与平面边界
 
-下图是**静态组件架构图**，不是请求时序图，也不是版本演进流程图。它回答四个问题：请求控制归谁、资源和 KV 真相归谁、高频状态怎样形成可丢失视图、未来能力从哪个边界扩展。空间分组表示部署/责任边界，箭头只表示接口和数据方向，不表示严格执行顺序。
+下图是**静态组件架构图**，不是请求时序图，也不是版本演进流程图。它回答五个问题：请求控制归谁、资源和 KV 真相归谁、高频状态怎样形成可丢失视图、未来能力从哪个边界扩展，以及 MASS/AI 如何形成有安全门的自进化闭环。空间分组表示部署/责任边界，箭头只表示接口和数据方向，不表示严格执行顺序。
 
 表达方式参考 [llm-d Architecture](https://llm-d.ai/docs/dev/architecture) 的 `Router → InferencePool → Model Server` 分层，以及 [NVIDIA Dynamo Overall Architecture](https://docs.nvidia.com/dynamo/dev/knowledge-base/overview) 对 Request、Control、Storage & Events 三类平面的拆分；xLLM Service 不照搬其部署单元，而是保留自己的 Provider Contract、Engine 原子准入、逐层 P→D PUSH、attempt/commit/fencing 和多 Service 软状态语义。
 
@@ -179,8 +198,10 @@ flowchart TB
   subgraph ACCESS["外部接入层"]
     direction TB
     CLIENT["Client / 上层应用"]
+    MASS["MASS Online Service<br/>真实任务 · 业务 SLO · 服务结果 · 用户反馈"]
     GATEWAY["Gateway + L4/L7<br/>鉴权 · API 限流 · 业务幂等<br/>连接与 Service 副本均衡"]
     CLIENT <-->|"HTTP / SSE"| GATEWAY
+    MASS <-->|"在线推理请求 / 服务结果"| GATEWAY
   end
 
   subgraph SERVICE["xLLM Service Cluster · V2 请求控制面（不依赖设备 API、硬件无关）"]
@@ -203,12 +224,20 @@ flowchart TB
     FDOMAIN["后续 Provider Domain<br/>Engine / Agent + GPU / NPU / 其他硬件 backend<br/>先通过 Provider conformance，能力未知则 fail closed"]
   end
 
-  subgraph INFRA["集群基础设施与后续慢环"]
+  subgraph INFRA["集群基础设施与资源慢环"]
     direction TB
     ETCD["etcd Registry<br/>低频身份 · Descriptor · lease<br/>不承载高频 Engine/KV 事件"]
     TELEMETRY["集群观测平台<br/>Log / Metrics / Trace / Audit<br/>容量、SLO 与性能分析"]
     STORE["V2.5+ KV Memory Layer<br/>Mooncake Store · DRAM/SSD/共享层<br/>不保存 Decode 状态"]
-    PLACEMENT["V3+ Placement / Autoscale<br/>模型 · 角色 · profile · 副本 desired state"]
+    PLACEMENT["V3 Placement / Autoscale<br/>模型 · 角色 · profile · 副本 desired state"]
+  end
+
+  subgraph EVOLUTION["终极形态 · MASS 驱动的 AI 智能控制面"]
+    direction TB
+    FEEDBACK["Serving Data & Evaluation<br/>请求/阶段事件 · SLO · 资源 · 故障 · 成本 · 业务效果"]
+    AICP["AI Diagnose & Optimize<br/>根因定位 · 策略/参数/容量/Runtime/代码优化候选"]
+    SAFETY["Safety & Delivery Gate<br/>回放 · CPU E2E/压测 · NPU · Canary<br/>SLO Guard · 审批 · 回滚"]
+    FEEDBACK --> AICP --> SAFETY
   end
 
   GATEWAY ==>|"推理请求"| CONTROL
@@ -234,19 +263,28 @@ flowchart TB
   XDOMAIN -.->|"同一关联键"| TELEMETRY
   VDOMAIN -.->|"同一关联键"| TELEMETRY
 
+  MASS -.->|"业务效果反馈"| FEEDBACK
+  TELEMETRY -.->|"统一服务与资源数据"| FEEDBACK
+  SAFETY -.->|"已验证策略 / 配置"| CONTROL
+  SAFETY -.->|"已验证容量 / 放置"| PLACEMENT
+  SAFETY -.->|"已验证 Runtime 优化"| XDOMAIN
+
   STORE <-.->|"V2.5+ load / write / restore"| XDOMAIN
   STORE -.->|"位置事件"| VIEWS
-  PLACEMENT -.->|"V3+ desired state"| XDOMAIN
-  PLACEMENT -.->|"V3+ desired state"| VDOMAIN
+  PLACEMENT -.->|"V3 desired state"| XDOMAIN
+  PLACEMENT -.->|"V3 desired state"| VDOMAIN
 ```
 
 ### 4.1 图例与关键边界
 
 - **粗实线：** 请求、输出或 KV tensor 数据路径；P→D KV 直传发生在 Engine/Connector 数据面，不经过 Service。
 - **虚线：** Registry、EngineState、KV 位置、观测或 desired state；这些只影响选择、运维和后续规划，不能替代 Engine 本地 allocator 的原子决定。
-- **V2 核心范围：** Gateway 后的 xLLM Service 请求控制面、Provider Contract、xLLM Native 与 vLLM-Ascend 执行域、etcd Registry、State/KV Stream 和统一可观测性；图中明确标为“后续”“V2.5+”“V3+”的节点不属于 V2 门禁。
-- **V2.5+/V3+ 节点：** 共享 KV 内存层和 Placement/Autoscale 是明确扩展点，不是 V2 请求正确性的隐藏依赖。
+- **V2 核心范围：** Gateway 后的 xLLM Service 请求控制面、Provider Contract、xLLM Native 与 vLLM-Ascend 执行域、etcd Registry、State/KV Stream 和统一可观测性；图中明确标为“后续”“V2.5+”“终极形态”的节点不属于 V2 门禁。
+- **后续节点：** 共享 KV 内存层和 MASS/AI 闭环是明确扩展点；V3 Placement/Autoscale 已有 CPU 离线实现但尚待 NPU/线上验证。它们都不是 V2 请求正确性的隐藏依赖。
 - **多硬件边界：** Service 只理解 Provider Descriptor、能力、profile、执行模式、资源摘要和稳定错误，不调用 CANN/CUDA、不处理 device pointer。NPU、GPU 和后续硬件差异由 Engine Runtime、allocator、Connector 和硬件 backend 暴露为经过验证的 Provider 能力。
+- **MASS/AI 边界：** MASS 提供真实在线服务与业务效果反馈；AI 智能控制面只通过 Safety &
+  Delivery Gate 输出已验证的策略、配置、容量、Runtime 或代码变更，不进入单次请求的同步
+  正确性链路，也不能覆盖 Engine/Store 的资源真相。
 
 这个分层与 llm-d/Dynamo 的共同点是把请求决策、执行资源和异步状态分开；关键差异是 xLLM Service 对每个 attempt 负责跨 P/D 协调和输出提交屏障，而 Engine/Agent 对准入、KV、执行、deadline 和 fencing 保持最终权威。CPU 与 Torch CPU 测试只验证同一 Provider/Engine 契约及 simulated HBM 资源链路；上 NPU 时替换的是硬件 backend 和真实传输证据，不改变 Service 架构。
 
@@ -274,7 +312,7 @@ flowchart TB
 
   STORE["V2.5 Mooncake Store<br/>cross-request KV write / restore / replicate"] <--> P
   STORE <--> D
-  PLACE["V3+ Placement Controller<br/>model / role / replica desired state"] --> P
+  PLACE["V3 Placement Controller<br/>model / role / replica desired state"] --> P
   PLACE --> D
 ```
 

@@ -12,15 +12,16 @@ soak 和线上阈值校准仍待验证，因此当前状态是
 
 **首个交付版本：V2。** 不设置独立 V1 产品版本。原 V1 规格中的 Provider SPI、State Stream、原子准入、deadline、fencing、资源回收和观测闭环全部并入 V2 基础能力；首发还必须同时完成 V2 的多模型、精确 HBM KV-aware、有界流控、优先级/租户公平和逐请求执行模式。xLLM Native 与 vLLM-Ascend 进入同一 Registry、State Stream、调度和故障框架，能力不足的执行模式 fail closed。
 
-**最终形态：** 同一控制面通过 Provider Adapter 管理多 Runtime、多硬件、多超节点、多模型、P/D 角色和分层 KV；为每个请求选择已验证的 Provider 与执行模式，再决定在哪里 Prefill/Decode、复用或加载哪份 KV、何时排队或拒绝。目标是在 SLO、公平和成本约束下最大化有效请求量，而不是只追求设备利用率。
+**最终形态：** 同一控制面通过 Provider Adapter 管理多 Runtime、多硬件、多超节点、多模型、P/D 角色和分层 KV；为每个请求选择已验证的 Provider 与执行模式，再决定在哪里 Prefill/Decode、复用或加载哪份 KV、何时排队或拒绝。目标是在 SLO、公平和成本约束下最大化有效请求量，而不是只追求设备利用率。终极目标是依托 MASS 在线服务的真实数据与业务效果反馈，由 AI 智能控制面持续发现并受控优化 xLLM Service/xLLM Engine，形成有验证、灰度和回滚门的自进化推理系统。
 
-总体组件拓扑、请求/状态/执行平面、多硬件边界及保留的简化请求流程见 [总体架构 §4](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md)；三种形态的请求路径、故障语义和明确边界见同文 §2。最终目标沿三条正交轴共同推进：
+总体组件拓扑、请求/状态/执行平面、多硬件边界及保留的简化请求流程见 [总体架构 §4](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md)；三种形态的请求路径、故障语义和明确边界见同文 §2。最终目标沿四条正交轴共同推进：
 
 - **请求调度轴：** V2-B0 硬准入与快速拒绝 → V2 策略感知的有界流控、优先级与租户公平 → 持续演进 SLO goodput 与成本联合优化。
 - **执行拓扑轴：** V2-B0 单域单模型、多 Provider（xLLM 动态 P/D + vLLM-Ascend 聚合）→ V2 多模型与逐请求执行模式 → V3 模型与角色自动放置 → V4 跨域整请求溢出 → V5 收益可证明的有限跨域 P/D。
 - **KV 内存轴：** V2-B0 Engine 本地 HBM → V2 精确 Prefix 位置索引 → V2.5 DRAM、SSD 与共享 Store → V2.5 跨请求恢复、复用与放置。
+- **数据与智能轴：** 统一服务/资源观测 → MASS serving feedback 与业务效果对账 → AI shadow 诊断/建议 → 人审发布与自动调参 → 有 SLO guard 和回滚的受控自治。
 
-箭头只表示同一轴内部的能力成熟顺序，不表示轴间全序依赖。三条轴共用一个不变边界：**Service 做软选择和协调，Engine/Store 持有资源与数据真相。**
+箭头只表示同一轴内部的能力成熟顺序，不表示轴间全序依赖。四条轴共用一个不变边界：**Service 做软选择和协调，Engine/Store 持有资源与数据真相；AI 只能通过验证和发布门改变策略、配置或实现。**
 
 ## 阶段摘要
 
@@ -33,7 +34,7 @@ soak 和线上阈值校准仍待验证，因此当前状态是
 | V4 | 跨 domain 整请求溢出 | 跨域在飞请求迁移 |
 | V5 | 网络/拓扑/异构感知的有限跨域 P/D 与分层 KV 联合决策 | 未验证兼容组合和收益为负的远程执行 |
 
-阶段编号表示能力成熟度和可独立验收结果，不表示三条轴只能串行开发。V2.5 与 V3 可以并行开发、独立上线、互不阻塞：V3 在没有共享 KV 层时显式计入缩容 cache loss，V2.5 可在对象提交后降低该损失，但不是 Placement/Autoscale 的硬前置。V2.5 是主路线交付，不再把跨请求/跨轮 KV 作为编号外的可选优化。
+阶段编号表示能力成熟度和可独立验收结果，不表示四条轴只能串行开发。V2.5 与 V3 可以并行开发、独立上线、互不阻塞：V3 在没有共享 KV 层时显式计入缩容 cache loss，V2.5 可在对象提交后降低该损失，但不是 Placement/Autoscale 的硬前置。MASS 数据契约和 AI shadow 分析也可以与 NPU 线上验证同步建设，但自动执行权限必须经过独立安全门。V2.5 是主路线交付，不再把跨请求/跨轮 KV 作为编号外的可选优化。
 
 ## 状态与责任边界
 
@@ -66,7 +67,7 @@ soak 和线上阈值校准仍待验证，因此当前状态是
 | 10 | [V2 有界流控与执行模式](./09_XLLM_SERVICE_V2_FLOW_CONTROL_AND_EXECUTION_MODES_DESIGN.md) | V2 Service 队列、本地 Prefill、故障预算和 drain 语义 |
 | 11 | [GLM-5.2 线上瓶颈分析](./10_XLLM_SERVICE_GLM52_ONLINE_BOTTLENECK_ANALYSIS.md) | 网关与 Engine 多日证据、P/D 阶段、KV 硬容量、重试/级联失败、负载拐点与优化约束 |
 | 12 | [V2 当前能力与远端代码索引](./12_XLLM_SERVICE_V2_CURRENT_CAPABILITIES.md) | 简洁但完整地说明已经具备的能力、远端 `service_dev` 代码/测试位置、证据边界和未完成门禁 |
-| 13 | [V2 现状、业界对标与演进蓝图汇报](./13_XLLM_SERVICE_V2_STATUS_AND_ROADMAP_REPORT.md) | 数据现状、业界架构、当前实现、P/D 选择、容错错误、Debug/性能分析及 V2–V5 规划 |
+| 13 | [xLLM 自进化推理系统汇报](./13_XLLM_SERVICE_V2_STATUS_AND_ROADMAP_REPORT.md) | 最终形态、总体框架、数据与业界判断、当前交付、P/D/容错/Debug、MASS+AI 闭环及演进阶段门 |
 | 14 | [V3 Placement 与 Autoscale](./14_XLLM_SERVICE_V3_PLACEMENT_AUTOSCALE_DESIGN.md) | V3 慢环、P/D/A 独立扩缩、leader fencing、desired state、生命周期 actuator、CPU 与线上门禁 |
 | 15 | [V3 当前能力与远端代码索引](./15_XLLM_SERVICE_V3_CURRENT_CAPABILITIES.md) | V3-P0 至 P5 已具备能力、远端 `service_dev` 代码/测试位置、运行模式和 P6 边界 |
 | 门禁 | [离线多进程 E2E](../../tests/e2e/README.md) | V2/V3 模拟线上高并发、故障、扩缩容、simulated HBM 和证据验收硬门 |

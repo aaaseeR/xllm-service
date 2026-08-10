@@ -1,204 +1,242 @@
-# xLLM Service V2 现状、业界对标与演进蓝图汇报
+# xLLM 自进化推理系统：现状、总体架构与演进蓝图汇报
 
 更新时间：2026-08-10
-汇报口径：首个交付版本直接为 V2；当前 `CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
 
-## 1. 执行摘要
+汇报口径：V2/V3 代码与 CPU 离线集群门已完成；当前状态为
+`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`
 
-历史线上数据表明，问题不是一个固定的 Decode 内核瓶颈，而是流量跨过容量拐点后，
-瓶颈在路由、D Admission、Prefill、KV 和 Decode 之间迁移：热点 P/D 的 TTFT/TPOT
-同步恶化，部分请求在 Gateway 超时后仍占用设备，旧日志又无法用统一 request/attempt
-身份解释全过程。
+## 1. 一页结论
 
-V2 的解法不是增加一个更复杂的负载均衡公式，而是建立完整控制闭环：
+历史线上问题不是单个 Decode 算子慢，而是流量跨过容量拐点后，瓶颈会在流控、
+Prefill、P→D 交接、Decode Admission、KV 和输出之间迁移。仅增加负载均衡规则或提高
+设备平均利用率，无法稳定解决 503、TTFT/TPOT 长尾、热点倾斜和超时后无效计算。
 
-- Service 做有界公平准入、Provider/执行模式选择、P/D 软选点和 attempt 协调；
-- Engine/Agent 做最终原子准入、真实 HBM/KV、deadline、fencing 与资源释放；
-- Registry 只保存低频身份/能力，高频 Engine/Link/KV 状态进入可丢失软视图；
-- 全链路以同一 request/attempt/incarnation 身份解释错误、容量和性能；
-- CPU 与 simulated HBM 先证明链路和不变量，最终由 NPU/真实集群证明性能与硬件行为。
+xLLM 的解法是建设一套统一推理系统：
 
-当前 B0–B10 已形成完整仓库实现并通过 CPU 门，具备进入 NPU/集群验证的条件。总体
-组件拓扑见[总体架构图](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md#4-总体架构组件拓扑与平面边界)，
-当前功能与远端代码索引见[V2 当前能力](./12_XLLM_SERVICE_V2_CURRENT_CAPABILITIES.md)。
+- **当前已完成：** V2 请求快环与 V3 资源慢环已经进入代码，完成 CPU、Torch CPU、
+  simulated HBM 和离线多进程集群验证；真实 NPU、CANN/HBM/Link 与线上流量验证尚未完成。
+- **最终产品形态：** xLLM Service 成为多 Runtime、多硬件、多模型、多 domain 的统一推理
+  控制面；xLLM Engine 与其他 Provider 形成执行和资源数据面；KV Memory Layer 形成跨
+  HBM、DRAM、SSD 和共享存储的统一内存层。
+- **最终优化目标：** 在 TTFT、TPOT、完成时间、容量、公平性、可靠性和成本约束下，
+  最大化真正满足 SLO 的请求量，而不是追求孤立的峰值吞吐或设备利用率。
+- **终极目标：** 依托 **MASS 在线服务**持续产生真实服务数据和效果反馈，发现
+  xLLM Service 与 xLLM Engine 的问题；由 **AI 智能控制面**完成诊断、优化方案生成、
+  验证、灰度、回滚和效果学习，构建持续变强的自进化推理系统。
 
-## 2. 数据分析：为什么必须建设推理控制闭环
+最终要交付的不是一个“路由器”或一组固定 P/D 服务，而是一个能够感知真实业务、统一
+控制请求与资源、从线上反馈中持续学习并安全演进的推理基础设施。
 
-以下是 V2 开发前的历史线上证据，用于解释设计优先级，不是 V2 上线后的收益证明。
-完整口径、窗口与限制见
+## 2. 最终形态与北极星指标
+
+最终系统由五项核心能力组成：
+
+1. **统一请求控制：** 在同一入口完成公平准入、Provider/执行模式选择、P/D 选择、
+   attempt/commit、deadline、容错与输出收敛。
+2. **统一资源控制：** Placement/Autoscale 慢环依据负载、模型热度、SLO、KV 热度和成本，
+   调整模型、副本、P/D 角色、并行规格与拓扑放置。
+3. **统一执行契约：** Service 只理解 Provider、profile、capability、资源摘要和稳定错误；
+   NPU/GPU、CANN/CUDA、allocator、Connector 和真实 HBM 由 Engine/Provider 负责。
+4. **统一 KV 内存层：** HBM、DRAM、SSD、Mooncake/共享 Store 按收益和成本协同，支持
+   Prefix 复用、恢复与放置，但不把 Service 变成会话或业务状态数据库。
+5. **MASS 驱动的自进化闭环：** 真实服务数据驱动 AI 发现问题、提出优化并验证上线，
+   持续改善 Service 调度和 Engine 执行效率。
+
+北极星指标是 **SLO Goodput**：满足 TTFT、TPOT、完成时间和正确性约束的有效请求量。
+配套约束包括公平性、错误率、资源泄漏、单位请求成本和故障恢复时间；自进化能力还要衡量
+“发现问题 → 形成方案 → 证明收益 → 安全上线”的周期。
+
+AI 不直接绕过生产安全边界。capability、fencing、原子 admission、资源所有权、deadline
+和输出唯一性继续由确定性协议保证；AI 生成的策略、参数或代码必须经过离线回放、CPU
+端到端压测、真实 NPU 验证、线上灰度、SLO guard 和可回滚发布后才能生效。
+
+## 3. 总体框架图
+
+下图同时给出当前已落地的 V2/V3 主体与终极 MASS/AI 闭环。实线是请求或控制路径，
+虚线是状态、观测和学习反馈；AI 闭环是目标架构，不代表当前已经生产交付。
+
+```mermaid
+flowchart TB
+  subgraph ONLINE["业务与 MASS 在线服务"]
+    MASS["MASS Online Service<br/>真实任务 · 业务 SLO · 服务结果 · 用户反馈"]
+    CLIENT["其他业务 / Client"]
+    GATEWAY["Gateway<br/>鉴权 · API 限流 · 业务幂等 · 连接管理"]
+    MASS <-->|"请求 / 服务结果"| GATEWAY
+    CLIENT <-->|"HTTP / SSE"| GATEWAY
+  end
+
+  subgraph CONTROL["当前 V2/V3 · xLLM 统一推理控制面"]
+    FAST["Request Fast Loop<br/>公平准入 → Provider/模式/P-D 选择<br/>attempt/commit · deadline · 容错 · 输出"]
+    SLOW["Resource Slow Loop<br/>负载预测 → Placement/Autoscale<br/>load · warmup · drain · recovery"]
+    CONTRACT["Provider Contract + State/KV Views<br/>Descriptor · capability · profile · lease<br/>EngineState · LinkState · KVIndex"]
+    FAST <--> CONTRACT
+    SLOW <--> CONTRACT
+  end
+
+  subgraph EXECUTION["执行、资源与内存数据面"]
+    XENGINE["xLLM Engine Pools<br/>P / D / Local · NPU/GPU<br/>原子准入 · scheduler · BlockManager · Connector"]
+    OTHER["vLLM 与后续 Provider<br/>能力门禁 · Runtime/硬件非对称接入"]
+    MEMORY["KV Memory Layer<br/>HBM → DRAM / SSD / Mooncake Store"]
+  end
+
+  subgraph EVOLUTION["终极形态 · MASS 驱动的 AI 智能控制面"]
+    DATA["Serving Data & Evaluation<br/>请求/阶段事件 · SLO · 资源 · 故障 · 成本 · 业务效果"]
+    AI["AI Diagnose & Optimize<br/>根因定位 · 策略/参数/容量/Runtime/代码优化候选"]
+    GATE["Safety & Delivery Gate<br/>回放 → CPU E2E/压测 → NPU → Canary<br/>SLO Guard · 审批 · 回滚"]
+    DATA --> AI --> GATE
+  end
+
+  GATEWAY ==>|"推理请求"| FAST
+  FAST ==>|"ExecutionPlan"| XENGINE
+  FAST ==>|"ExecutionPlan"| OTHER
+  XENGINE ==>|"Output"| FAST
+  OTHER ==>|"Output"| FAST
+  XENGINE <--> MEMORY
+
+  XENGINE -.->|"真实资源状态"| CONTRACT
+  OTHER -.->|"能力与状态"| CONTRACT
+  MEMORY -.->|"KV 位置事件"| CONTRACT
+
+  MASS -.->|"业务效果反馈"| DATA
+  FAST -.->|"请求与决策事件"| DATA
+  SLOW -.->|"放置与生命周期事件"| DATA
+  XENGINE -.->|"执行与资源事件"| DATA
+  OTHER -.->|"执行与资源事件"| DATA
+  MEMORY -.->|"命中、带宽与成本"| DATA
+
+  GATE -.->|"已验证策略 / 配置"| FAST
+  GATE -.->|"已验证容量 / 放置"| SLOW
+  GATE -.->|"已验证 Runtime 优化"| XENGINE
+```
+
+框架边界有四条：Gateway 负责业务信任与连接；xLLM Service 负责请求快环和资源慢环；
+Engine/Store 持有真实执行、KV 和设备资源；MASS/AI 负责观察、诊断和受控优化，不能成为
+单次请求正确性的同步依赖。完整静态组件图和原请求流程图见
+[总体架构设计](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md#4-总体架构组件拓扑与平面边界)。
+
+## 4. 为什么要做：数据事实与业界判断
+
+历史数据用于确定优先级，不是 V2/V3 上线收益证明。完整口径见
 [GLM-5.2 线上瓶颈分析](./10_XLLM_SERVICE_GLM52_ONLINE_BOTTLENECK_ANALYSIS.md)。
 
-| 事实 | 数据 | 对 V2 的约束 |
-| --- | ---: | --- |
-| Gateway 原始样本 | 2,273,519 请求，连续 4.736 天 | 不能用单实例或短压测替代线上分布 |
-| Engine 合并去重 | 858,274 个成功请求；744,644 个完整 P/D | 必须统一 P/D request/attempt 身份 |
-| 非网关流控事件窗 | 成功率 72.4%，503 占 22.2% | 过载要在 Service/Engine 准入闭环内稳定拒绝 |
-| P→D 条件性长尾 | 事件窗 p95 18.96s；稳态样本 p95 3.7ms | D 不能过早锁死；准入需要实时 credit 与有限重选 |
-| 相同 TP2/DP16 高低流量对照 | 高流量 TTFT p95 8.83–11.22s，低流量 0.832–0.844s | 必须识别非线性容量拐点，不只看请求数 |
-| Decode 衰减 | 高流量 TPOT p50 40.2–44.6ms，低流量 20.5–21.7ms | 选点成本必须包含 Decode headroom/SLO residual |
-| D KV 可用池 | 21.10–25.28GB；1,709 个硬 Prompt 容量失败 | Service 只做预判，Engine allocator 必须原子准入 |
-| 超时后无效执行 | 8,626 请求超过 300s，最长 4,891s | deadline 必须下沉到 Engine 并驱动 cancel/release |
-| 计时质量 | 8.34% 多 token TPOT=0；3,361 条负 ITL | 指标必须定义 clock domain 和 validity，不能盲调权重 |
-| Prefix Cache | 11/12 个 P 开启，但 750,740 成功请求命中全为 0 | KV-aware 上线前必须打通位置、实际命中与收益对账 |
-
-核心判断：容量、可用性和成本问题来自同一个缺失闭环。只优化算子或提高平均设备利用率，
-不能解决 503、Admission 长尾、热点倾斜和 deadline 后无效计算。
-
-## 3. 业界现状与我们的选择
-
-主流开源方案正在收敛到“请求决策、执行资源、异步状态/KV 分离”的架构，但各自侧重不同：
-
-| 方案 | 官方架构重点 | 可借鉴点 | xLLM Service 的取舍 |
-| --- | --- | --- | --- |
-| [llm-d](https://llm-d.ai/docs/dev/architecture) | Router、InferencePool、Model Server；EPP 实现 filter/score/pick 与 flow control | 独立路由决策、KV/负载感知、标准化池接口 | 保留 Provider Contract，并把跨 P/D attempt/commit/fencing 纳入 Service 正确性职责 |
-| [NVIDIA Dynamo](https://docs.nvidia.com/dynamo/dev/knowledge-base/overview) | Request、Control、Storage & Events 平面；Frontend/Router/Worker/KV/Planner 组合 | 平面拆分、事件驱动、分布式 KV 与规划器边界 | V2 不让共享 Store 成为正确性依赖；先完成 Engine 原子准入和本地 HBM 闭环 |
-| [SGLang Model Gateway](https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/sgl_model_gateway.md) | Gateway 统一 worker 生命周期、路由、重试、熔断和观测，并支持 PD | 高性能接入、worker 管理、故障与路由一体化 | Gateway 保持鉴权/API 边界；Service 专注推理级公平、Provider/mode 与 P/D 协调 |
-| [AIBrix](https://github.com/vllm-project/aibrix) | Gateway、routing、autoscaling、runtime、分布式 KV 与异构基础设施 | 云原生控制面、自动扩缩、异构资源与 KV 扩展 | V2 先交付请求控制；Placement/Autoscale 在 V3 慢环，避免进入请求关键路径 |
-
-共同趋势不是“统一所有 Runtime 内部实现”，而是用稳定契约描述能力、状态和错误，让
-Router 只选择已证实可执行的组合。我们的差异化重点是：动态 xLLM Native P/D 的逐层
-PUSH、D 原子 admission、结果不明 hold、GenerationCommit、旧 incarnation fencing，
-以及 xLLM Native 与 vLLM-Ascend 在同一 Provider 框架下按能力非对称接入。
-
-## 4. 我们当前已经完成什么
-
-| 层 | 当前 V2 能力 | 远端实现入口 |
+| 结论 | 关键证据 | 系统要求 |
 | --- | --- | --- |
-| 接入与信任 | OpenAI/Anthropic、CanonicalRequest、UUIDv7、可信 Gateway identity、HMAC KV session | [HTTP Service](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/http_service)、[Trust Policy](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/http_service/request_trust_policy.cpp) |
-| 公平与过载 | 多维硬预算、priority、tenant→flow 轮转、FCFS/EDF、deadline、drain | [Flow Control](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/scheduler/flow_control_queue.cpp) |
-| Provider 与模式 | Descriptor/capability/profile；Native 三模式；vLLM AGGREGATED；跨 Provider split 拒绝 | [Provider](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider)、[xLLM contract](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/core/runtime/native_provider_contract.cpp) |
-| 状态与路由 | Registry/State/KV lane、freshness/readiness/link、load/KV/SLO planner、SHADOW/ENFORCED gate | [Registry/Planner](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider)、[Scheduler](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/scheduler/scheduler.cpp) |
-| 执行安全 | attempt、D admission、hold、Query/Cancel、commit、deadline、incarnation fence、release | [Service hold/control](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider)、[Engine attempt](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/core/distributed_runtime/attempt_lifecycle_table.cpp) |
-| KV 资源 | canonical block hash、HBM/HOST 事件、simulated HBM、真实 BlockManager RAII 适配 | [Service KV view](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/kv_shadow_index.cpp)、[Engine KV resource](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/core/framework/kv_cache) |
-| 输出与容错 | 跨 sender 定序、重复/迟到 fencing、gap recovery、首输出前有限重试、SSE 终态 | [Request state machines](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/request) |
-| Debug/性能 | 统一事件 schema、常开 bvar、VLOG JSON、cluster snapshot、drop/cleanup/KV pressure | [Observability](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/observability)、[shared proto](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/proto/observability.proto) |
-| 工程门禁 | 双仓 pin、Service CTest、三个 serving binary、vLLM pytest、xLLM CPU contract | [Coding CI](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/.coding-ci.yml) |
+| 容量存在非线性拐点 | 高流量 TTFT p95 8.83–11.22s，低流量 0.832–0.844s；高流量 TPOT p50 约翻倍 | 同时控制队列、Prefill、Decode headroom 和 SLO residual |
+| D 与 KV 是关键硬约束 | D KV 可用池 21.10–25.28GB；1,709 个硬 Prompt 容量失败；事件窗 503 占 22.2% | Service 预判，Engine allocator 最终原子准入 |
+| 超时后计算浪费严重 | 8,626 个请求超过 300s，最长 4,891s | deadline、cancel、fencing 和资源释放必须下沉到 Engine |
+| 旧观测不足以指导优化 | 8.34% 多 token 请求 TPOT=0；Prefix Cache 750,740 个成功请求命中全为 0 | 统一身份、阶段事件、有效性和预测/实际对账 |
 
-完成的含义是仓库实现和 CPU 证据完成，不代表真实 NPU 与集群门已经完成。
+llm-d、NVIDIA Dynamo、SGLang Gateway 和 AIBrix 的共同趋势，是把请求决策、执行资源、
+异步状态/KV 与资源规划拆开，并通过稳定能力契约接入不同 Runtime。xLLM 选择沿用这条
+主线，同时强化跨 P/D attempt/commit/fencing、Engine 原子准入、逐层 PUSH、结果不明
+hold，以及 Native/vLLM 的能力非对称接入。对标细节见
+[总体架构设计](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md#11-业界推理服务框架与演进方向)。
 
-## 5. P/D 选择策略：从硬正确到 SLO goodput
+## 5. 当前已经交付什么
 
-### 5.1 当前 V2 决策链
+| 能力面 | V2/V3 当前能力 | 证据入口 |
+| --- | --- | --- |
+| 请求控制快环 | 有界公平准入；Provider/mode/P-D 选择；KV/SLO-aware planning；attempt/commit；deadline；有限重试；单一输出终态 | [V2 当前能力与远端代码索引](./12_XLLM_SERVICE_V2_CURRENT_CAPABILITIES.md) |
+| 执行与资源安全 | Native/vLLM Provider 契约；D 原子 admission；结果不明 hold；Query/Cancel；incarnation fencing；真实 BlockManager 适配和 simulated HBM | [Engine 契约实现](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/core) |
+| 资源控制慢环 | leader-fenced desired/command/status；1→3→1 扩缩；load/warmup/drain；response lost、leader kill 和恢复 | [V3 Placement 实现](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/placement) |
+| Debug 与性能分析 | request/attempt/incarnation 统一身份；阶段事件；bvar；VLOG JSON；cluster snapshot；KV pressure、cleanup、drop 和 residual 观测 | [Observability 实现](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/observability) |
+| 交付门禁 | 511/511 Service tests、140/140 xLLM CPU contract、65/65 vLLM sidecar tests；V2/V3 离线多进程 E2E、并发压测与故障矩阵 | [离线集群硬门](./implementation/OFFLINE_E2E_GATE_STATUS.md) |
+
+当前结论是：**V2/V3 已证明代码链路、协议不变量和 CPU 离线集群行为，尚未证明真实 NPU
+性能、CANN/HBM/Link 行为与线上生产收益。** CPU 不是产品运行目标，simulated HBM 也不
+替代真实 HBM；它们用于在上 NPU 前尽可能消除控制链和资源生命周期问题。
+
+## 6. 三项关键系统策略
+
+### 6.1 P/D 选择：先保证可执行，再优化 SLO Goodput
 
 ```text
-Request normalize / trust / deadline
-  -> 有界 admission 与 tenant→flow 公平出队
-  -> Provider/model/profile/mode/incarnation/lease/link/state 硬过滤
-  -> 有限候选计划枚举
-  -> Prefill queue + token cost + Decode headroom + HBM Prefix - transfer cost
-  -> SLO feasibility / uncertainty / stable tie-break
-  -> D Engine 原子 admission
-  -> attempt holder 收敛与 GenerationCommit
-  -> 首输出提交；之后永久关闭自动重试
+公平出队
+  → Provider / model / profile / mode / incarnation / link 硬过滤
+  → Prefill queue + token cost + Decode headroom + HBM Prefix - transfer cost
+  → SLO feasibility / uncertainty / stable tie-break
+  → D Engine 原子 admission
+  → attempt holder / GenerationCommit
+  → 首输出提交后关闭自动重试
 ```
 
-三个原则：
+- KV 命中和低负载只能影响已经公平出队请求的候选排序，不能绕过租户与优先级账本。
+- lease、capability、link、KV layout、永久不可行和 allocator 拒绝是硬事实，软分数不能覆盖。
+- 尽量晚绑定 D；首输出前只在 deadline、candidate 和 attempt 预算内换点，防止双执行/双输出。
+- 新策略先 SHADOW 对账 actual outcome，再按稳定 bucket ENFORCED；CPU 参数不能直接带到 NPU。
 
-1. **公平优先于收益。** KV 命中和低负载只影响已经公平出队请求的候选排序，不能让高
-   cache-hit 租户越过 priority/tenant 账本。
-2. **硬事实优先于预测。** lease、incarnation、capability、LinkState、KV layout、永久
-   不可行和 D allocator 拒绝不可被软分数覆盖。
-3. **延迟绑定与有限重选。** Service 尽量晚绑定 D；在首输出前、剩余 deadline 和 attempt
-   预算内可换 D，输出提交后不进行可能产生双输出的自动重试。
+### 6.2 容错：把永久失败、临时过载和结果不明严格分开
 
-实现入口：
-[flow queue](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/scheduler/flow_control_queue.cpp)、
-[route selector](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/provider_route_selector.cpp)、
-[KV planner](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/kv_route_planner.cpp)、
-[execution plan](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/execution_plan_builder.cpp)。
+| 情况 | 系统动作 |
+| --- | --- |
+| 永久不可行或能力不兼容 | fail closed，不通过降级到未知能力“保流量” |
+| 临时无 credit、状态陈旧或链路不可用 | 有界排队/换点；受 deadline 和 attempt budget 约束 |
+| Submit/Cancel 结果不明 | 保留资源 hold，Query/Cancel/fence/TTL 证明终态前不创建替代执行 |
+| Engine/Agent 失效 | lease + incarnation fencing；旧实例停止新准入和旧输出，资源按本地终态收敛 |
+| Service drain/故障 | 先 NOT_READY、停止 admission、有界 drain；不承诺在飞流式请求跨副本续传 |
 
-### 5.2 从 SHADOW 到 ENFORCED
+### 6.3 Debug：从“看日志”升级为全盘解释集群表现
 
-- SHADOW 计算计划和预测，不改变现有实际路由，用于校准 candidate coverage、预测/实际
-  Prefix、route churn、fallback 和 SLO residual。
-- ENFORCED 启动必须同时满足 CAR policy、完整 cost 参数、非零 `bytes_per_token`、有限
-  bucket 和不可变 build-id；缺任何门禁拒绝启动。
-- 灰度按稳定 request bucket 开放，出现 TTFT/TPOT、error、fallback、cleanup 或公平性
-  回退时立即把 bucket 降为 0；不通过临时修改硬过滤“保流量”。
-- NPU 阶段用固定 model/profile 阶梯 QPS 重新标定 cost，不把 CPU 参数带入生产。
-
-## 6. 容错与错误体系
-
-### 6.1 分层错误模型
-
-| 层 | 典型错误 | 决策与恢复 |
-| --- | --- | --- |
-| Client/Gateway | 非法请求、身份断言不可信、deadline 不合法 | 永久拒绝；稳定公开 code + request_uid |
-| Service flow | queue/token/bytes/tenant/model 预算耗尽 | 可排队则有界排队，否则稳定拒绝；账本精确回滚 |
-| Route/observation | 无兼容 Provider、state stale、Registry blind、link not ready | 不降级到未知能力；退出新准入/READY 或有限 grace |
-| Engine admission | permanent infeasible、temporary no credit、conflict | permanent 终止；temporary 仅在候选/deadline/attempt 预算内换点 |
-| RPC/attempt | submit/cancel 结果不明 | 持有资源 hold；Query/Cancel/fence/TTL 证明终态前不创建替代执行 |
-| Output | 旧 incarnation、重复、乱序、gap、sender 错误 | fencing、有限重排/查询；无法闭合则单一终态 |
-| Resource | release deferred、cleanup timeout、DMA/lease uncertain | 不假定“RPC 失败=资源释放”；保留 quarantine 并告警 |
-| Shutdown | 新请求与在飞请求竞争 | 先 NOT_READY、停止 admission、有界 drain、显式 unresolved 终态 |
-
-### 6.2 稳定错误纪律
-
-- 代码枚举参与控制决策，free-form message 只用于有界诊断；
-- client message 不含原始 header、凭据、prompt、内部堆栈或无限长度文本；
-- 每个拒绝至少带稳定类别与 `request_uid`，运维事件再带 stage/reason/attempt/incarnation；
-- 永久、临时、结果不明三类不可混淆；“结果不明”不能当作“没有执行”；
-- Provider、KV replica、flow-control、physical resource 保持各自强类型，在 adapter/ingress
-  边界统一翻译，不构造万能 Status 类型。
-
-## 7. Debug 与性能分析策略
-
-### 7.1 全盘跟踪
-
-统一关联链：
+统一关联键贯穿 Gateway、Service、Provider Agent、P/D 和资源事件：
 
 ```text
-global_request_id/trace_id
- -> request_uid
- -> attempt_seq
- -> provider/model/profile/mode/domain
- -> engine_uid/incarnation/dp-rank/link/prefix
+global_request_id / trace_id
+  → request_uid → attempt_seq
+  → provider / model / profile / mode / domain
+  → engine_uid / incarnation / dp-rank / link / prefix
 ```
 
-事件按阶段覆盖 REQUEST、FLOW_CONTROL、ROUTE、D_ADMISSION、PREFILL、TRANSFER、
-FIRST_OUTPUT、DECODE、RESOURCE_RELEASE 和 REQUEST_END；每阶段都有 STARTED/终态和稳定
-reason。Gateway、Service、Agent、P/D 使用同一身份，不再靠 IP、主机名或时间猜关联。
-
-### 7.2 常态观测与问题窗口
-
-- **常态：** 低基数 bvar + 周期 cluster snapshot，持续看请求率、goodput、queue、
-  admission、route/fallback、KV pressure、state freshness、cleanup、event drop；
-- **问题窗口：** 对定向副本开启 `--v=1`，导出无 prompt/输出正文的逐请求 JSON；
-- **性能分解：** `E2E = ingress + queue + route + P admission/prefill + transfer +
-  D admission/decode + output`，每段同时报告有效样本数、clock domain 和 p50/p95/p99；
-- **集群诊断顺序：** 先确认数据完整性和 stale/drop，再看公平/queue，再看 route 分布，
-  再看 D admission/KV，最后才归因到 Prefill/Decode kernel；
-- **优化闭环：** 预测值与 actual outcome 对账，按 model/provider/profile/mode 隔离 residual，
-  避免一种硬件或模式的参数污染另一种。
-
-详细字段、查询和故障手册见
+常态使用低基数指标和 cluster snapshot 观察 goodput、queue、admission、route、KV pressure、
+state freshness、cleanup 和 event drop；问题窗口按定向副本开启结构化逐请求事件。性能统一按
+`ingress + queue + route + P/prefill + transfer + D/decode + output` 分解，并标注样本有效性、
+clock domain 和分位数。诊断顺序固定为数据完整性 → 公平/队列 → 路由 → Admission/KV →
+Engine/Kernel，避免用不完整数据误调参数。详见
 [Observability Runbook](./implementation/OBSERVABILITY_RUNBOOK.md)。
 
-## 8. 未来蓝图与版本规划
+## 7. MASS 驱动的自进化闭环
 
-| 阶段 | 目标 | 关键验收 | 不做/边界 |
-| --- | --- | --- | --- |
-| V2 当前收口 | 完成仓库实现、CPU/Torch CPU、simulated HBM、双 Provider 控制链 | 391/391 Service、三个 serving binary、双仓 contract 门；Coding CI 入库 | 不声称 NPU/生产 VERIFIED |
-| V2 NPU/集群发布门 | 在真实 xLLM/vLLM-Ascend、CANN/HBM/Link、etcd、多 Service/P/D 上证明正确性与 SLO | 故障矩阵、阶梯 QPS、capacity knee、TTFT/TPOT/goodput、24h+ soak、观测开销 | 这是 V2 发布验证，不另起 V1 |
-| V2.5 KV Memory Layer | DRAM/SSD/Mooncake Store，D 写穿、D→P/Store restore、跨请求 Prefix | 对象 commit/GC、namespace/TTL、带宽成本、Store HA/OpLog、收益门 | 不保存 Decode checkpoint；不成为 V2 基础正确性依赖 |
-| V3 Placement/Autoscale | 模型、P/D role、profile、副本 desired state 慢环 | load/warmup/drain、容量预测、cache-loss 成本、回滚 | 不在请求路径动态加载模型；可与 V2.5 并行 |
-| V4 Domain Overflow | 跨 domain 整请求溢出 | domain health、配额、成本、数据合规和 SLO | 不迁移在飞 Decode |
-| V5 有限跨域 P/D | 网络/拓扑/异构感知 P/D 与分层 KV 联合决策 | 兼容矩阵、传输收益、failure domain、fencing 与合规 | 未验证组合一律关闭；不追求任意硬件笛卡尔积 |
+MASS 是终极形态的业务反馈源和演进载体。它既产生真实在线请求，也提供任务完成质量、
+用户反馈和业务 SLO，使推理系统不只知道“设备是否繁忙”，还知道“服务结果是否真正有效”。
 
-多硬件支持的长期边界保持不变：Service 感知 Provider、profile、capability、统一资源摘要
-和稳定错误；CANN/CUDA、device pointer、stream/event、allocator、真实 HBM 与 Connector
-由底层 Engine/Provider 实现。新增硬件先通过 Provider conformance 和真实设备证据，不能
-在 Service 中增加芯片特例分支。
+闭环按七步运行：
 
-## 9. 下一阶段建议
+1. **产生：** MASS 在线服务产生真实负载、结果、SLO 和业务效果反馈。
+2. **观测：** Service、Engine、KV、网络和 Placement 以统一身份记录完整阶段、资源和成本。
+3. **诊断：** AI 关联请求与集群状态，识别容量拐点、热点、调度偏差、资源泄漏、Engine
+   scheduler/KV/通信瓶颈和数据质量问题。
+4. **优化：** 生成调度策略、阈值、容量与放置、Provider profile、Engine 参数或代码候选。
+5. **验证：** 历史回放、CPU/Torch CPU、离线分布式高并发、故障注入、NPU 基准和 canary
+   逐层证明正确性与收益。
+6. **发布：** 通过 SLO guard、稳定 bucket、审批和自动回滚受控放量。
+7. **学习：** 将新版本的实际收益、副作用和失败样本回灌，形成下一轮训练与优化证据。
 
-1. 在 Coding 平台启用本仓 `.coding-ci.yml`，把完整 V2 CPU gate 设为 `service_dev/main`
-   受保护分支 required check；以首次远端构建验证镜像、网络、submodule 和缓存。
-2. 建立最小 NPU 单域环境：1P1D + 1 aggregated vLLM-Ascend + etcd + 2 Service，先跑
-   correctness/fault matrix，再跑阶梯负载。
-3. 使用固定 model/profile 分别校准 REMOTE_PD、LOCAL、PREFILL_ONLY 和 AGGREGATED，
-   所有结论按 Provider/mode 隔离，不混合分位数。
-4. 以历史数据的主要失效模式为回放集：D credit 耗尽、永久 KV 不可行、P/D 热点、
-   state stale、Agent SIGKILL、Service drain、deadline 后继续执行、output gap。
-5. 只有在 actual Prefix、route、admission、cleanup 和 SLO residual 完成对账后，才逐级
-   打开 KV ENFORCED bucket；任何阶段不以“提高设备利用率”替代 goodput/SLO 门。
+优化范围覆盖三层：xLLM Service 的公平、准入、P/D/KV 路由、Placement、容错与观测；
+xLLM Engine 的 batching、scheduler、KV allocator、通信、并行规格和硬件执行；以及两者之间
+的 Provider/profile/capacity 契约。AI 智能控制面先以离线分析和 shadow recommendation
+运行，成熟后再逐步开放自动调参和受控发布，始终不能越过确定性安全协议。
+
+## 8. 演进路线与阶段门
+
+| 阶段 | 目标 | 硬验收 |
+| --- | --- | --- |
+| 当前：V2/V3 离线完成 | 请求快环、资源慢环、Provider/Engine 安全契约和全链路观测 | 双仓 CPU contract、Torch CPU、simulated HBM、离线 E2E/高并发/故障矩阵全部通过 |
+| 下一步：NPU 与线上验证 | 在真实 xLLM/vLLM-Ascend、CANN/HBM/Link、etcd、多 Service/P/D 上证明正确性和收益 | 阶梯 QPS、capacity knee、TTFT/TPOT/goodput、故障矩阵、24h+ soak、观测开销与回滚 |
+| V2.5：KV Memory Layer | HBM→DRAM/SSD/Mooncake Store 的对象提交、恢复、复用和 GC | 位置/实际命中/收益对账、带宽成本、HA、namespace/TTL；不保存 Decode checkpoint |
+| V3 生产化 + V4/V5 | 放置/扩缩线上化；整请求跨域；收益可证明的有限跨域 P/D；多硬件扩展 | 故障域、合规、成本、拓扑、兼容矩阵和 Provider conformance 全部门禁 |
+| 终极：MASS + AI 自进化 | 真实服务数据驱动 Service/Engine 持续发现问题、优化、验证和发布 | 端到端数据闭环、可解释诊断、可复现收益、NPU canary、SLO guard、审批与一键回滚 |
+
+MASS 数据契约和 AI shadow 分析不需要等所有中间版本结束才开始；它们应与 NPU 线上验证
+同步建设。自动执行权限则必须按“建议 → 人审发布 → 自动调参 → 受控自治”逐级开放。
+
+## 9. 下一阶段需要推动的事项
+
+1. 建立最小 NPU 单域环境：1P1D、1 aggregated vLLM-Ascend、etcd、2 Service，先跑
+   correctness/fault matrix，再跑阶梯负载和 24h+ soak。
+2. 定义 MASS serving feedback contract：请求/任务身份、服务结果、SLO、用户反馈、隐私与
+   数据保留规则，并与现有 request/attempt/engine 观测身份打通。
+3. 建设线上数据回放和统一评估基线，使同一问题可以在历史回放、CPU 离线集群和 NPU
+   canary 中复现并比较。
+4. AI 智能控制面先交付“诊断报告 + shadow 建议”，每项优化必须给出证据、适用边界、
+   风险、预期收益、验证结果和回滚条件。
+5. 生产发布继续坚持硬门：任何 V2/V3 变更都必须通过单元/契约测试、CPU 全流程高并发、
+   分布式故障矩阵；涉及硬件或性能的变更还必须通过真实 NPU 门。
