@@ -66,6 +66,13 @@ def stop_process(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=2.0)
 
 
+def kill_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait(timeout=2.0)
+
+
 @dataclass
 class Replica:
     ordinal: int
@@ -90,6 +97,7 @@ class GatewayState:
         self._drain_proofs = 0
         self._heartbeat_forwarded = 0
         self._heartbeat_failed = 0
+        self._heartbeat_forwarding_enabled = True
         self._max_active_replicas = 0
 
     @property
@@ -122,6 +130,10 @@ class GatewayState:
         body: bytes,
         headers: dict[str, str],
     ) -> tuple[int, bytes]:
+        with self._lock:
+            if not self._heartbeat_forwarding_enabled:
+                self._heartbeat_failed += 1
+                return 503, b'{"error":"heartbeat forwarding paused"}'
         leader = self.leader_url()
         if leader is None:
             with self._lock:
@@ -147,6 +159,15 @@ class GatewayState:
             else:
                 self._heartbeat_failed += 1
         return response.status_code, response.content
+
+    def set_heartbeat_forwarding(self, enabled: bool) -> dict[str, object]:
+        with self._lock:
+            self._heartbeat_forwarding_enabled = enabled
+            return {
+                "heartbeat_forwarding_enabled": enabled,
+                "heartbeat_forwarded": self._heartbeat_forwarded,
+                "heartbeat_failed": self._heartbeat_failed,
+            }
 
     @staticmethod
     def _response(
@@ -400,8 +421,30 @@ class GatewayState:
                 "drain_proofs": self._drain_proofs,
                 "heartbeat_forwarded": self._heartbeat_forwarded,
                 "heartbeat_failed": self._heartbeat_failed,
+                "heartbeat_forwarding_enabled": (
+                    self._heartbeat_forwarding_enabled
+                ),
                 "active_resources": active_resources,
                 "terminated_resources": list(self._terminated_resources),
+            }
+
+    def crash_replica(self) -> dict[str, object]:
+        with self._lock:
+            if not self._replicas:
+                raise RuntimeError("no active replica can be crashed")
+            engine_uid = sorted(self._replicas)[0]
+            replica = self._replicas.pop(engine_uid)
+            resource = self._capture_runtime(replica)
+            resource["abrupt_process_loss"] = True
+            resource["engine_uid"] = replica.engine_uid
+            resource["engine_incarnation"] = replica.engine_incarnation
+            self._terminated_resources.append(resource)
+            kill_process(replica.sidecar)
+            kill_process(replica.runtime)
+            return {
+                "engine_uid": replica.engine_uid,
+                "engine_incarnation": replica.engine_incarnation,
+                "ordinal": replica.ordinal,
             }
 
     def close(self) -> None:
@@ -469,6 +512,29 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 body, dict(self.headers.items())
             )
             self._write(status, response)
+            return
+        if path == "/debug/crash-replica":
+            if self.headers.get("X-Internal-Token") != self.gateway.args.internal_token:
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                self._json(200, self.gateway.crash_replica())
+            except RuntimeError as error:
+                self._json(409, {"error": str(error)})
+            return
+        if path in (
+            "/debug/pause-heartbeats",
+            "/debug/resume-heartbeats",
+        ):
+            if self.headers.get("X-Internal-Token") != self.gateway.args.internal_token:
+                self._json(401, {"error": "unauthorized"})
+                return
+            self._json(
+                200,
+                self.gateway.set_heartbeat_forwarding(
+                    path.endswith("resume-heartbeats")
+                ),
+            )
             return
         if path not in (
             "/v1/internal/placement/execute",

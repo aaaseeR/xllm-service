@@ -230,27 +230,30 @@ class RuntimeHandler(BaseHTTPRequestHandler):
                 delay_ms = 3000
             time.sleep(delay_ms / 1000.0)
             text = f"mock-vllm replica={self.runtime.ordinal}"
-            self._json(
-                200,
-                {
-                    "id": f"cmpl-{request_id}",
-                    "object": "text_completion",
-                    "created": int(time.time()),
-                    "model": "offline-e2e-model-r1",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "text": text,
-                            "finish_reason": "stop",
-                        }
-                    ],
-                    "usage": {
-                        "prompt_tokens": 3,
-                        "completion_tokens": 1,
-                        "total_tokens": 4,
-                    },
+            completion = {
+                "id": f"cmpl-{request_id}",
+                "object": "text_completion",
+                "created": int(time.time()),
+                "model": "offline-e2e-model-r1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": text,
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 1,
+                    "total_tokens": 4,
                 },
-            )
+            }
+            if payload.get("stream") is True:
+                event = json.dumps(completion, separators=(",", ":"))
+                body = f"data: {event}\n\ndata: [DONE]\n\n".encode("utf-8")
+                self._write(200, body, "text/event-stream")
+            else:
+                self._json(200, completion)
             ok = True
         finally:
             self.runtime.finish(time.monotonic() - started, ok)

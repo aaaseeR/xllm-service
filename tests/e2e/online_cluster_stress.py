@@ -509,24 +509,29 @@ class V2LoadClient:
         # targets while they are followers.
         return urls[0]
 
-    def _one(self, index: int) -> tuple[bool, float, str]:
+    def _one(
+        self, index: int, remaining_deadline_ms: int | None = None
+    ) -> tuple[bool, float, str]:
         request_uid = f"load-{uuid.uuid4().hex}-{index}"
         if not self._hbm.reserve(request_uid, 2):
             return False, 0.0, "simulated HBM capacity exhausted"
         started = time.monotonic()
         try:
+            payload: dict[str, object] = {
+                "model": MODEL_REVISION,
+                # Exercise routing with non-identical workload keys.  A
+                # single repeated prompt legitimately stays on one
+                # rendezvous-hash route and cannot validate fan-out.
+                "prompt": f"hello distributed service {index}",
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "stream": False,
+            }
+            if remaining_deadline_ms is not None:
+                payload["remaining_deadline_ms"] = remaining_deadline_ms
             response = requests.post(
                 self._url() + "/v1/completions",
-                json={
-                    "model": MODEL_REVISION,
-                    # Exercise routing with non-identical workload keys.  A
-                    # single repeated prompt legitimately stays on one
-                    # rendezvous-hash route and cannot validate fan-out.
-                    "prompt": f"hello distributed service {index}",
-                    "max_tokens": 1,
-                    "temperature": 0.0,
-                    "stream": False,
-                },
+                json=payload,
                 headers={"X-Request-Id": request_uid},
                 timeout=8.0,
             )
@@ -543,12 +548,57 @@ class V2LoadClient:
         finally:
             self._hbm.release(request_uid)
 
-    def run(self, phase: str, requests_count: int, concurrency: int) -> LoadResult:
+    def _stream_one(self, index: int) -> tuple[bool, float, str]:
+        request_uid = f"stream-{uuid.uuid4().hex}-{index}"
+        if not self._hbm.reserve(request_uid, 2):
+            return False, 0.0, "simulated HBM capacity exhausted"
         started = time.monotonic()
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=concurrency, thread_name_prefix="v2-load"
-        ) as pool:
-            results = list(pool.map(self._one, range(requests_count)))
+        try:
+            with requests.post(
+                self._url() + "/v1/completions",
+                json={
+                    "model": MODEL_REVISION,
+                    "prompt": f"hello streaming service {index}",
+                    "max_tokens": 1,
+                    "temperature": 0.0,
+                    "stream": True,
+                },
+                headers={"X-Request-Id": request_uid},
+                timeout=8.0,
+                stream=True,
+            ) as response:
+                if response.status_code != 200:
+                    latency_ms = (time.monotonic() - started) * 1000.0
+                    return False, latency_ms, f"HTTP {response.status_code}: {response.text[:200]}"
+                chunks: list[str] = []
+                done = False
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        done = True
+                        continue
+                    event = json.loads(data)
+                    choices = event.get("choices", [])
+                    if choices:
+                        chunks.append(str(choices[0].get("text", "")))
+                text = "".join(chunks)
+                latency_ms = (time.monotonic() - started) * 1000.0
+                if not done or not text.startswith("mock-native route=") or "->" not in text:
+                    return False, latency_ms, f"invalid SSE completion: done={done}, text={text!r}"
+                return True, latency_ms, text.removeprefix("mock-native route=")
+        except (requests.RequestException, ValueError, KeyError, IndexError) as error:
+            return False, (time.monotonic() - started) * 1000.0, str(error)
+        finally:
+            self._hbm.release(request_uid)
+
+    @staticmethod
+    def summarize(
+        phase: str,
+        started: float,
+        results: list[tuple[bool, float, str]],
+    ) -> LoadResult:
         duration = time.monotonic() - started
         latencies = [latency for _, latency, _ in results]
         routes: dict[str, int] = {}
@@ -562,18 +612,54 @@ class V2LoadClient:
                 errors.append(detail)
         return LoadResult(
             phase=phase,
-            requested=requests_count,
+            requested=len(results),
             succeeded=succeeded,
-            failed=requests_count - succeeded,
+            failed=len(results) - succeeded,
             routes=routes,
             error_samples=errors,
             duration_seconds=duration,
-            requests_per_second=requests_count / duration,
+            requests_per_second=len(results) / duration,
             latency_mean_ms=statistics.mean(latencies) if latencies else 0.0,
             latency_p50_ms=percentile(latencies, 0.50),
             latency_p95_ms=percentile(latencies, 0.95),
             latency_p99_ms=percentile(latencies, 0.99),
         )
+
+    def run(self, phase: str, requests_count: int, concurrency: int) -> LoadResult:
+        started = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="v2-load"
+        ) as pool:
+            results = list(pool.map(self._one, range(requests_count)))
+        return self.summarize(phase, started, results)
+
+    def run_streaming(
+        self, phase: str, requests_count: int, concurrency: int
+    ) -> LoadResult:
+        started = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="v2-stream"
+        ) as pool:
+            results = list(pool.map(self._stream_one, range(requests_count)))
+        return self.summarize(phase, started, results)
+
+    def run_deadline(
+        self,
+        phase: str,
+        requests_count: int,
+        concurrency: int,
+        remaining_deadline_ms: int,
+    ) -> LoadResult:
+        started = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="v2-deadline"
+        ) as pool:
+            futures = [
+                pool.submit(self._one, index, remaining_deadline_ms)
+                for index in range(requests_count)
+            ]
+            results = [future.result() for future in futures]
+        return self.summarize(phase, started, results)
 
 
 class V3LoadClient:
@@ -660,6 +746,57 @@ class V3LoadClient:
             max_workers=concurrency, thread_name_prefix="v3-load"
         ) as pool:
             results = list(pool.map(self._one, range(requests_count)))
+        return self.summarize(phase, started, results)
+
+    def run_streaming(
+        self, phase: str, requests_count: int, concurrency: int
+    ) -> LoadResult:
+        def stream_one(index: int) -> tuple[bool, float, str]:
+            request_uid = f"v3-stream-{uuid.uuid4().hex}-{index}"
+            started = time.monotonic()
+            try:
+                with requests.post(
+                    self._url() + "/v1/completions",
+                    json={
+                        "model": MODEL_REVISION,
+                        "prompt": f"hello autoscaled streaming service {index}",
+                        "max_tokens": 1,
+                        "temperature": 0.0,
+                        "stream": True,
+                    },
+                    headers={"X-Request-Id": request_uid},
+                    timeout=10.0,
+                    stream=True,
+                ) as response:
+                    if response.status_code != 200:
+                        latency_ms = (time.monotonic() - started) * 1000.0
+                        return False, latency_ms, f"HTTP {response.status_code}: {response.text[:200]}"
+                    chunks: list[str] = []
+                    done = False
+                    for line in response.iter_lines(decode_unicode=True):
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line.removeprefix("data:").strip()
+                        if data == "[DONE]":
+                            done = True
+                            continue
+                        event = json.loads(data)
+                        choices = event.get("choices", [])
+                        if choices:
+                            chunks.append(str(choices[0].get("text", "")))
+                    text = "".join(chunks)
+                    latency_ms = (time.monotonic() - started) * 1000.0
+                    if not done or not text.startswith("mock-vllm replica="):
+                        return False, latency_ms, f"invalid SSE completion: done={done}, text={text!r}"
+                    return True, latency_ms, text.removeprefix("mock-vllm replica=")
+            except (requests.RequestException, ValueError, KeyError, IndexError) as error:
+                return False, (time.monotonic() - started) * 1000.0, str(error)
+
+        started = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="v3-stream"
+        ) as pool:
+            results = list(pool.map(stream_one, range(requests_count)))
         return self.summarize(phase, started, results)
 
     def run_paced(
@@ -917,8 +1054,10 @@ class ClusterGate:
             "--output_gap_query_timeout_ms=100",
             "--p_first_event_retry_ub_ms=700",
             "--first_event_dispatch_margin_ms=200",
-            "--flow_max_queued_requests=1024",
-            "--flow_max_dispatched_contexts=1024",
+            "--flow_max_queued_requests=32",
+            "--flow_max_dispatched_contexts=8",
+            "--flow_max_model_queued_requests=32",
+            "--flow_max_model_dispatched_contexts=8",
             "--observability_export_interval_ms=20",
             "--observability_snapshot_interval_ms=1000",
             "--observability_build_id=offline-e2e",
@@ -1156,7 +1295,7 @@ class ClusterGate:
                 f"--incarnation_id={incarnation}",
                 "--worker_threads=8",
                 "--queue_capacity=2048",
-                "--completion_delay_ms=3",
+                "--completion_delay_ms=100",
             ],
         )
         self.engine_processes[label] = process
@@ -1219,11 +1358,50 @@ class ClusterGate:
                 f"required {minimum_routes}: {result.routes}"
             )
 
+    def assert_bounded_abrupt_loss(
+        self,
+        result: LoadResult,
+        max_failures: int,
+        minimum_routes: int,
+        max_duration_seconds: float,
+    ) -> None:
+        self.report.phases.append(asdict(result))
+        if result.succeeded == 0 or len(result.routes) < minimum_routes:
+            raise GateFailure(
+                f"phase {result.phase} lost serving progress: {result}"
+            )
+        if result.failed > max_failures:
+            raise GateFailure(
+                f"phase {result.phase} exceeded abrupt-loss failure bound "
+                f"{max_failures}: {result.error_samples}"
+            )
+        if result.duration_seconds > max_duration_seconds:
+            raise GateFailure(
+                f"phase {result.phase} exceeded recovery-window bound "
+                f"{max_duration_seconds}s: {result.duration_seconds}s"
+            )
+        if any(
+            "Connection refused" not in error
+            and "backend instance is not available" not in error
+            for error in result.error_samples
+        ):
+            raise GateFailure(
+                f"phase {result.phase} returned an unexpected failure: "
+                f"{result.error_samples}"
+            )
+
     def stop_engine(self, label: str) -> None:
         lease = self.engine_leases.pop(label)
         process = self.engine_processes.pop(label)
         lease.stop()
         process.stop()
+
+    def crash_engine(self, label: str) -> None:
+        lease = self.engine_leases.pop(label)
+        process = self.engine_processes.pop(label)
+        process.send_signal(signal.SIGKILL)
+        process.process.wait(timeout=3.0)
+        lease.stop()
 
     def restart_native_engines_after_ownership_loss(self) -> dict[str, str]:
         restarted: dict[str, str] = {}
@@ -1329,6 +1507,20 @@ class ClusterGate:
             raise GateFailure(f"invalid Agent lifecycle response: {payload}")
         return payload
 
+    @staticmethod
+    def set_gateway_heartbeat_forwarding(enabled: bool) -> dict[str, object]:
+        action = "resume-heartbeats" if enabled else "pause-heartbeats"
+        response = requests.post(
+            f"http://127.0.0.1:18280/debug/{action}",
+            headers={"X-Internal-Token": INTERNAL_TOKEN},
+            timeout=2.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise GateFailure(f"invalid heartbeat forwarding response: {payload}")
+        return payload
+
     def v3_drain_retry_observed(self) -> str | None:
         leader = self.leader_url()
         if leader is None:
@@ -1371,12 +1563,15 @@ class ClusterGate:
 
         hold_started = time.monotonic()
         hold_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=9, thread_name_prefix="v3-drain-hold"
+            max_workers=3, thread_name_prefix="v3-drain-hold"
         )
         hold_futures = [
-            hold_pool.submit(client._one, index, True) for index in range(9)
+            hold_pool.submit(client._one, index, True) for index in range(3)
         ]
         race_pool: concurrent.futures.ThreadPoolExecutor | None = None
+        heartbeat_forwarding_paused = False
+        target: dict[str, object] | None = None
+        drain_cancelled = False
         try:
             state = wait_until(
                 "an active VLLM attempt on every replica",
@@ -1394,6 +1589,10 @@ class ClusterGate:
                 self.gateway_state()["replicas"], key=lambda item: item["ordinal"]
             )
             target = replicas[0]
+            paused = self.set_gateway_heartbeat_forwarding(False)
+            heartbeat_forwarding_paused = True
+            if paused.get("heartbeat_forwarding_enabled") is not False:
+                raise GateFailure(f"failed to pause Agent heartbeats: {paused}")
             begin = self.execute_agent_lifecycle(
                 target,
                 "PROVIDER_LIFECYCLE_ACTION_BEGIN_DRAIN",
@@ -1430,6 +1629,11 @@ class ClusterGate:
                 or cancel.get("lifecycle") != "ENGINE_LIFECYCLE_READY"
             ):
                 raise GateFailure(f"Agent drain cancellation failed: {cancel}")
+            drain_cancelled = True
+            resumed = self.set_gateway_heartbeat_forwarding(True)
+            heartbeat_forwarding_paused = False
+            if resumed.get("heartbeat_forwarding_enabled") is not True:
+                raise GateFailure(f"failed to resume Agent heartbeats: {resumed}")
 
             race_result = V3LoadClient.summarize(
                 "v3-select-before-drain-retry",
@@ -1452,6 +1656,7 @@ class ClusterGate:
                     "target": target["engine_uid"],
                     "begin_code": begin["code"],
                     "cancel_code": cancel["code"],
+                    "heartbeat_propagation_paused": True,
                     "transparent_retries": 1,
                     "request_failures": race_result.failed,
                     "inflight_failures": hold_result.failed,
@@ -1459,6 +1664,20 @@ class ClusterGate:
             )
             return retry_metrics
         finally:
+            if target is not None and not drain_cancelled:
+                try:
+                    self.execute_agent_lifecycle(
+                        target,
+                        "PROVIDER_LIFECYCLE_ACTION_CANCEL_DRAIN",
+                        desired_generation=2,
+                    )
+                except (GateFailure, requests.RequestException):
+                    pass
+            if heartbeat_forwarding_paused:
+                try:
+                    self.set_gateway_heartbeat_forwarding(True)
+                except (GateFailure, requests.RequestException):
+                    pass
             if race_pool is not None:
                 race_pool.shutdown(wait=True)
             hold_pool.shutdown(wait=True)
@@ -1492,10 +1711,60 @@ class ClusterGate:
         client = V2LoadClient(self.cached_master_urls, self.hbm)
 
         baseline_count = 120 if self.args.mode == "smoke" else 1200
-        concurrency = 24 if self.args.mode == "smoke" else 64
+        concurrency = 24
         self.assert_phase(client.run("v2-baseline", baseline_count, concurrency))
 
-        self.stop_engine("p-1")
+        self.assert_phase(
+            client.run_streaming(
+                "v2-openai-sse",
+                16 if self.args.mode == "smoke" else 160,
+                8,
+            )
+        )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            active = pool.submit(client.run, "v2-deadline-work-ahead", 8, 8)
+            time.sleep(0.03)
+            deadline = client.run_deadline(
+                "v2-unsatisfiable-deadline",
+                8 if self.args.mode == "smoke" else 64,
+                8,
+                25,
+            )
+            self.assert_phase(active.result(timeout=10))
+        self.report.phases.append(asdict(deadline))
+        deadline_errors = " ".join(deadline.error_samples).upper()
+        if deadline.succeeded or "DEADLINE" not in deadline_errors:
+            raise GateFailure(
+                "work-ahead deadline load did not fail closed with a deadline "
+                f"classification: {deadline}"
+            )
+
+        overload = client.run(
+            "v2-bounded-overload",
+            96 if self.args.mode == "smoke" else 960,
+            64,
+        )
+        self.report.phases.append(asdict(overload))
+        overload_errors = " ".join(overload.error_samples).upper()
+        if overload.succeeded == 0 or overload.failed == 0 or (
+            "QUEUE" not in overload_errors and "CAPACITY" not in overload_errors
+        ):
+            raise GateFailure(
+                "bounded overload did not preserve both progress and structured "
+                f"backpressure: {overload}"
+            )
+        self.assert_phase(client.run("v2-overload-recovery", 32, 8))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            inflight = pool.submit(
+                client.run,
+                "v2-inflight-prefill-sigkill",
+                64 if self.args.mode == "smoke" else 640,
+                32,
+            )
+            time.sleep(0.03)
+            self.crash_engine("p-1")
         wait_until(
             "failed Prefill membership removal",
             10,
@@ -1504,14 +1773,16 @@ class ClusterGate:
             )
             is None,
         )
+        self.assert_phase(inflight.result(timeout=30), require_all=True)
         after_engine_fault = client.run(
             "v2-after-prefill-loss", baseline_count // 2, concurrency
         )
         self.assert_phase(after_engine_fault, require_all=True)
         self.report.faults.append(
             {
-                "fault": "prefill_process_and_lease_loss",
+                "fault": "inflight_prefill_sigkill_and_lease_loss",
                 "target": "p-1",
+                "inflight_success": inflight.result().succeeded,
                 "post_fault_success": after_engine_fault.succeeded,
             }
         )
@@ -1702,6 +1973,14 @@ class ClusterGate:
         client = V3LoadClient(self.cached_master_urls)
         baseline = client.run("v3-min-replica-baseline", 1, 1)
         self.assert_phase(baseline, minimum_routes=1)
+        self.assert_phase(
+            client.run_streaming(
+                "v3-openai-sse",
+                8 if self.args.mode == "smoke" else 80,
+                8,
+            ),
+            minimum_routes=1,
+        )
 
         high_count = 180 if self.args.mode == "smoke" else 1800
         concurrency = 32 if self.args.mode == "smoke" else 64
@@ -1731,6 +2010,57 @@ class ClusterGate:
                 f"V3 scale-up did not converge within max replicas: {scale_up_state}"
             )
         drain_retry_metrics = self.run_v3_drain_race(client)
+
+        crashed = requests.post(
+            "http://127.0.0.1:18280/debug/crash-replica",
+            headers={"X-Internal-Token": INTERNAL_TOKEN},
+            timeout=3.0,
+        )
+        crashed.raise_for_status()
+        crashed_replica = crashed.json()
+        during_replacement = client.run(
+            "v3-runtime-agent-sigkill-replacement",
+            180 if self.args.mode == "smoke" else 1800,
+            concurrency,
+        )
+        self.assert_bounded_abrupt_loss(
+            during_replacement,
+            max_failures=4,
+            minimum_routes=2,
+            max_duration_seconds=5.0,
+        )
+        replacement_state = wait_until(
+            "V3 replacement after abrupt Agent and Runtime loss",
+            35,
+            lambda: (
+                state
+                if int((state := self.gateway_state())["active_replicas"]) == 3
+                else None
+            ),
+        )
+        assert isinstance(replacement_state, dict)
+        if int(replacement_state["max_active_replicas"]) > 3:
+            raise GateFailure(
+                f"V3 replacement exceeded device capacity: {replacement_state}"
+            )
+        after_replacement = client.run(
+            "v3-after-runtime-agent-replacement",
+            120 if self.args.mode == "smoke" else 1200,
+            concurrency,
+        )
+        self.assert_phase(after_replacement, minimum_routes=3)
+        self.report.faults.append(
+            {
+                "fault": "vllm_agent_runtime_sigkill",
+                "crashed_replica": crashed_replica,
+                "during_fault_success": during_replacement.succeeded,
+                "bounded_transport_failures": during_replacement.failed,
+                "post_replacement_success": after_replacement.succeeded,
+                "replacement_active_replicas": replacement_state[
+                    "active_replicas"
+                ],
+            }
+        )
         before_failover_metrics = self.scrape_v3_metrics(
             "metrics-before-failover.prom"
         )
@@ -1797,7 +2127,7 @@ class ClusterGate:
             raise GateFailure(f"V3 did not scale down to min replicas: {final_state}")
         action_counts = final_state["action_counts"]
         if (
-            int(action_counts.get("CREATE", 0)) != 3
+            int(action_counts.get("CREATE", 0)) != 4
             or int(action_counts.get("TERMINATE", 0)) != 2
             or int(final_state["max_active_replicas"]) != 3
             or int(final_state["lost_create_response_count"]) != 1
