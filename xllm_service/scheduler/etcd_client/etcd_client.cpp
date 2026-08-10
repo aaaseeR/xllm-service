@@ -206,6 +206,109 @@ bool EtcdClient::get(const std::string& key, std::string* value) {
   return true;
 }
 
+EtcdReadStatus EtcdClient::get_with_revision(const std::string& key,
+                                             std::string* value,
+                                             int64_t* mod_revision) {
+  if (key.empty() || value == nullptr || mod_revision == nullptr) {
+    return EtcdReadStatus::INVALID_INPUT;
+  }
+  const etcd::Response response = client_.get(namespaced_key(key));
+  if (response.error_code() == etcd::ERROR_KEY_NOT_FOUND) {
+    return EtcdReadStatus::NOT_FOUND;
+  }
+  if (!response.is_ok()) {
+    LOG(ERROR) << "etcd get with revision " << key
+               << " failed: " << response.error_message();
+    return EtcdReadStatus::UNAVAILABLE;
+  }
+  *value = response.value().as_string();
+  *mod_revision = response.value().modified_index();
+  return EtcdReadStatus::OK;
+}
+
+EtcdReadStatus EtcdClient::get_prefix_with_revision(
+    const std::string& key_prefix,
+    std::vector<EtcdKeyValue>* values) {
+  if (key_prefix.empty() || values == nullptr) {
+    return EtcdReadStatus::INVALID_INPUT;
+  }
+  const std::string full_prefix = namespaced_key(key_prefix);
+  const etcd::Response response = client_.ls(full_prefix);
+  if (response.error_code() == etcd::ERROR_KEY_NOT_FOUND) {
+    values->clear();
+    return EtcdReadStatus::OK;
+  }
+  if (!response.is_ok()) {
+    LOG(ERROR) << "etcd get prefix with revision " << key_prefix
+               << " failed: " << response.error_message();
+    return EtcdReadStatus::UNAVAILABLE;
+  }
+  const size_t prefix_len = full_prefix.size();
+  values->clear();
+  values->reserve(response.keys().size());
+  for (int index = 0; index < response.keys().size(); ++index) {
+    if (response.key(index).size() < prefix_len) {
+      values->clear();
+      return EtcdReadStatus::UNAVAILABLE;
+    }
+    values->emplace_back(EtcdKeyValue{
+        .key = response.key(index).substr(prefix_len),
+        .value = response.value(index).as_string(),
+        .mod_revision = response.value(index).modified_index(),
+    });
+  }
+  return EtcdReadStatus::OK;
+}
+
+EtcdFencedWriteStatus EtcdClient::compare_and_set_fenced(
+    const std::string& key,
+    const std::string& value,
+    int64_t expected_mod_revision,
+    const std::string& expected_master_address,
+    const std::string& expected_master_incarnation) {
+  if (key.empty() || value.empty() || expected_mod_revision < 0 ||
+      expected_master_address.empty() ||
+      expected_master_incarnation.empty()) {
+    return EtcdFencedWriteStatus::INVALID_INPUT;
+  }
+
+  etcdv3::Transaction transaction;
+  transaction.add_compare_value(namespaced_key(ETCD_MASTER_SERVICE_KEY),
+                                expected_master_address);
+  transaction.add_compare_value(
+      namespaced_key(ETCD_MASTER_SERVICE_INCARNATION_KEY),
+      expected_master_incarnation);
+  transaction.add_compare_mod(namespaced_key(key), expected_mod_revision);
+  transaction.add_success_put(namespaced_key(key), value);
+  const etcd::Response response = client_.txn(transaction);
+  if (response.is_ok()) {
+    return EtcdFencedWriteStatus::OK;
+  }
+  if (response.error_code() != etcd::ERROR_COMPARE_FAILED) {
+    LOG(ERROR) << "etcd fenced compare-and-set " << key
+               << " failed: " << response.error_message();
+    return EtcdFencedWriteStatus::UNAVAILABLE;
+  }
+
+  std::string master_address;
+  std::string master_incarnation;
+  int64_t master_address_revision = 0;
+  int64_t master_incarnation_revision = 0;
+  const EtcdReadStatus address_status = get_with_revision(
+      ETCD_MASTER_SERVICE_KEY, &master_address, &master_address_revision);
+  const EtcdReadStatus incarnation_status = get_with_revision(
+      ETCD_MASTER_SERVICE_INCARNATION_KEY,
+      &master_incarnation,
+      &master_incarnation_revision);
+  if (address_status != EtcdReadStatus::OK ||
+      incarnation_status != EtcdReadStatus::OK ||
+      master_address != expected_master_address ||
+      master_incarnation != expected_master_incarnation) {
+    return EtcdFencedWriteStatus::FENCED;
+  }
+  return EtcdFencedWriteStatus::REVISION_CONFLICT;
+}
+
 bool EtcdClient::get_prefix(const std::string& key_prefix,
                             XXH3KeyCacheMap* values) {
   const std::string full_prefix = namespaced_key(key_prefix);

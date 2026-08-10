@@ -48,6 +48,14 @@ bool valid_placement_pool_key(const PlacementPoolKey& key) {
          valid_placement_identity(key.profile_digest);
 }
 
+bool placement_pool_keys_equal(const PlacementPoolKey& left,
+                               const PlacementPoolKey& right) {
+  return left.provider_id == right.provider_id &&
+         left.model_revision == right.model_revision &&
+         left.role == right.role &&
+         left.profile_digest == right.profile_digest;
+}
+
 bool valid_placement_capacity_profile(
     const PlacementCapacityProfile& profile) {
   if (!valid_placement_pool_key(profile.pool) ||
@@ -113,6 +121,35 @@ bool valid_placement_observation(const PlacementObservation& observation) {
          finite_nonnegative(observation.full_cache_loss_cost) &&
          finite_nonnegative(observation.confirmed_store_coverage) &&
          observation.confirmed_store_coverage <= 1.0;
+}
+
+bool valid_placement_reason(PlacementReason reason) {
+  switch (reason) {
+    case PlacementReason::NONE:
+    case PlacementReason::FORECAST_CAPACITY:
+    case PlacementReason::QUEUE_HIGH:
+    case PlacementReason::ADMISSION_REJECT_HIGH:
+    case PlacementReason::TTFT_SLO_VIOLATION:
+    case PlacementReason::TPOT_SLO_VIOLATION:
+    case PlacementReason::KV_PRESSURE_HIGH:
+    case PlacementReason::SCALE_UP_HOLD:
+    case PlacementReason::SCALE_DOWN_STABILIZATION:
+    case PlacementReason::COOLDOWN:
+    case PlacementReason::INSUFFICIENT_SAMPLES:
+    case PlacementReason::OUT_OF_DISTRIBUTION:
+    case PlacementReason::PENDING_OPERATION:
+    case PlacementReason::CACHE_LOSS_COST:
+    case PlacementReason::MIN_REPLICAS:
+    case PlacementReason::MAX_REPLICAS:
+    case PlacementReason::STABLE:
+    case PlacementReason::REPLAYED_OBSERVATION:
+    case PlacementReason::INVALID_CONFIG:
+    case PlacementReason::INVALID_PROFILE:
+    case PlacementReason::INVALID_OBSERVATION:
+    case PlacementReason::CLOCK_REGRESSION:
+      return true;
+  }
+  return false;
 }
 
 const char* placement_reason_name(PlacementReason reason) {

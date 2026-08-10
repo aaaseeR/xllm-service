@@ -152,12 +152,17 @@ bool valid_placement_identity(const std::string& value);
 
 bool valid_placement_pool_key(const PlacementPoolKey& key);
 
+bool placement_pool_keys_equal(const PlacementPoolKey& left,
+                               const PlacementPoolKey& right);
+
 bool valid_placement_capacity_profile(
     const PlacementCapacityProfile& profile);
 
 bool valid_placement_planner_config(const PlacementPlannerConfig& config);
 
 bool valid_placement_observation(const PlacementObservation& observation);
+
+bool valid_placement_reason(PlacementReason reason);
 
 const char* placement_reason_name(PlacementReason reason);
 

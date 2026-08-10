@@ -19,13 +19,36 @@ limitations under the License.
 #include <etcd/SyncClient.hpp>
 #include <etcd/Watcher.hpp>
 #include <etcd/v3/Transaction.hpp>
+#include <cstdint>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include "common/hash_util.h"
 #include "common/types.h"
 
 namespace xllm_service {
+
+enum class EtcdReadStatus : int8_t {
+  OK = 0,
+  NOT_FOUND = 1,
+  UNAVAILABLE = 2,
+  INVALID_INPUT = 3,
+};
+
+enum class EtcdFencedWriteStatus : int8_t {
+  OK = 0,
+  FENCED = 1,
+  REVISION_CONFLICT = 2,
+  UNAVAILABLE = 3,
+  INVALID_INPUT = 4,
+};
+
+struct EtcdKeyValue {
+  std::string key;
+  std::string value;
+  int64_t mod_revision = 0;
+};
 
 using Callback = std::function<void(const etcd::Response&, const uint64_t&)>;
 
@@ -111,6 +134,21 @@ class EtcdClient {
   }
 
   bool get(const std::string& key_prefix, std::string* value);
+
+  EtcdReadStatus get_with_revision(const std::string& key,
+                                   std::string* value,
+                                   int64_t* mod_revision);
+
+  EtcdReadStatus get_prefix_with_revision(
+      const std::string& key_prefix,
+      std::vector<EtcdKeyValue>* values);
+
+  EtcdFencedWriteStatus compare_and_set_fenced(
+      const std::string& key,
+      const std::string& value,
+      int64_t expected_mod_revision,
+      const std::string& expected_master_address,
+      const std::string& expected_master_incarnation);
 
   template <typename T>
   bool get_prefix(const std::string& key_prefix,

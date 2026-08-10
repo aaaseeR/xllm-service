@@ -18,8 +18,9 @@ limitations under the License.
 ## 基本信息
 
 - Owner：xLLM Service
-- 状态：IN_PROGRESS；领域模型、独立 Planner 与全局预算分配已 `CPU_VERIFIED`，
-  P0 生命周期状态机及 P2-P5 尚在开发，P6 为 `NPU_AND_CLUSTER_PENDING`
+- 状态：IN_PROGRESS；V3-P0/P1 已 `CPU_VERIFIED`，P2 desired store 与 P3
+  reconcile/fake actuator 核心已通过 CPU 测试但完整 operation 持久化和集成仍为
+  `PARTIAL`，P4-P5 尚在开发，P6 为 `NPU_AND_CLUSTER_PENDING`
 - 关联设计：[V3 Placement 与 Autoscale](../14_XLLM_SERVICE_V3_PLACEMENT_AUTOSCALE_DESIGN.md)
 - 最近验证：`service_dev` 开发分支，ARM64 Linux Debug 沙箱，2026-08-10
 
@@ -33,7 +34,10 @@ limitations under the License.
 | 快扩、慢缩、hysteresis、cooldown、样本/OOD 门禁 | CPU_VERIFIED | `tests/xllm_service/placement/placement_planner_test.cpp` |
 | 模拟 HBM cache-loss 与已确认 Store coverage 经济门禁 | CPU_VERIFIED | `PlacementPlannerTest.ConfirmedStoreCoverageCanUnlockScaleDown` |
 | 全局 device budget、保护容量与稳定优先级 | CPU_VERIFIED | `xllm_service/placement/placement_budget_allocator.{h,cpp}` 与对应测试 |
-| leader-fenced desired store / lifecycle / actuator / Service 集成 | IN_PROGRESS | V3-P2 至 P5 |
+| 生命周期与三重 fencing | CPU_VERIFIED | `xllm_service/placement/placement_lifecycle.{h,cpp}`；覆盖 replay、旧 generation/incarnation、drain commit 与新 incarnation |
+| leader-fenced desired store | PARTIAL / CPU_VERIFIED CORE | `placement_desired_store.{h,cpp}` 与 `scheduler/etcd_client`；双 master identity + mod revision CAS、严格 codec、全量快照容量门 |
+| 确定性 reconcile 与 operation executor | PARTIAL / CPU_VERIFIED CORE | `placement_reconciler.{h,cpp}`、`placement_actuator.{h,cpp}`；unknown 只 Query、drain/terminate proof、fake actuator |
+| command/status 持久化与 Service 集成 | IN_PROGRESS | V3-P2/P3 剩余项及 P5 |
 | 真实 NPU/HBM、部署系统与线上闭环 | NPU_AND_CLUSTER_PENDING | V3-P6 线上矩阵 |
 
 当前 CPU Planner 不按 NPU/GPU/MLU 分支。硬件差异只通过不可变 capacity profile 和
@@ -52,21 +56,29 @@ Provider lifecycle conformance 输入；CPU 验证控制逻辑，不能替代真
 - Store coverage 只作为已确认持久化覆盖的输入；默认模拟完整 HBM cache loss；
 - 全局预算先分配 safe-required 保护增量，再按 `priority → SLO risk → pool key` 稳定分配；
 - 已有容量超预算时只标记 `OVERCOMMITTED`，不绕过 Planner 强制缩容。
+- lifecycle command 同时绑定 operation id、desired generation 与 Engine incarnation；任意已应用
+  phase 重放不回退状态，drain commit 后不能取消，重新创建必须使用新 incarnation；
+- desired 写入同时比较 Service master address、master incarnation 和 etcd mod revision；损坏、
+  超记录/字节预算的 leader 恢复快照 fail closed；
+- reconcile 不在存在非终态/未知 operation 时叠加副作用；执行结果不明后只 Query；BEGIN_DRAIN
+  成功必须证明 admission closed 且 P/transfer/reservation/D/output/cleanup 全部归零。
 
 ## 测试与门禁
 
 | Gate | CPU test | 当前结果 |
 | --- | --- | --- |
-| V3-P0 领域输入与稳定错误 | placement types/planner 边界测试 | CPU_VERIFIED；生命周期状态机待完成 |
+| V3-P0 领域输入、稳定错误与 lifecycle | types/planner/lifecycle 边界和迁移测试 | CPU_VERIFIED |
 | V3-P1 P/D/A、稳定性、cache loss、预算 | planner 与 budget allocator 单测 | CPU_VERIFIED |
-| 全仓回归 | `xllm-dev service-test ... native Debug` | 411/411 PASS |
-| V3-P2 至 P5 | store/reconcile/lifecycle/loopback/Service 集成 | IN_PROGRESS |
+| V3-P2 desired store | codec、快照容量、并发 CAS、旧 leader/revision | PARTIAL；核心 CPU_VERIFIED，operation store 待完成 |
+| V3-P3 reconcile/actuator | deterministic victim、unknown、proof、容量 | PARTIAL；核心 CPU_VERIFIED，持久恢复/集成待完成 |
+| 全仓回归 | `xllm-dev service-test ... native Debug` | 440/440 PASS |
+| V3-P4/P5 | Provider lifecycle loopback / Service 集成 | IN_PROGRESS |
 | V3-P6 | NPU、真实 HBM、etcd/actuator、阶梯流量、24h+ soak | PENDING |
 
 ## 达到 V3 代码完成仍需
 
-1. 完成 leader incarnation fencing、desired/command/status 持久化和损坏快照处理；
-2. 完成幂等 reconcile、fake deployment actuator 和有界 operation ledger；
+1. 在已完成 desired fencing/快照基础上补齐 command/status 持久化和 leader 恢复；
+2. 在已完成 reconcile/fake actuator 基础上补齐有界 operation ledger 的持久恢复与终态回收；
 3. 完成 xLLM Native 与 vLLM-Ascend drain/query/new-incarnation conformance；
 4. 接入 Service SHADOW/create-only/ENFORCED、结构化日志和低基数指标；
 5. 通过 P0-P5 全量 CPU/loopback/并发/故障回归并发布线上操作手册；

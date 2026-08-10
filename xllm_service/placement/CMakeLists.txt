@@ -32,3 +32,51 @@ cc_library(
   DEPS
     :placement_types
 )
+
+cc_library(
+  NAME
+    placement_lifecycle
+  HDRS
+    placement_lifecycle.h
+  SRCS
+    placement_lifecycle.cpp
+  DEPS
+    :placement_types
+)
+
+cc_library(
+  NAME
+    placement_desired_store
+  HDRS
+    placement_desired_store.h
+  SRCS
+    placement_desired_store.cpp
+  DEPS
+    :etcd_client
+    :placement_types
+    nlohmann_json::nlohmann_json
+)
+
+cc_library(
+  NAME
+    placement_reconciler
+  HDRS
+    placement_reconciler.h
+  SRCS
+    placement_reconciler.cpp
+  DEPS
+    :placement_desired_store
+    :placement_lifecycle
+    xxHash
+)
+
+cc_library(
+  NAME
+    placement_actuator
+  HDRS
+    placement_actuator.h
+  SRCS
+    placement_actuator.cpp
+  DEPS
+    :placement_reconciler
+)
