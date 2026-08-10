@@ -182,6 +182,12 @@ struct Request {
   // the number of generated tokens
   int64_t num_generated_tokens = 0;
 
+  // Compatibility responses still need wall time in latest_generate_time,
+  // while latency deltas must never use a clock that can be adjusted by the
+  // host. This Service-local monotonic sample owns legacy TTFT/ITL timing.
+  std::chrono::steady_clock::time_point latest_generate_monotonic_time =
+      std::chrono::steady_clock::now();
+
   // the estimated TTFT obtained from the TTFT predictor
   int64_t estimated_ttft = 0;
 

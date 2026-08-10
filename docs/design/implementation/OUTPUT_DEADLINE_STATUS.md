@@ -18,10 +18,10 @@ limitations under the License.
 ## 基本信息
 
 - Owner：xLLM Service V2
-- 状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
+- 状态：`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_PENDING`
 - 关联设计/Requirement ID：G2、02 §3.2/§5.1/§7/§11/§14.1、F21、F33、F39
 - 最近验证基线：xLLM 与 xllm-service `service_dev` 本状态文档所在提交
-- 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
+- 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-10
 
 ## 支持范围
 
@@ -33,10 +33,9 @@ limitations under the License.
 | xLLM Service + xLLM Native | `REMOTE_PD` | 请求截止时间 | CPU_VERIFIED | Chat/Completion 显式 remaining duration 或 Service 默认 300 s 均转换为逐跳本地 monotonic deadline；Service 有界 deadline/断连队列、P/D hop 重算、D reservation 截断和 Engine 调度边界停止均已接生产路径并完成 CPU 编译/单测 |
 | Legacy / 非远程 P-D | 既有输出路径 | 全部 | COMPATIBLE | 未安装 V2 sequencer 时维持原有单发送方亲和线程路径；新增 wire 字段为 additive |
 | `LOCAL_PREFILL_DECODE` / `PREFILL_ONLY` | xLLM V2 首发模式 | 全部 | CPU_VERIFIED / NPU_PENDING | mode-specific 输出、commit/terminal、统一 deadline/watchdog 与稳定拒绝已接入 |
-| vLLM-Ascend `AGGREGATED` | Agent HTTP/SSE | contract v1 | CPU_VERIFIED / NPU_PENDING | Service 传播剩余 deadline，Agent 本地 monotonic expiry/abort 与流终态接线完成；真实 SSE/NPU 资源释放待验证 |
+| vLLM-Ascend `AGGREGATED` | Agent HTTP/SSE | contract v1 | CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_PENDING | Service 传播剩余 deadline，Provider hop 受业务剩余时间截断；生产 Agent 的真实 SSE、客户端断流、Cancel 与 simulated HBM 资源收敛已通过离线多进程 stress；真实 NPU 释放待验证 |
 
-这里的 `CPU_VERIFIED` 覆盖 xLLM Native 三种首发模式与 vLLM AGGREGATED 的 CPU
-控制面、本地 brpc loopback、Torch CPU 持有语义和生产编译；不代表 NPU/RDMA 数据面。
+这里的 `CPU_AND_OFFLINE_CLUSTER_VERIFIED` 覆盖 xLLM Native 三种首发模式与 vLLM AGGREGATED 的 CPU 控制面、本地 brpc loopback、Torch CPU 持有语义、生产编译和离线多进程故障链路；不代表 NPU/RDMA 数据面。
 
 ## 实现
 
@@ -162,9 +161,9 @@ limitations under the License.
 | G2 delivery reason wire | 双仓固定 enum 名称/数值与字段号；Service proto 双向二进制解析并逐项比较 descriptor；unknown/closed/identity/sequence/commit/terminal/affinity 映射为稳定 per-item code | N/A，纯协议 | N/A | PASS |
 | G2 seq=0 Query 恢复 | xLLM 首事件 exact adapter、wire field 24、identity/seq/4 MiB 上限；Service 7 项真实 brpc loopback 覆盖精确 payload、并发 batch、hard timeout、D 重启、live/recovery 竞争和边界拒绝；P/D/Service 生产对象严格编译 | xLLM adapter 目标链接 Torch CPU；本逻辑不执行 tensor 数值计算 | 待真实 P 退出、D 重启和数据流 | PASS（CPU loopback） |
 | G2 首输出前 attempt 替换 | 8 项 fake monotonic budget 覆盖次数、首输出、deadline、累计 device time、时钟回退、禁用和非法配置；production 接线覆盖旧 hold Cancel fence、递增 attempt、重选 P/D、sequencer/hold 重建、旧 attempt fencing 和 attempt-scoped dispatch failure | N/A，纯控制/RPC | 待真实两组 P/D 故障注入 | PASS（CPU 核心与生产接线）；完整 Scheduler loopback 待补 |
-| G2 主动客户端断连 | 5 项覆盖预留容量、幂等有界通知、弱引用回收、并发 exactly-once 和 close；brpc callback 接入 request watchdog 同一终止路径 | N/A，纯控制 | 待真实客户端断流与 KV 回收 | PASS（CPU 核心与生产接线） |
+| G2 主动客户端断连 | 5 项覆盖预留容量、幂等有界通知、弱引用回收、并发 exactly-once 和 close；brpc callback 接入 request watchdog 同一终止路径；离线多进程真实 SSE 客户端断流验证 Agent Cancel、Service/Runtime/simulated HBM 收敛 | Torch CPU simulated HBM 终态清零 | 待真实 NPU 客户端断流与 KV 回收 | PASS（CPU 与离线集群） |
 | G2 Service 关键竞态稳定性 | 首事件 loopback、断连、重试预算、delivery wire 和 pre-dispatch hold 回滚共 22 项各重复 100 轮，共 2200 次 | N/A | N/A | PASS |
-| 双仓回归 | Service pinned/override 当前均为 388/388，三个生产二进制 build/link verify；xLLM `6c9d661e` admission adapter 3/3、resource adapter/simulator 15/15；xLLM 118/118 与 vLLM Agent/sidecar 60/60 为前一完整公共基线 | Torch CPU queue/所有权历史测试通过；本批完整 xLLM runtime 新结果受第三方 Mooncake 阻断 | N/A | PASS（受影响路径）；全 runtime 未声称 PASS |
+| 双仓回归 | Service 当前全量 517/517，三个生产二进制 build/link verify；xLLM 当前发现 1069 个 CPU CTest 且全量命令 PASS；63 个并发/状态机高风险用例重复 20 轮累计 1260/1260 | Torch CPU queue、所有权与 simulated HBM；V2/V3 离线多进程 stress 资源终态全零 | N/A | PASS（CPU 与离线集群） |
 
 ## 完善情况
 
@@ -177,11 +176,7 @@ limitations under the License.
   不等式已由共享策略和生产启动校验强制执行；seq=0 gap 已优先 Query D 保存的 exact
   首事件并经同一 sequencer 恢复；Query 无 payload、超时或 D 已终止时可在四重预算内
   收敛旧执行并创建新 attempt，否则明确失败。
-- 已知缺口/风险：attempt 替换已完成核心预算、生产接线和受影响对象/二进制编译，但
-  尚无同时启动 Service Scheduler、InstanceMgr 和两组真实 P/D 的多进程 loopback；
-  Gateway/profile 的 deadline 策略、NPU KV 实际释放时延、P/D 真实流式乱序与 Cancel
-  丢失仍待对应环境验证。当前 CPU loopback 只覆盖首事件 recovery client 及 wire，不把
-  本机 brpc 结果外推成 NPU/RDMA 结论。
+- 已知缺口/风险：离线多进程已同时启动生产 Service Scheduler、InstanceMgr 和两组 Native P/D，并覆盖 Prefill `SIGKILL`、deadline、断流与恢复；但没有真实 NPU/RDMA 输出与 KV 数据面。Gateway/profile 的动态 deadline 策略、NPU KV 实际释放时延、P/D 真实流式乱序与 Cancel 丢失仍待对应环境验证，CPU 结果不能外推成 NPU/RDMA 结论。
 - 回滚与兼容：字段全部 additive；未安装 sequencer 的 legacy/非 REMOTE_PD 请求继续
   使用原路径。Native REMOTE_PD 已安装 sequencer 后严格要求 sequence 和 identity，
   因此双仓必须同步发布或由 capability/version 门禁阻止新旧混跑。
@@ -189,7 +184,6 @@ limitations under the License.
   投递有 request/event/retained-byte 三重上限；watchdog 只扫描活跃 gap、断连或到期
   deadline，deadline/断连索引有 65,536 record 和 1,024/轮双上限。尚无 1 万并发请求
   扫描开销、buffer/deadline 水位、delivery/gap reason 和迟到事件的完整 metrics。
-- 当前所有 V2 首发 mode CPU_VERIFIED 后仍需完成：真实 Scheduler 双 P/D fault loop、
-  Gateway/profile 动态 deadline 策略和硬件容量校准；这些不回退本批 CPU 结论。
+- 当前所有 V2 首发 mode 离线集群验证后仍需完成：真实 NPU 双 P/D fault loop、Gateway/profile 动态 deadline 策略和硬件容量校准；这些不回退本批 CPU/离线集群结论。
 - 达到 VERIFIED 仍需完成：NPU P→D 流式乱序、Cancel 丢失、Engine 重启/incarnation
   变化、deadline 资源释放和 1 万次故障门禁。

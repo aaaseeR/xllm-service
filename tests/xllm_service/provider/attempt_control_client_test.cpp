@@ -20,6 +20,7 @@ limitations under the License.
 #include <brpc/server.h>
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -184,6 +185,18 @@ TEST(AttemptControlClientTest, MalformedOrFailedResponseNeverProvesTerminal) {
     EXPECT_EQ(mismatch.state, xllm::proto::ATTEMPT_LIFECYCLE_STATE_UNSPECIFIED)
         << body;
   }
+}
+
+TEST(AttemptControlClientTest, ProviderHopTimeoutCannotExceedRequestDeadline) {
+  EXPECT_EQ(bounded_vllm_request_timeout_ms(500, 1000), 500);
+  EXPECT_EQ(bounded_vllm_request_timeout_ms(5000, 1000), 1000);
+  EXPECT_EQ(
+      bounded_vllm_request_timeout_ms(std::numeric_limits<uint64_t>::max(),
+                                      std::numeric_limits<int32_t>::max()),
+      std::numeric_limits<int32_t>::max());
+  EXPECT_FALSE(bounded_vllm_request_timeout_ms(0, 1000).has_value());
+  EXPECT_FALSE(bounded_vllm_request_timeout_ms(1000, 0).has_value());
+  EXPECT_FALSE(bounded_vllm_request_timeout_ms(1000, -1).has_value());
 }
 
 TEST(AttemptControlClientTest, RejectedCancelCannotProveFenceInstallation) {

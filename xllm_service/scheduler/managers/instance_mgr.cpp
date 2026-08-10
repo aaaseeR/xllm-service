@@ -27,6 +27,7 @@ limitations under the License.
 #include <limits>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -363,6 +364,8 @@ InstanceMgr::InstanceMgr(const Options& options,
 
   state_reconcile_thread_ = std::make_unique<std::thread>(
       &InstanceMgr::reconcile_instance_states, this);
+  direct_probe_thread_ = std::make_unique<std::thread>(
+      &InstanceMgr::reconcile_direct_engine_evidence, this);
 }
 
 void InstanceMgr::init() {
@@ -413,6 +416,9 @@ InstanceMgr::~InstanceMgr() {
   if (state_reconcile_thread_ && state_reconcile_thread_->joinable()) {
     state_reconcile_thread_->join();
   }
+  if (direct_probe_thread_ && direct_probe_thread_->joinable()) {
+    direct_probe_thread_->join();
+  }
 }
 
 InstanceMetaInfo InstanceMgr::get_instance_info(
@@ -429,7 +435,7 @@ InstanceMetaInfo InstanceMgr::get_instance_info(
 
 bool InstanceMgr::get_next_provider(const std::string& model_revision,
                                     xllm::proto::ProviderId* provider_id) {
-  std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
+  std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
   if (provider_id == nullptr) {
     return false;
   }
@@ -445,6 +451,7 @@ bool InstanceMgr::get_next_provider(const std::string& model_revision,
                        decode_candidates,
                        engine_registry_,
                        now_monotonic_ms);
+  std::lock_guard cursor_lock(route_cursor_mutex_);
   provider::ProviderRouteSelection selection;
   if (!provider::ProviderRouteSelector::select(
           prefill_candidates,
@@ -454,7 +461,29 @@ bool InstanceMgr::get_next_provider(const std::string& model_revision,
           next_decode_index_,
           &selection,
           model_revision)) {
-    LOG(ERROR) << "No provider has a schedulable execution route.";
+    const size_t schedulable_prefills = std::count_if(
+        prefill_candidates.begin(),
+        prefill_candidates.end(),
+        [](const auto& candidate) { return candidate.schedulable; });
+    const size_t schedulable_decodes = std::count_if(
+        decode_candidates.begin(),
+        decode_candidates.end(),
+        [](const auto& candidate) { return candidate.schedulable; });
+    const size_t ready_links = std::accumulate(
+        prefill_candidates.begin(),
+        prefill_candidates.end(),
+        size_t{0},
+        [](size_t count, const auto& candidate) {
+          return count + candidate.ready_peer_engine_uids.size();
+        });
+    LOG(ERROR) << "No provider has a schedulable execution route, "
+               << "prefill_candidates=" << prefill_candidates.size()
+               << ", schedulable_prefills=" << schedulable_prefills
+               << ", decode_candidates=" << decode_candidates.size()
+               << ", schedulable_decodes=" << schedulable_decodes
+               << ", ready_links=" << ready_links << ", current_full="
+               << engine_registry_.has_current_full_snapshot()
+               << ", model_revision=" << model_revision;
     return false;
   }
   *provider_id = selection.provider_id;
@@ -465,7 +494,7 @@ bool InstanceMgr::get_next_provider(const std::string& model_revision,
 bool InstanceMgr::get_next_instance_pair(Routing* routing,
                                          xllm::proto::ProviderId provider_id,
                                          const std::string& model_revision) {
-  std::unique_lock<std::shared_mutex> lock(cluster_mutex_);
+  std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
   if (routing == nullptr ||
       provider_id == xllm::proto::PROVIDER_ID_UNSPECIFIED) {
     return false;
@@ -482,6 +511,7 @@ bool InstanceMgr::get_next_instance_pair(Routing* routing,
                        decode_candidates,
                        engine_registry_,
                        now_monotonic_ms);
+  std::lock_guard cursor_lock(route_cursor_mutex_);
   provider::ProviderRouteSelection selection;
   if (!provider::ProviderRouteSelector::select(prefill_candidates,
                                                decode_candidates,
@@ -1512,8 +1542,20 @@ void InstanceMgr::reconcile_instance_states() {
                  << visibility_result.message();
     }
 
-    probe_state_blind_engines(monotonic_time_ms());
     reconcile_provider_links();
+  }
+}
+
+void InstanceMgr::reconcile_direct_engine_evidence() {
+  while (!exited_) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (exited_) {
+      return;
+    }
+    // Registry RPCs can block for their transport timeout during an outage.
+    // Keep direct probes on an independent loop so STATE_BLIND safety does not
+    // inherit that delay after an Engine has self-fenced.
+    probe_state_blind_engines(monotonic_time_ms());
   }
 }
 

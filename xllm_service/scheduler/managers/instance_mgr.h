@@ -165,6 +165,7 @@ class InstanceMgr final {
                          std::shared_ptr<brpc::Channel>* out_channel);
   bool probe_direct_engine_health(const std::string& instance_name) const;
   void probe_state_blind_engines(uint64_t now_monotonic_ms);
+  void reconcile_direct_engine_evidence();
   void reconcile_instance_states();
   void reconcile_provider_links();
   void publish_link_state(const xllm::proto::LinkState& state,
@@ -248,6 +249,10 @@ class InstanceMgr final {
   std::unordered_map<std::string, InstanceMetaInfo> instances_;
   std::vector<std::string> prefill_index_;
   std::vector<std::string> decode_index_;
+  // Routing is a read-only topology operation. Keep the mutable round-robin
+  // cursors behind their own lock so request traffic does not take the
+  // topology writer lock and starve Link/Registry reconciliation.
+  std::mutex route_cursor_mutex_;
   uint64_t next_prefill_index_ = 0;
   uint64_t next_decode_index_ = 0;
   uint64_t next_provider_index_ = 0;
@@ -272,6 +277,7 @@ class InstanceMgr final {
 
   ThreadPool threadpool_;
   std::unique_ptr<std::thread> state_reconcile_thread_;
+  std::unique_ptr<std::thread> direct_probe_thread_;
 };
 
 }  // namespace xllm_service

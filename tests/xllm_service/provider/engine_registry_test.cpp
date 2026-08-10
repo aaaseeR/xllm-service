@@ -342,7 +342,18 @@ TEST(EngineRegistryTest, RequiresCurrentMasterFullBeforeScheduling) {
 
   set_registry_view(&registry, "master-2");
   EXPECT_FALSE(registry.has_current_full_snapshot());
+  EXPECT_EQ(registry.link_count(), 0u);
   EXPECT_TRUE(registry.is_schedulable(make_provider_engine_key(prefill), 101));
+  EXPECT_FALSE(registry.is_link_ready(make_provider_engine_key(prefill),
+                                      make_provider_engine_key(decode),
+                                      101));
+  ASSERT_TRUE(
+      registry.record_link_state(make_link(prefill, decode, 1), 101, &applied)
+          .ok());
+  EXPECT_TRUE(applied);
+  EXPECT_TRUE(registry.is_link_ready(make_provider_engine_key(prefill),
+                                     make_provider_engine_key(decode),
+                                     101));
   EXPECT_EQ(registry.apply_state_batch(full, 101, &applied).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
 
@@ -389,6 +400,38 @@ TEST(EngineRegistryTest, UsesReceiverMonotonicAgeAndNeverRegressesState) {
   EXPECT_EQ(registry.find_state(key)->lifecycle(),
             xllm::proto::ENGINE_LIFECYCLE_DRAINING);
   EXPECT_FALSE(registry.is_schedulable(key, 102));
+}
+
+TEST(EngineRegistryTest, SerializesOutOfOrderConcurrentObservationSamples) {
+  EngineRegistry registry(test_config());
+  ASSERT_TRUE(registry.observation_snapshot(101).has_value());
+
+  const std::optional<ObservationSnapshot> reordered =
+      registry.observation_snapshot(100);
+  ASSERT_TRUE(reordered.has_value());
+  EXPECT_EQ(reordered->mode_entered_monotonic_ms, 101u);
+}
+
+TEST(EngineRegistryTest, DirectSuccessBridgesStateBlindEntryHold) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor descriptor = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderEngineKey key =
+      make_provider_engine_key(descriptor);
+  ASSERT_TRUE(registry.upsert_member(descriptor).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(descriptor, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+
+  ASSERT_TRUE(registry.record_direct_evidence(key, true, 120).ok());
+  EXPECT_TRUE(registry.is_schedulable(key, 121));
+  ASSERT_TRUE(registry.record_direct_evidence(key, false, 122).ok());
+  EXPECT_FALSE(registry.is_schedulable(key, 122));
+  ASSERT_TRUE(registry.record_direct_evidence(key, true, 123).ok());
+  EXPECT_TRUE(registry.is_schedulable(key, 123));
 }
 
 TEST(EngineRegistryTest, StaleStateQualityFailsClosed) {

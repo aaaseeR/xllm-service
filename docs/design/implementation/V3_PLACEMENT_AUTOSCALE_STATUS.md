@@ -19,8 +19,7 @@ limitations under the License.
 
 - Owner：xLLM Service
 - 状态：`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`
-- 范围：V3-P0 至 P5 可移植代码、CPU 单元/loopback 和离线多进程集群验证已完成；
-  P6 真实 NPU/HBM、生产 etcd/部署系统和生产流量验证待执行
+- 范围：V3-P0 至 P5 可移植代码、CPU 单元/loopback 和离线多进程集群验证已完成；P6 真实 NPU/HBM、生产 etcd/部署系统和生产流量验证待执行
 - 关联设计：[V3 Placement 与 Autoscale](../14_XLLM_SERVICE_V3_PLACEMENT_AUTOSCALE_DESIGN.md)
 - 当前能力入口：[V3 当前能力与远端代码索引](../15_XLLM_SERVICE_V3_CURRENT_CAPABILITIES.md)
 - 线上入口：[V3 线上验证手册](./V3_ONLINE_VALIDATION_RUNBOOK.md)
@@ -73,11 +72,11 @@ limitations under the License.
 | Runtime config | `placement_config_test` 8 tests（含文档样例） | PASS |
 | Controller | `placement_controller_test` 5 tests | PASS |
 | Deployment/Provider loopback | `placement_deployment_actuator_test`、`provider_lifecycle_actuator_test` | PASS |
-| 离线多进程集群 | `online_cluster_stress.py --scenario v3 --mode smoke/stress` | PASS；1→3→1、响应丢失、Drain race、Leader SIGKILL、Torch HBM 清零 |
+| 离线多进程集群 | `online_cluster_stress.py --scenario v3 --mode smoke/stress` | PASS；单副本过载与结构化 backpressure、1→3→1、响应丢失、deadline、真实 SSE 断流、Drain race、Agent+Runtime `SIGKILL`/替换、Leader `SIGKILL`、Torch HBM 清零 |
 | V2 HBM/KV 与 flow 回归 | KV Shadow、flow control 既有 CPU suite | PASS |
 | Serving 链接门 | master、RPC、HTTP 三个 serving binary | PASS |
-| 全仓 Service CPU | 沙箱 `xllm-dev service-test ... native Debug` | 512/512 PASS |
-| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | 141/141 PASS |
+| 全仓 Service CPU | 沙箱 `xllm-dev service-test ... native Debug` | 517/517 PASS |
+| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | 当前发现 1069 个 CTest，全量 PASS |
 | xLLM simulated HBM/allocator | `simulated_hbm_test` | 15/15 PASS |
 
 ## 线上前不可误报的边界

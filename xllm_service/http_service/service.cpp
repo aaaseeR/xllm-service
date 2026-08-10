@@ -583,6 +583,7 @@ template <typename T>
 void handle_vllm(std::shared_ptr<T> call_data,
                  Scheduler* scheduler,
                  const std::string& internal_api_token,
+                 int32_t provider_timeout_ms,
                  const std::string& target_name,
                  const std::string& target_incarnation_id,
                  const std::string& path,
@@ -648,9 +649,16 @@ void handle_vllm(std::shared_ptr<T> call_data,
       delete redirect_cntl;
       return;
     }
-    redirect_cntl->set_timeout_ms(static_cast<int>(std::min<uint64_t>(
-        remaining_deadline_ms,
-        static_cast<uint64_t>(std::numeric_limits<int>::max()))));
+    const std::optional<int32_t> attempt_timeout_ms =
+        provider::bounded_vllm_request_timeout_ms(remaining_deadline_ms,
+                                                  provider_timeout_ms);
+    if (!attempt_timeout_ms.has_value()) {
+      call_data->finish_with_error("Provider request timeout is invalid.");
+      scheduler->finish_request(request->correlation.request_uid(), true);
+      delete redirect_cntl;
+      return;
+    }
+    redirect_cntl->set_timeout_ms(*attempt_timeout_ms);
   }
   if (is_post) {
     redirect_cntl->http_request().SetHeader("Content-Type", "application/json");
@@ -955,6 +963,7 @@ void XllmHttpServiceImpl::get_serving_models(
     handle_vllm(call_data,
                 scheduler_,
                 options_.internal_api_token(),
+                options_.vllm_http_timeout_ms(),
                 service_request->routing.prefill_name,
                 service_request->prefill_incarnation_id,
                 "/v1/models",
@@ -1043,6 +1052,7 @@ void XllmHttpServiceImpl::Completions(
         [call_data,
          scheduler = scheduler_,
          internal_api_token = options_.internal_api_token(),
+         provider_timeout_ms = options_.vllm_http_timeout_ms(),
          payload = attachment](const std::shared_ptr<Request>& request) {
           const std::string& provider_payload =
               request->execution_plan.has_value()
@@ -1051,6 +1061,7 @@ void XllmHttpServiceImpl::Completions(
           handle_vllm(call_data,
                       scheduler,
                       internal_api_token,
+                      provider_timeout_ms,
                       request->routing.prefill_name,
                       request->prefill_incarnation_id,
                       "/v1/completions",
@@ -1195,6 +1206,7 @@ void XllmHttpServiceImpl::ChatCompletions(
         [call_data,
          scheduler = scheduler_,
          internal_api_token = options_.internal_api_token(),
+         provider_timeout_ms = options_.vllm_http_timeout_ms(),
          payload = attachment](const std::shared_ptr<Request>& request) {
           const std::string& provider_payload =
               request->execution_plan.has_value()
@@ -1203,6 +1215,7 @@ void XllmHttpServiceImpl::ChatCompletions(
           handle_vllm(call_data,
                       scheduler,
                       internal_api_token,
+                      provider_timeout_ms,
                       request->routing.prefill_name,
                       request->prefill_incarnation_id,
                       "/v1/chat/completions",

@@ -117,21 +117,23 @@ TEST_F(KVStateStreamClientTest, IssuesSubscriberCallsConcurrently) {
   EXPECT_GE(service_.peak_in_flight(), 2);
 }
 
-TEST_F(KVStateStreamClientTest, ReportsTimeoutAndRejectsInvalidWithoutNetwork) {
+TEST_F(KVStateStreamClientTest, ReportsRpcTimeout) {
   service_.set_delay_us(80000);
   const std::vector<KVStateStreamPushResult> timeout =
       push_kv_state_stream_batches({make_push(1, 5)});
   ASSERT_EQ(timeout.size(), 1u);
   EXPECT_FALSE(timeout[0].ok);
   EXPECT_TRUE(timeout[0].timed_out);
+}
 
+TEST_F(KVStateStreamClientTest, RejectsInvalidBatchWithoutNetwork) {
   KVStateStreamPush invalid = make_push(2);
   invalid.batch.clear_master_incarnation();
   const std::vector<KVStateStreamPushResult> rejected =
       push_kv_state_stream_batches({invalid});
   ASSERT_EQ(rejected.size(), 1u);
   EXPECT_FALSE(rejected[0].ok);
-  EXPECT_EQ(service_.push_count(), 1);
+  EXPECT_EQ(service_.push_count(), 0);
 }
 
 }  // namespace

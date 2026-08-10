@@ -71,6 +71,7 @@ soak 和线上阈值校准仍待验证，因此当前状态是
 | 14 | [V3 Placement 与 Autoscale](./14_XLLM_SERVICE_V3_PLACEMENT_AUTOSCALE_DESIGN.md) | V3 慢环、P/D/A 独立扩缩、leader fencing、desired state、生命周期 actuator、CPU 与线上门禁 |
 | 15 | [V3 当前能力与远端代码索引](./15_XLLM_SERVICE_V3_CURRENT_CAPABILITIES.md) | V3-P0 至 P5 已具备能力、远端 `service_dev` 代码/测试位置、运行模式和 P6 边界 |
 | 门禁 | [离线多进程 E2E](../../tests/e2e/README.md) | V2/V3 模拟线上高并发、故障、扩缩容、simulated HBM 和证据验收硬门 |
+| 复核 | [V2/V3 三轮深度审查](./implementation/V2_V3_THREE_ROUND_DEEP_REVIEW_STATUS.md) | 三轮代码/并发/分布式容错审查、发现问题、修复位置、stress 实测数字和 NPU 边界 |
 | 状态 | [V2 功能开发状态](./implementation/README.md) | 每项功能的支持矩阵、需求到测试追踪、CPU/NPU 验证和剩余缺口 |
 | 线上 | [V3 线上验证与反馈手册](./implementation/V3_ONLINE_VALIDATION_RUNBOOK.md) | SHADOW → create-only → 单 pool 缩容 → P/D 阶梯 → 故障 → 24h+ soak 与回滚证据 |
 | 评估 | [外部架构评估](./opus5_xllm_review.md) | 对照业界现状与未来方向；结论需吸收到权威文档后才生效 |

@@ -221,6 +221,14 @@ class RuntimeHandler(BaseHTTPRequestHandler):
             prompt = payload.get("prompt", "")
             delay_ms = self.runtime.delay_ms
             if isinstance(prompt, str) and prompt.startswith(
+                "__xllm_e2e_hold_400ms__"
+            ):
+                delay_ms = 400
+            elif isinstance(prompt, str) and prompt.startswith(
+                "__xllm_e2e_hold_700ms__"
+            ):
+                delay_ms = 700
+            elif isinstance(prompt, str) and prompt.startswith(
                 "__xllm_e2e_hold_3000ms__"
             ):
                 # Keep an actual inference attempt active while the hard-gate

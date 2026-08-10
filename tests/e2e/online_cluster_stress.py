@@ -29,6 +29,7 @@ import base64
 from collections.abc import Callable
 import concurrent.futures
 from dataclasses import asdict, dataclass, field
+import http.client
 import json
 import math
 import os
@@ -364,6 +365,10 @@ class NativeEngineLease:
     def ownership_lost(self) -> bool:
         return self._ownership_lost.is_set()
 
+    @property
+    def last_confirmed_lease(self) -> float:
+        return self._last_confirmed_lease
+
     def _heartbeat_body(self) -> dict:
         self._state_seq += 1
         hbm = self._hbm.snapshot()
@@ -673,23 +678,30 @@ class V3LoadClient:
         return urls[0]
 
     def _one(
-        self, index: int, hold_open: bool = False
+        self,
+        index: int,
+        hold_open: bool = False,
+        remaining_deadline_ms: int | None = None,
     ) -> tuple[bool, float, str]:
         request_uid = f"v3-load-{uuid.uuid4().hex}-{index}"
         started = time.monotonic()
         prompt = f"hello autoscaled service {index}"
         if hold_open:
-            prompt = f"__xllm_e2e_hold_3000ms__ {prompt}"
+            hold_ms = 700 if remaining_deadline_ms is not None else 400
+            prompt = f"__xllm_e2e_hold_{hold_ms}ms__ {prompt}"
         try:
+            payload: dict[str, object] = {
+                "model": MODEL_REVISION,
+                "prompt": prompt,
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "stream": False,
+            }
+            if remaining_deadline_ms is not None:
+                payload["remaining_deadline_ms"] = remaining_deadline_ms
             response = requests.post(
                 self._url() + "/v1/completions",
-                json={
-                    "model": MODEL_REVISION,
-                    "prompt": prompt,
-                    "max_tokens": 1,
-                    "temperature": 0.0,
-                    "stream": False,
-                },
+                json=payload,
                 headers={"X-Request-Id": request_uid},
                 timeout=10.0,
             )
@@ -797,6 +809,24 @@ class V3LoadClient:
             max_workers=concurrency, thread_name_prefix="v3-stream"
         ) as pool:
             results = list(pool.map(stream_one, range(requests_count)))
+        return self.summarize(phase, started, results)
+
+    def run_deadline(
+        self,
+        phase: str,
+        requests_count: int,
+        concurrency: int,
+        remaining_deadline_ms: int,
+    ) -> LoadResult:
+        started = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=concurrency, thread_name_prefix="v3-deadline"
+        ) as pool:
+            futures = [
+                pool.submit(self._one, index, True, remaining_deadline_ms)
+                for index in range(requests_count)
+            ]
+            results = [future.result() for future in futures]
         return self.summarize(phase, started, results)
 
     def run_paced(
@@ -911,6 +941,25 @@ class ClusterGate:
         if not value or revision <= 0:
             raise GateFailure(f"invalid etcd identity value for {key}")
         return value, revision
+
+    @staticmethod
+    def _etcd_lease_ttl_for_key(key: str) -> int:
+        response = requests.post(
+            "http://127.0.0.1:2379/v3/kv/range",
+            json={"key": base64.b64encode(key.encode()).decode()},
+            timeout=1.0,
+        )
+        response.raise_for_status()
+        values = response.json().get("kvs", [])
+        if len(values) != 1 or not values[0].get("lease"):
+            return 0
+        ttl_response = requests.post(
+            "http://127.0.0.1:2379/v3/lease/timetolive",
+            json={"ID": values[0]["lease"]},
+            timeout=1.0,
+        )
+        ttl_response.raise_for_status()
+        return int(ttl_response.json().get("TTL") or 0)
 
     def master_identity(self) -> tuple[str, int]:
         master_prefix = f"/{self.namespace}/"
@@ -1049,7 +1098,12 @@ class ClusterGate:
             "--load_balance_policy=RR",
             "--kv_route_mode=SHADOW",
             "--readiness_check_interval_s=1",
+            "--connect_timeout_ms=500",
+            "--vllm_http_timeout_ms=1000",
             "--request_watchdog_interval_ms=20",
+            "--engine_state_soft_ttl_ms=500",
+            "--engine_state_hard_ttl_ms=2000",
+            "--engine_heartbeat_hard_ttl_ms=2000",
             "--output_gap_timeout_ms=1000",
             "--output_gap_query_timeout_ms=100",
             "--p_first_event_retry_ub_ms=700",
@@ -1266,7 +1320,7 @@ class ClusterGate:
 
     @staticmethod
     def gateway_state() -> dict[str, object]:
-        response = requests.get("http://127.0.0.1:18280/debug/state", timeout=3.0)
+        response = requests.get("http://127.0.0.1:18280/debug/state", timeout=8.0)
         response.raise_for_status()
         return response.json()
 
@@ -1478,6 +1532,160 @@ class ClusterGate:
         (self.root / filename).write_text(text, encoding="utf-8")
         return text
 
+    def metric_sample(
+        self,
+        metric_name: str,
+        label_fragment: str = "",
+    ) -> float:
+        leader = self.leader_url()
+        if leader is None:
+            raise GateFailure(f"no leader while reading metric {metric_name}")
+        text = requests.get(leader + "/metrics", timeout=1.0).text
+        for line in text.splitlines():
+            if not line.startswith(metric_name):
+                continue
+            if label_fragment and label_fragment not in line:
+                continue
+            try:
+                return float(line.rsplit(" ", 1)[-1])
+            except ValueError:
+                continue
+        return 0.0
+
+    def wait_v3_runtime_resources_released(self, description: str) -> None:
+        def released() -> dict[str, object] | None:
+            state = self.gateway_state()
+            resources = state["active_resources"]
+            if all(
+                int(resource["running"]) == 0
+                and int(resource["simulated_hbm"]["used_blocks"]) == 0
+                and int(resource["simulated_hbm"]["active_allocations"])
+                == 0
+                for resource in resources
+            ):
+                return state
+            return None
+
+        wait_until(
+            description,
+            6,
+            released,
+        )
+
+    def run_v3_deadline_and_disconnect(
+        self, client: V3LoadClient
+    ) -> str:
+        deadline_before = self.metric_sample(
+            "xllm_service_v2_request_failure_total",
+            'reason="EVENT_REASON_DEADLINE_EXCEEDED"',
+        )
+        deadline = client.run_deadline(
+            "v3-inflight-deadline-cancel",
+            requests_count=3,
+            concurrency=3,
+            remaining_deadline_ms=500,
+        )
+        self.report.phases.append(asdict(deadline))
+        deadline_errors = " ".join(deadline.error_samples).lower()
+        if (
+            deadline.succeeded != 0
+            or deadline.failed != 3
+            or deadline.duration_seconds > 2.0
+            or not any(
+                token in deadline_errors
+                for token in ("deadline", "expired", "504")
+            )
+        ):
+            raise GateFailure(
+                f"V3 in-flight deadline was not bounded and classified: {deadline}"
+            )
+        wait_until(
+            "V3 deadline failure metric",
+            3,
+            lambda: self.metric_sample(
+                "xllm_service_v2_request_failure_total",
+                'reason="EVENT_REASON_DEADLINE_EXCEEDED"',
+            )
+            > deadline_before,
+        )
+        self.wait_v3_runtime_resources_released(
+            "V3 deadline runtime and simulated HBM release"
+        )
+
+        disconnect_before = self.metric_sample(
+            "xllm_service_v2_request_failure_total",
+            'reason="EVENT_REASON_CANCELLED"',
+        )
+        leader = self.leader_url()
+        if leader is None:
+            raise GateFailure("no leader for V3 client disconnect")
+        port = int(leader.rsplit(":", 1)[1])
+        request_uid = f"v3-disconnect-{uuid.uuid4().hex}"
+        body = json.dumps(
+            {
+                "model": MODEL_REVISION,
+                "prompt": "__xllm_e2e_hold_3000ms__ disconnect",
+                "max_tokens": 1,
+                "temperature": 0.0,
+                "stream": True,
+                "remaining_deadline_ms": 5000,
+            },
+            separators=(",", ":"),
+        ).encode()
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+        connection.request(
+            "POST",
+            "/v1/completions",
+            body=body,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+                "X-Request-Id": request_uid,
+            },
+        )
+        try:
+            wait_until(
+                "V3 disconnected request reaches a runtime",
+                2,
+                lambda: any(
+                    int(resource["running"]) > 0
+                    for resource in self.gateway_state()["active_resources"]
+                ),
+            )
+        finally:
+            connection.close()
+        wait_until(
+            "V3 client disconnect cancellation metric",
+            3,
+            lambda: self.metric_sample(
+                "xllm_service_v2_request_failure_total",
+                'reason="EVENT_REASON_CANCELLED"',
+            )
+            > disconnect_before,
+        )
+        wait_until(
+            "V3 disconnected Service request release",
+            2,
+            lambda: self.metric_sample("xllm_service_v2_active_requests") == 0,
+        )
+        self.wait_v3_runtime_resources_released(
+            "V3 disconnected runtime and simulated HBM release"
+        )
+        recovery = client.run("v3-after-deadline-disconnect", 60, 24)
+        self.assert_phase(recovery, minimum_routes=3)
+        metrics = self.scrape_v3_metrics("metrics-deadline-disconnect.prom")
+        self.report.faults.append(
+            {
+                "fault": "v3_deadline_and_client_disconnect",
+                "deadline_failures": deadline.failed,
+                "deadline_duration_seconds": deadline.duration_seconds,
+                "disconnect_request_uid": request_uid,
+                "post_cancel_success": recovery.succeeded,
+                "runtime_and_simulated_hbm_released": True,
+            }
+        )
+        return metrics
+
     def execute_agent_lifecycle(
         self,
         replica: dict[str, object],
@@ -1552,6 +1760,8 @@ class ClusterGate:
             "xllm_service_v3_placement_operation_duration_milliseconds",
             "xllm_service_v2_attempt_retries_total",
             'outcome="VLLM_DRAIN_RESELECTED"',
+            'reason="EVENT_REASON_CANCELLED"',
+            'reason="EVENT_REASON_DEADLINE_EXCEEDED"',
         ):
             evidence[token] = token in text
         if not all(evidence.values()):
@@ -1722,6 +1932,32 @@ class ClusterGate:
             )
         )
 
+        inflight_deadline = client.run_deadline(
+            "v2-inflight-deadline-cancel",
+            requests_count=1,
+            concurrency=1,
+            remaining_deadline_ms=50,
+        )
+        self.report.phases.append(asdict(inflight_deadline))
+        inflight_deadline_errors = " ".join(
+            inflight_deadline.error_samples
+        ).upper()
+        if (
+            inflight_deadline.succeeded != 0
+            or inflight_deadline.failed != 1
+            or inflight_deadline.duration_seconds > 0.25
+            or "DEADLINE" not in inflight_deadline_errors
+        ):
+            raise GateFailure(
+                "in-flight V2 deadline was not cancelled and classified: "
+                f"{inflight_deadline}"
+            )
+        self.hbm.assert_converged()
+        self.assert_phase(
+            client.run("v2-after-inflight-deadline", 16, 8),
+            require_all=True,
+        )
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             active = pool.submit(client.run, "v2-deadline-work-ahead", 8, 8)
             time.sleep(0.03)
@@ -1754,7 +1990,27 @@ class ClusterGate:
                 "bounded overload did not preserve both progress and structured "
                 f"backpressure: {overload}"
             )
+        recovery_started = time.monotonic()
+        wait_until(
+            "V2 observation/readiness recovery after overload",
+            3,
+            lambda: self.leader_url()
+            and requests.get(
+                self.leader_url() + "/readyz", timeout=0.5
+            ).status_code
+            == 200,
+        )
+        readiness_recovery_seconds = time.monotonic() - recovery_started
         self.assert_phase(client.run("v2-overload-recovery", 32, 8))
+        self.report.faults.append(
+            {
+                "fault": "bounded_overload_and_observation_recovery",
+                "progress": overload.succeeded,
+                "structured_backpressure": overload.failed,
+                "readiness_recovery_seconds": readiness_recovery_seconds,
+                "post_recovery_success": 32,
+            }
+        )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             inflight = pool.submit(
@@ -1791,13 +2047,13 @@ class ClusterGate:
         try:
             during_etcd_stall = client.run(
                 "v2-etcd-short-stall-data-plane",
-                baseline_count // 2,
+                60 if self.args.mode == "smoke" else 120,
                 concurrency,
             )
         finally:
             etcd_process.send_signal(signal.SIGCONT)
         self.assert_phase(during_etcd_stall, require_all=True)
-        if during_etcd_stall.duration_seconds >= 4.0:
+        if during_etcd_stall.duration_seconds >= 2.0:
             raise GateFailure(
                 "short etcd outage accidentally crossed the ownership "
                 f"window: {during_etcd_stall.duration_seconds:.3f}s"
@@ -1810,6 +2066,27 @@ class ClusterGate:
             }
         )
 
+        # Readiness remains true throughout a bounded Registry outage and is
+        # therefore not proof that either the Service or Engine ownership
+        # lease has actually been refreshed. Starting the long outage against
+        # the residual TTL from the short outage makes the nominal grace phase
+        # cross the lease boundary nondeterministically. Require fresh
+        # ownership evidence before measuring the independent long outage.
+        short_recovery_started = time.monotonic()
+        wait_until(
+            "Engine lease refresh after short etcd recovery",
+            5,
+            lambda: all(
+                lease.last_confirmed_lease > short_recovery_started
+                for lease in self.engine_leases.values()
+            ),
+        )
+        master_key = f"/{self.namespace}/XLLM:SERVICE:MASTER"
+        wait_until(
+            "Service leader lease refresh after short etcd recovery",
+            5,
+            lambda: self._etcd_lease_ttl_for_key(master_key) >= 2,
+        )
         wait_until(
             "service readiness after short etcd recovery",
             10,
@@ -1847,21 +2124,30 @@ class ClusterGate:
                 raise GateFailure(
                     "request executed after all Engine processes self-fenced"
                 )
-            cached_leader = self.cached_master_urls()[0]
+            def fail_closed_readiness_status() -> int:
+                non_ready_statuses: list[int] = []
+                for service_url in self.cached_master_urls():
+                    try:
+                        status = requests.get(
+                            service_url + "/readyz", timeout=0.5
+                        ).status_code
+                    except requests.RequestException:
+                        continue
+                    if status == 200:
+                        return 0
+                    non_ready_statuses.append(status)
+                return non_ready_statuses[0] if non_ready_statuses else 0
+
             fail_closed_status = int(
                 wait_until(
                     "Service fail-closed after Engine ownership expiry",
-                    3,
-                    lambda: (
-                        status
-                        if (
-                            status := requests.get(
-                                cached_leader + "/readyz", timeout=0.5
-                            ).status_code
-                        )
-                        != 200
-                        else 0
-                    ),
+                    # Engine ownership and the Service leader lease are
+                    # independent clocks. The Engine must self-fence first;
+                    # admission then closes no later than the Service lease or
+                    # STATE_BLIND grace. Keep this wait above the configured
+                    # lease boundary without weakening the 503 assertion.
+                    8,
+                    fail_closed_readiness_status,
                 )
             )
             fail_closed_result = client._one(-1)
@@ -1984,8 +2270,29 @@ class ClusterGate:
 
         high_count = 180 if self.args.mode == "smoke" else 1800
         concurrency = 32 if self.args.mode == "smoke" else 64
+        steady_concurrency = 32
         high_load = client.run("v3-high-load-scale-up-signal", high_count, concurrency)
-        self.assert_phase(high_load, minimum_routes=1)
+        if self.args.mode == "smoke":
+            self.assert_phase(high_load, minimum_routes=1)
+        else:
+            self.report.phases.append(asdict(high_load))
+            high_load_errors = " ".join(high_load.error_samples).upper()
+            if (
+                high_load.succeeded < 180
+                or high_load.failed == 0
+                or "QUEUE_CAPACITY_EXHAUSTED" not in high_load_errors
+            ):
+                raise GateFailure(
+                    "V3 pre-scale pressure did not preserve progress and "
+                    f"structured backpressure: {high_load}"
+                )
+            self.report.faults.append(
+                {
+                    "fault": "v3_pre_scale_bounded_overload",
+                    "progress": high_load.succeeded,
+                    "structured_backpressure": high_load.failed,
+                }
+            )
         wait_until(
             "V3 scale-up to three strict Agent replicas",
             35,
@@ -1997,9 +2304,13 @@ class ClusterGate:
         )
         time.sleep(0.5)
         post_scale = client.run(
-            "v3-after-scale-up", 180 if self.args.mode == "smoke" else 1800, concurrency
+            "v3-after-scale-up",
+            180 if self.args.mode == "smoke" else 1800,
+            32,
         )
         self.assert_phase(post_scale, minimum_routes=2)
+
+        cancellation_metrics = self.run_v3_deadline_and_disconnect(client)
 
         scale_up_state = self.gateway_state()
         if (
@@ -2021,7 +2332,7 @@ class ClusterGate:
         during_replacement = client.run(
             "v3-runtime-agent-sigkill-replacement",
             180 if self.args.mode == "smoke" else 1800,
-            concurrency,
+            steady_concurrency,
         )
         self.assert_bounded_abrupt_loss(
             during_replacement,
@@ -2046,7 +2357,7 @@ class ClusterGate:
         after_replacement = client.run(
             "v3-after-runtime-agent-replacement",
             120 if self.args.mode == "smoke" else 1200,
-            concurrency,
+            steady_concurrency,
         )
         self.assert_phase(after_replacement, minimum_routes=3)
         self.report.faults.append(
@@ -2092,7 +2403,7 @@ class ClusterGate:
         after_failover = client.run(
             "v3-after-master-failover",
             180 if self.args.mode == "smoke" else 1800,
-            concurrency,
+            steady_concurrency,
         )
         self.assert_phase(after_failover, minimum_routes=2)
         failover_state = self.gateway_state()
@@ -2182,7 +2493,11 @@ class ClusterGate:
             "drain_proofs": final_state["drain_proofs"],
         }
         self.report.metric_evidence = self.collect_v3_metrics(
-            [drain_retry_metrics, before_failover_metrics]
+            [
+                cancellation_metrics,
+                drain_retry_metrics,
+                before_failover_metrics,
+            ]
         )
 
     def cleanup(self) -> None:

@@ -526,6 +526,7 @@ Scheduler::Scheduler(const Options& options)
       options_.request_deadline_capacity() == 0 ||
       options_.request_watchdog_batch_size() == 0 ||
       options_.default_request_deadline_ms() <= 0 ||
+      options_.vllm_http_timeout_ms() <= 0 ||
       options_.request_watchdog_interval_ms() >
           options_.output_gap_timeout_ms()) {
     LOG(FATAL) << "Invalid request watchdog configuration.";
@@ -2929,6 +2930,7 @@ bool Scheduler::retry_first_output_attempt_locked(
   record_kv_route_decision(request);
   request->prefill_stage_finished.store(false, std::memory_order_release);
   request->latest_generate_time = absl::Now();
+  request->latest_generate_monotonic_time = std::chrono::steady_clock::now();
   request->output_event_sequencer.reset();
   reset_d_admission_trace(request);
   if (!install_execution_hold_locked(request)) {
@@ -3009,15 +3011,38 @@ void Scheduler::fail_output_dispatch_locked(
                status_code,
                message = std::move(message)]() mutable {
     if (!request->client_disconnected.load(std::memory_order_acquire) &&
-        !request->call_data->is_disconnected()) {
+        request->call_data != nullptr &&
+        !request->call_data->is_disconnected() && callback != nullptr) {
       llm::RequestOutput error_output;
       error_output.service_request_id = request_uid;
       error_output.status = llm::Status(status_code, std::move(message));
       callback(std::move(error_output));
     }
     finish_request(request_uid, true);
+    // Request lifecycle bookkeeping may retain the Request after its terminal
+    // outcome.  It must not retain the HTTP completion owner: otherwise a
+    // non-stream response waits for unrelated watchdog or affinity work before
+    // brpc can run `done`.
+    request->retry_dispatch_callback = {};
+    request->dispatch_callback = {};
+    request->output_callback = {};
+    request->call_data.reset();
   };
-  if (output_thread_found) {
+  // A hard request boundary must not wait behind unrelated responses already
+  // queued on the shared affinity worker.  The output-dispatch lock closes
+  // this request before the callback runs, so later provider output is
+  // rejected.  Other failures retain affinity ordering for normal output
+  // serialization.
+  const bool hard_terminal = status_code == llm::StatusCode::CANCELLED ||
+                             status_code == llm::StatusCode::DEADLINE_EXCEEDED;
+  if (hard_terminal) {
+    LOG(WARNING) << "Dispatching hard request terminal without affinity "
+                    "queue delay, request_uid="
+                 << request_uid
+                 << ", status_code=" << static_cast<int32_t>(status_code)
+                 << ", affinity_thread_found=" << output_thread_found;
+  }
+  if (output_thread_found && !hard_terminal) {
     output_threadpools_[output_thread_index].schedule(std::move(fail));
   } else {
     fail();
@@ -3194,8 +3219,27 @@ void Scheduler::recover_first_output_events(
     if (!retry_prepared) {
       continue;
     }
-    begin_d_admission(service_request);
-    if (service_request->retry_dispatch_callback(*service_request)) {
+    bool retry_dispatch_started = false;
+    {
+      std::lock_guard<std::mutex> output_guard(
+          service_request->output_dispatch_mutex);
+      {
+        std::lock_guard<std::mutex> request_guard(request_mutex_);
+        const auto iterator = requests_.find(request_uid);
+        if (iterator == requests_.end() ||
+            iterator->second != service_request ||
+            service_request->output_dispatch_closed ||
+            !service_request->correlation.has_attempt_seq() ||
+            service_request->correlation.attempt_seq() != retry_attempt_seq ||
+            service_request->retry_dispatch_callback == nullptr) {
+          continue;
+        }
+      }
+      begin_d_admission(service_request);
+      retry_dispatch_started =
+          service_request->retry_dispatch_callback(*service_request);
+    }
+    if (retry_dispatch_started) {
       MULTI_COUNTER_INC(xllm_service_v2_execution_mode_total,
                         execution_mode_label(service_request->execution_mode));
       xllm::proto::ExecutionHolder holder = execution_holder(*service_request);
@@ -3710,42 +3754,49 @@ void Scheduler::run_request_watchdog() {
     }
     wait_lock.unlock();
 
-    const std::vector<std::shared_ptr<Request>> disconnected_requests =
-        client_disconnect_monitor_->take_disconnected(
-            options_.request_watchdog_batch_size());
-    for (const std::shared_ptr<Request>& request : disconnected_requests) {
-      std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
-      const std::string request_uid = request->correlation.request_uid();
-      {
-        std::lock_guard<std::mutex> request_guard(request_mutex_);
-        const auto it = requests_.find(request_uid);
-        if (it == requests_.end() || it->second != request) {
-          continue;
+    {
+      const std::vector<std::shared_ptr<Request>> disconnected_requests =
+          client_disconnect_monitor_->take_disconnected(
+              options_.request_watchdog_batch_size());
+      for (const std::shared_ptr<Request>& request : disconnected_requests) {
+        std::lock_guard<std::mutex> output_guard(
+            request->output_dispatch_mutex);
+        const std::string request_uid = request->correlation.request_uid();
+        {
+          std::lock_guard<std::mutex> request_guard(request_mutex_);
+          const auto it = requests_.find(request_uid);
+          if (it == requests_.end() || it->second != request) {
+            continue;
+          }
         }
+        fail_output_dispatch_locked(
+            request, llm::StatusCode::CANCELLED, "Client disconnected");
       }
-      fail_output_dispatch_locked(
-          request, llm::StatusCode::CANCELLED, "Client disconnected");
     }
 
     const RequestDeadlineQueue::TimePoint now =
         xllm::RequestDeadline::Clock::now();
-    const std::vector<std::shared_ptr<Request>> deadline_requests =
-        request_deadline_queue_->take_expired(
-            now, options_.request_watchdog_batch_size());
-    for (const std::shared_ptr<Request>& request : deadline_requests) {
-      std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
-      const std::string request_uid = request->correlation.request_uid();
-      {
-        std::lock_guard<std::mutex> request_guard(request_mutex_);
-        const auto it = requests_.find(request_uid);
-        if (it == requests_.end() || it->second != request) {
-          continue;
+    {
+      const std::vector<std::shared_ptr<Request>> deadline_requests =
+          request_deadline_queue_->take_expired(
+              now, options_.request_watchdog_batch_size());
+      for (const std::shared_ptr<Request>& request : deadline_requests) {
+        std::lock_guard<std::mutex> output_guard(
+            request->output_dispatch_mutex);
+        const std::string request_uid = request->correlation.request_uid();
+        {
+          std::lock_guard<std::mutex> request_guard(request_mutex_);
+          const auto it = requests_.find(request_uid);
+          if (it == requests_.end() || it->second != request) {
+            continue;
+          }
         }
+        fail_output_dispatch_locked(
+            request,
+            llm::StatusCode::DEADLINE_EXCEEDED,
+            "Request exceeded the Service monotonic deadline; request_uid=" +
+                request_uid);
       }
-      fail_output_dispatch_locked(
-          request,
-          llm::StatusCode::DEADLINE_EXCEEDED,
-          "Request exceeded the Service monotonic deadline");
     }
     deadline_backlog = request_deadline_queue_->has_expired(now);
 
@@ -3830,6 +3881,10 @@ void Scheduler::run_request_watchdog() {
 
 void Scheduler::arm_client_disconnect_notification(
     const std::shared_ptr<Request>& request) {
+  std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
+  if (request->call_data == nullptr || request->output_dispatch_closed) {
+    return;
+  }
   request->call_data->notify_on_disconnect(
       brpc::NewCallback(&signal_client_disconnect,
                         client_disconnect_monitor_,
@@ -3966,6 +4021,7 @@ bool Scheduler::retry_vllm_drain_rejection(
     }
   }
   request->latest_generate_time = absl::Now();
+  request->latest_generate_monotonic_time = std::chrono::steady_clock::now();
   record_request_event(request,
                        xllm::proto::REQUEST_EVENT_TYPE_ROUTE,
                        xllm::proto::EVENT_RESULT_SUCCEEDED,
@@ -4005,6 +4061,7 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
     }
 
     request->latest_generate_time = absl::Now();
+    request->latest_generate_monotonic_time = std::chrono::steady_clock::now();
     auto tools_for_parse =
         (request->tool_choice == "none" ? std::vector<JsonTool>{}
                                         : request->tools);
@@ -4129,6 +4186,7 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
     }
 
     request->latest_generate_time = absl::Now();
+    request->latest_generate_monotonic_time = std::chrono::steady_clock::now();
     auto tools_for_parse =
         (request->tool_choice == "none" ? std::vector<JsonTool>{}
                                         : request->tools);
@@ -4248,6 +4306,7 @@ bool Scheduler::record_new_request(
     }
 
     request->latest_generate_time = absl::Now();
+    request->latest_generate_monotonic_time = std::chrono::steady_clock::now();
 
     request->call_data = call_data;
     request->output_callback =
@@ -4478,9 +4537,7 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
     const llm::RequestOutput& request_output) {
   const std::string& service_request_id = request_output.service_request_id;
 
-  OutputCallback cb;
   std::shared_ptr<Request> request;
-  bool client_disconnected = false;
   {
     std::lock_guard<std::mutex> guard(request_mutex_);
     auto it = requests_.find(service_request_id);
@@ -4493,20 +4550,28 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
           /*message=*/"Unknown service request");
     }
     request = it->second;
-    cb = request->output_callback;
-
-    // check client connection
-    if (request->client_disconnected.load(std::memory_order_acquire) ||
-        request->call_data->is_disconnected()) {
-      LOG(INFO) << "Client has disconnected and the request will be cancelled, "
-                   "request id: "
-                << service_request_id;
-      client_disconnected = true;
-    }
   }
 
   std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
-  if (client_disconnected) {
+  {
+    std::lock_guard<std::mutex> request_guard(request_mutex_);
+    const auto iterator = requests_.find(service_request_id);
+    if (iterator == requests_.end() || iterator->second != request ||
+        request->output_dispatch_closed) {
+      return GenerationDeliveryResult(
+          /*code=*/proto::GENERATION_DELIVERY_CODE_REQUEST_CLOSED,
+          /*message=*/"Request output stream is closed");
+    }
+  }
+
+  // Check the connection only while holding the same lock that protects
+  // terminal callback release. This prevents a hard deadline from clearing
+  // the completion owner concurrently with a late provider output.
+  if (request->client_disconnected.load(std::memory_order_acquire) ||
+      request->call_data == nullptr || request->call_data->is_disconnected()) {
+    LOG(INFO) << "Client has disconnected and the request will be cancelled, "
+                 "request id: "
+              << service_request_id;
     request->output_dispatch_closed = true;
     if (request->output_event_sequencer != nullptr) {
       request->output_event_sequencer->close();
@@ -4670,12 +4735,27 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
     }
   }
 
+  const std::weak_ptr<Request> weak_request = request;
   output_threadpools_[req_thread_idx].schedule(
       [this,
-       request,
+       weak_request,
        service_request_id,
-       cb,
        ready_outputs = std::move(sequence_result.ready_outputs)]() mutable {
+        const std::shared_ptr<Request> request = weak_request.lock();
+        if (request == nullptr) {
+          return;
+        }
+        std::lock_guard<std::mutex> output_guard(
+            request->output_dispatch_mutex);
+        {
+          std::lock_guard<std::mutex> request_guard(request_mutex_);
+          const auto iterator = requests_.find(service_request_id);
+          if (iterator == requests_.end() || iterator->second != request ||
+              request->output_callback == nullptr) {
+            return;
+          }
+        }
+        const OutputCallback& cb = request->output_callback;
         for (llm::RequestOutput& ready_output : ready_outputs) {
           const bool status_error =
               ready_output.status.has_value() && !ready_output.status->ok();
@@ -4805,9 +4885,12 @@ provider::KVRouteMetricsSnapshot Scheduler::kv_route_metrics_snapshot() const {
 void Scheduler::update_token_latency_metrics(
     std::shared_ptr<Request> request,
     bool finished_on_prefill_instance) {
-  int64_t tbt_milliseconds =
-      absl::ToInt64Milliseconds(absl::Now() - request->latest_generate_time);
-  request->latest_generate_time = absl::Now();
+  const auto now = std::chrono::steady_clock::now();
+  const int64_t tbt_milliseconds =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          now - request->latest_generate_monotonic_time)
+          .count();
+  request->latest_generate_monotonic_time = now;
   if (finished_on_prefill_instance) {
     HISTOGRAM_OBSERVE(time_to_first_token_latency_milliseconds,
                       tbt_milliseconds);

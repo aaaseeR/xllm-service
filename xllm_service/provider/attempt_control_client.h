@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "provider.pb.h"
@@ -50,6 +51,13 @@ bool set_vllm_agent_attempt_headers(brpc::Controller* controller,
                                     uint64_t attempt_seq,
                                     const std::string& incarnation_id,
                                     uint64_t remaining_deadline_ms);
+
+// Bounds one provider HTTP attempt by both the end-to-end request deadline and
+// the independently configured provider hop timeout. Invalid or expired input
+// fails closed instead of restoring bRPC's unlimited timeout semantics.
+std::optional<int32_t> bounded_vllm_request_timeout_ms(
+    uint64_t remaining_deadline_ms,
+    int32_t provider_timeout_ms);
 
 AttemptControlResult call_provider_attempt_control(
     xllm::proto::ProviderId provider_id,

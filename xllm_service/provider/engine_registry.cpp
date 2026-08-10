@@ -216,6 +216,13 @@ ContractResult EngineRegistry::set_state_stream_master(
     master_incarnation_ = std::move(master_incarnation);
     full_snapshot_master_incarnation_.clear();
     last_snapshot_seq_ = 0;
+    // Link state_seq is produced by the Service master (unlike EngineState,
+    // whose sequence belongs to the Engine incarnation). A promoted master
+    // starts its LinkReconciler sequence from one, so retaining the previous
+    // master's larger sequence would reject fresh handshake results until the
+    // new counter caught up. Drop old-epoch proofs and require the new master
+    // to establish its own Link state before reopening strict P/D routing.
+    links_.clear();
   }
   return ContractResult::success();
 }
@@ -758,6 +765,19 @@ std::optional<ObservationSnapshot> EngineRegistry::update_observation_locked(
       &error);
 }
 
+uint64_t EngineRegistry::normalize_observation_time_locked(
+    uint64_t receiver_monotonic_ms) const {
+  // Callers sample the same steady clock before acquiring mutex_. Concurrent
+  // callers can therefore arrive in the opposite order even though neither
+  // clock sample regressed. Advance a registry-local logical clock so that
+  // ObservationController still fails closed for genuine regressions at its
+  // own API boundary without turning normal lock reordering into a readiness
+  // outage here.
+  last_observation_monotonic_ms_ =
+      std::max(last_observation_monotonic_ms_, receiver_monotonic_ms);
+  return last_observation_monotonic_ms_;
+}
+
 bool EngineRegistry::has_unrefuted_cached_state_locked(
     const EngineKey& key,
     const std::string& engine_uid) const {
@@ -842,8 +862,9 @@ bool EngineRegistry::is_schedulable_locked(
       effective_age_ms(engine_state.heartbeat_age_ms_at_publish(),
                        cached_state.received_monotonic_ms,
                        receiver_monotonic_ms);
-  return state_age <= config_.state_hard_ttl_ms &&
-         heartbeat_age <= config_.heartbeat_hard_ttl_ms;
+  return (state_age <= config_.state_hard_ttl_ms &&
+          heartbeat_age <= config_.heartbeat_hard_ttl_ms) ||
+         has_recent_direct_success_locked(key, receiver_monotonic_ms);
 }
 
 bool EngineRegistry::is_schedulable(
@@ -854,6 +875,8 @@ bool EngineRegistry::is_schedulable(
     return false;
   }
   std::unique_lock lock(mutex_);
+  receiver_monotonic_ms =
+      normalize_observation_time_locked(receiver_monotonic_ms);
   const std::optional<ObservationSnapshot> observation =
       update_observation_locked(receiver_monotonic_ms);
   if (!observation.has_value()) {
@@ -873,6 +896,8 @@ bool EngineRegistry::is_link_ready(
     return false;
   }
   std::unique_lock lock(mutex_);
+  receiver_monotonic_ms =
+      normalize_observation_time_locked(receiver_monotonic_ms);
   const std::optional<ObservationSnapshot> observation =
       update_observation_locked(receiver_monotonic_ms);
   if (!observation.has_value() ||
@@ -909,6 +934,8 @@ bool EngineRegistry::is_link_ready(
 std::optional<ObservationSnapshot> EngineRegistry::observation_snapshot(
     uint64_t receiver_monotonic_ms) const {
   std::unique_lock lock(mutex_);
+  receiver_monotonic_ms =
+      normalize_observation_time_locked(receiver_monotonic_ms);
   return update_observation_locked(receiver_monotonic_ms);
 }
 
@@ -976,6 +1003,8 @@ ContractResult EngineRegistry::snapshot_members(
                 "Engine Registry snapshot input is invalid");
   }
   std::unique_lock lock(mutex_);
+  receiver_monotonic_ms =
+      normalize_observation_time_locked(receiver_monotonic_ms);
   if (members_.size() > max_members) {
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
                 "Engine Registry snapshot capacity is exhausted");

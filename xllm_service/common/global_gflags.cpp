@@ -283,6 +283,18 @@ DEFINE_int32(instance_delete_probe_timeout_ms,
              "Timeout in milliseconds for the initial health probe after an "
              "instance lease delete event.");
 
+DEFINE_uint64(engine_state_soft_ttl_ms,
+              3000,
+              "EngineState age that enters degraded observation mode.");
+
+DEFINE_uint64(engine_state_hard_ttl_ms,
+              10000,
+              "EngineState age that makes an Engine unschedulable.");
+
+DEFINE_uint64(engine_heartbeat_hard_ttl_ms,
+              10000,
+              "Heartbeat age that makes an Engine unschedulable.");
+
 DEFINE_int32(instance_delete_probe_attempts,
              2,
              "Deprecated V1 compatibility flag; V2 never probes to override "

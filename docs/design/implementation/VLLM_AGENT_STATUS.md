@@ -18,10 +18,10 @@ limitations under the License.
 ## 基本信息
 
 - Owner：xLLM Service V2
-- 状态：NPU_PENDING（CPU 核心已验证）
+- 状态：`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_PENDING`
 - 关联设计/Requirement ID：G-2、G1-G4/M0、F75、F79、F83、F84、D32、D48
 - 最近验证基线：xllm-service 本状态文档所在提交
-- 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
+- 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-10
 
 ## 支持范围
 
@@ -73,16 +73,15 @@ limitations under the License.
 | Submit exactly-once | 64 路同 key 并发仅一个成功；duplicate/tombstone/capacity | 真实高并发 vLLM | PASS / PENDING |
 | Query/Cancel/fence | lifecycle、Cancel-before-create、独立 fence 容量/TTL/low watermark、false ACK 防御、stale incarnation、旧 incarnation 与复用 key 的 ABA、Cancel 与未知 Submit 竞态 | SIGKILL、lease 分区 | PASS / PENDING |
 | local deadline | fake clock ledger 与延迟 upstream loopback；超时返回 terminal `EXPIRED` | NPU abort 到资源释放时延 | PASS / PENDING |
-| HTTP proxy | Chat/Completion payload/request ID、内部 token、未知推理路径防旁路、请求数/单 body/聚合 body 上限、body timeout、Cancel/deadline 在响应头前 shutdown socket、成功/重复/错误 | 真实 SSE/客户端断流；Anthropic 尚未开放 | PASS / PENDING |
+| HTTP proxy | Chat/Completion payload/request ID、内部 token、未知推理路径防旁路、请求数/单 body/聚合 body 上限、body timeout、Cancel/deadline 在响应头前 shutdown socket；离线多进程真实 SSE、客户端断流、Agent+Runtime `SIGKILL` 和资源收敛 | 真实 NPU SSE/abort；Anthropic 尚未开放 | PASS / PENDING |
 | EngineState | per-DP label、缺 rank `PARTIAL`、ratio 聚合、state sequence/identity、fence pressure 发布 `DRAINING` | 真实 vLLM-Ascend metrics | PASS / PENDING |
-| Service hold | aggregated commit/terminal invariant；Agent 精确身份/accepted terminal parser；Submit header 绑定目标 incarnation 与内部 token；SSE 显式终态门禁；pinned/override 全量均为 304/304、Agent 60/60 | Submit ACK 丢失一万次 | PASS / PENDING |
+| Service hold | aggregated commit/terminal invariant；Agent 精确身份/accepted terminal parser；Submit header 绑定目标 incarnation 与内部 token；SSE 显式终态门禁；V3 stress 覆盖 deadline、断流、Drain、突发丢失、替换和 Leader failover，全仓 Service 517/517 | 真实 NPU Submit ACK/网络组合故障 | PASS / PENDING |
 
 ## 完善情况
 
-- 已完成：B4/B5 的 CPU 可验证核心、生产构建接线、严格/legacy 模式隔离和用户运行文档。
+- 已完成：B4/B5 的 CPU 可验证核心、生产构建接线、严格/legacy 模式隔离、用户运行文档，以及双 Service/etcd/生产 Agent/mock Runtime 的离线线上模拟 smoke/stress。
 - 已知缺口/风险：Python HTTP runtime 不是高性能数据面，目标部署需通过容量压测决定是否
   替换 transport 实现；上游 abort 的真实资源释放、深层健康、同命和网络隔离尚未证明。
 - 回滚与兼容：不提供 `--provider-config` 时继续 contract-v0 legacy sidecar；strict
   Descriptor 与旧 raw 地址不能混用。回滚 strict route 必须先 drain，再撤销注册。
-- 达到 VERIFIED 仍需完成：真实 vLLM-Ascend/NPU conformance、Agent-only SIGKILL、原始
-  端口旁路检查、etcd ownership 分区、SSE/abort/deadline 故障矩阵与容量/性能门禁。
+- 达到 VERIFIED 仍需完成：真实 vLLM-Ascend/NPU conformance、原始端口旁路检查、生产 etcd ownership 分区、真实 NPU SSE/abort/deadline 资源释放、容量/性能门禁与长时 soak。

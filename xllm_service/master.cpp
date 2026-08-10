@@ -366,6 +366,9 @@ int main(int argc, char* argv[]) {
       .service_name(xllm_service::utils::get_local_ip() + ":" +
                     std::to_string(FLAGS_rpc_server_port))
       .instance_delete_probe_timeout_ms(FLAGS_instance_delete_probe_timeout_ms)
+      .engine_state_soft_ttl_ms(FLAGS_engine_state_soft_ttl_ms)
+      .engine_state_hard_ttl_ms(FLAGS_engine_state_hard_ttl_ms)
+      .engine_heartbeat_hard_ttl_ms(FLAGS_engine_heartbeat_hard_ttl_ms)
       .output_reorder_max_events(FLAGS_output_reorder_max_events)
       .output_reorder_max_bytes(FLAGS_output_reorder_max_bytes)
       .request_watchdog_interval_ms(FLAGS_request_watchdog_interval_ms)

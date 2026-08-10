@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -201,6 +202,18 @@ bool set_vllm_agent_attempt_headers(brpc::Controller* controller,
   controller->http_request().SetHeader("X-Remaining-Deadline-Ms",
                                        std::to_string(remaining_deadline_ms));
   return true;
+}
+
+std::optional<int32_t> bounded_vllm_request_timeout_ms(
+    uint64_t remaining_deadline_ms,
+    int32_t provider_timeout_ms) {
+  if (remaining_deadline_ms == 0 || provider_timeout_ms <= 0) {
+    return std::nullopt;
+  }
+  const uint64_t bounded = std::min<uint64_t>(
+      remaining_deadline_ms, static_cast<uint64_t>(provider_timeout_ms));
+  return static_cast<int32_t>(std::min<uint64_t>(
+      bounded, static_cast<uint64_t>(std::numeric_limits<int32_t>::max())));
 }
 
 AttemptControlResult call_provider_attempt_control(

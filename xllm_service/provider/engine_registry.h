@@ -178,6 +178,8 @@ class EngineRegistry final {
       const xllm::proto::LinkState& state) const;
   ObservationInput observation_input_locked(
       uint64_t receiver_monotonic_ms) const;
+  uint64_t normalize_observation_time_locked(
+      uint64_t receiver_monotonic_ms) const;
   std::optional<ObservationSnapshot> update_observation_locked(
       uint64_t receiver_monotonic_ms) const;
   bool has_usable_state_snapshot_locked() const;
@@ -194,6 +196,7 @@ class EngineRegistry final {
   bool config_valid_ = false;
   mutable std::shared_mutex mutex_;
   mutable ObservationController observation_controller_;
+  mutable uint64_t last_observation_monotonic_ms_ = 0;
   std::map<EngineKey, xllm::proto::ProviderDescriptor> members_;
   std::map<std::string, EngineKey> current_by_engine_uid_;
   std::map<EngineKey, CachedEngineState> states_;
