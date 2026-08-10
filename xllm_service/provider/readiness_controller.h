@@ -33,6 +33,7 @@ enum class ReadinessReason : int8_t {
   REGISTRY_BLIND_GRACE_EXPIRED = 6,
   DRAINING = 7,
   RECOVERY_HOLD = 8,
+  NOT_LEADER = 9,
 };
 
 const char* readiness_reason_name(ReadinessReason reason);
@@ -42,6 +43,7 @@ struct ReadinessControllerConfig {
 };
 
 struct ReadinessInput {
+  bool is_leader = false;
   bool has_accepted_full_snapshot = false;
   bool has_compatible_capacity = false;
   bool draining = false;

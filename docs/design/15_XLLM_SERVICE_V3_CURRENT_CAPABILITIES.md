@@ -15,7 +15,7 @@ limitations under the License.
 
 # xLLM Service V3 当前能力与远端代码索引
 
-状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
+状态：`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`
 
 V3 已完成 P0-P5 可移植代码：在 V2 请求快环之外运行 leader-fenced Placement 慢环，按
 `provider × model revision × role × profile` 独立预测、规划、持久化和收敛副本。V2 Router
@@ -36,6 +36,7 @@ V3 已完成 P0-P5 可移植代码：在 V2 请求快环之外运行 leader-fenc
 | 部署系统 create/terminate + Registry 证明 | [deployment actuator](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/placement/placement_deployment_actuator.cpp) | [gateway tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/placement/placement_deployment_actuator_test.cpp) |
 | 请求/Engine/KV 观测转慢环输入 | [observation collector](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/placement/placement_observation_collector.cpp)、[input builder](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/placement/placement_input_builder.cpp) | [observation tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/placement/placement_observation_collector_test.cpp)、[builder tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/placement/placement_input_builder_test.cpp) |
 | Service 慢环、模式热切换、日志与低基数指标 | [Scheduler integration](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/scheduler/scheduler.cpp)、[metrics](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/common/metrics.cpp) | [controller tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/placement/placement_controller_test.cpp) |
+| 离线模拟线上扩缩容硬门 | [cluster E2E](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/online_cluster_stress.py)、[deployment gateway](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/mock_deployment_gateway.py)、[mock runtime](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/mock_vllm_runtime.py) | 真实双 Service/etcd/Agent/Runtime 进程；1→3→1、Drain race、响应丢失 Query、Leader SIGKILL、高并发零失败、每副本 Torch HBM 清零 |
 
 ## 四种运行模式
 
@@ -62,6 +63,8 @@ V3 已完成 P0-P5 可移植代码：在 V2 请求快环之外运行 leader-fenc
 
 ## 剩余 P6
 
-真实 NPU/HBM、模型 load/warmup、设备释放、多 Service/etcd/leader、部署系统、生产阶梯流量、
-故障矩阵、SLO goodput 和 24h+ soak 尚未执行。完成条件和证据模板见
+真实 NPU/HBM、模型 load/warmup、设备释放、生产多 Service/etcd quorum/网络、真实部署系统、
+生产阶梯流量、故障矩阵、SLO goodput 和 24h+ soak 尚未执行。CPU 沙箱中的双 Service、
+真实 etcd、部署网关、严格 Agent/Runtime、多副本扩缩和 Leader 故障已通过 smoke/stress，
+但不替代上述线上证据。完成条件和证据模板见
 [线上验证手册](./implementation/V3_ONLINE_VALIDATION_RUNBOOK.md)。

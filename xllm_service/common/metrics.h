@@ -151,6 +151,9 @@ DECLARE_GAUGE(xllm_service_v3_placement_leader);
 DECLARE_GAUGE(xllm_service_v3_placement_mode);
 DECLARE_GAUGE(xllm_service_v3_placement_pools);
 DECLARE_GAUGE(xllm_service_v3_placement_operations);
+DECLARE_GAUGE(xllm_service_v3_placement_pending_operations);
+DECLARE_GAUGE(xllm_service_v3_placement_timed_out_operations);
+DECLARE_GAUGE(xllm_service_v3_placement_oldest_pending_operation_age_seconds);
 
 DECLARE_MULTI_COUNTER(xllm_service_v2_request_lifecycle_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_request_failure_total);
@@ -158,6 +161,7 @@ DECLARE_MULTI_COUNTER(xllm_service_v2_request_terminal_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_execution_mode_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_observability_events_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_output_sequence_total);
+DECLARE_MULTI_COUNTER(xllm_service_v2_attempt_retries_total);
 DECLARE_MULTI_COUNTER(xllm_service_v3_placement_cycles_total);
 DECLARE_MULTI_COUNTER(xllm_service_v3_placement_observations_total);
 DECLARE_MULTI_COUNTER(xllm_service_v3_placement_recommendations_total);
@@ -170,3 +174,5 @@ DECLARE_MULTI_HISTOGRAM(xllm_service_v2_ttft_milliseconds);
 DECLARE_MULTI_HISTOGRAM(xllm_service_v2_tpot_milliseconds);
 DECLARE_MULTI_HISTOGRAM(xllm_service_v2_e2e_milliseconds);
 DECLARE_HISTOGRAM(xllm_service_v3_placement_cycle_milliseconds);
+DECLARE_MULTI_HISTOGRAM(
+    xllm_service_v3_placement_operation_duration_milliseconds);

@@ -178,7 +178,7 @@ TEST(PlacementInputBuilderTest, MissingStateCountsAsLoading) {
   EXPECT_EQ(inputs[0].replicas[0].stable_since_ms, 3000u);
 }
 
-TEST(PlacementInputBuilderTest, StaleOrUnschedulableReadyFailsClosed) {
+TEST(PlacementInputBuilderTest, StaleReadyRemainsManagedButNotFresh) {
   PlacementObservationCollector observations(observation_config());
   seed(&observations);
   auto stale =
@@ -189,6 +189,22 @@ TEST(PlacementInputBuilderTest, StaleOrUnschedulableReadyFailsClosed) {
   std::vector<PlacementPoolCycleInput> inputs;
   ASSERT_EQ(builder().build({spec()}, {stale}, &observations, 3000, &inputs),
             PlacementInputBuildStatus::OK);
+  EXPECT_EQ(inputs[0].replicas[0].state, PlacementLifecycleState::WARMING);
+  EXPECT_FALSE(inputs[0].replicas[0].fresh);
+}
+
+TEST(PlacementInputBuilderTest, FreshUnschedulableReadyFailsClosed) {
+  PlacementObservationCollector observations(observation_config());
+  seed(&observations);
+  auto unschedulable = member("engine-unschedulable",
+                              "inc-unschedulable",
+                              xllm::proto::ENGINE_LIFECYCLE_READY,
+                              false);
+
+  std::vector<PlacementPoolCycleInput> inputs;
+  ASSERT_EQ(
+      builder().build({spec()}, {unschedulable}, &observations, 3000, &inputs),
+      PlacementInputBuildStatus::OK);
   EXPECT_EQ(inputs[0].replicas[0].state, PlacementLifecycleState::FAILED);
   EXPECT_FALSE(inputs[0].replicas[0].fresh);
 }
@@ -249,6 +265,50 @@ TEST(PlacementInputBuilderTest, ImportsOnlyReadyHbmCacheValue) {
             PlacementInputBuildStatus::OK);
   EXPECT_FALSE(inputs[0].replicas[0].cache_value_known);
   EXPECT_DOUBLE_EQ(inputs[0].replicas[0].cache_value, 0.0);
+}
+
+TEST(PlacementInputBuilderTest,
+     CompleteStoreCoverageMakesAggregatedVllmCacheRecoverable) {
+  PlacementObservationCollector observations(observation_config());
+  seed(&observations);
+  provider::KVShadowIndex index(provider::KVShadowIndexConfig{
+      .max_engine_streams = 8,
+      .max_index_entries = 32,
+      .max_index_bytes = 64 * 1024,
+      .max_recovery_events_per_engine = 8,
+      .max_recovery_bytes_per_engine = 64 * 1024,
+      .max_snapshot_entries_per_engine = 32,
+      .max_snapshot_bytes_per_engine = 64 * 1024,
+      .event_ttl_ms = 30000,
+      .recovery_timeout_ms = 30000,
+  });
+  PlacementPoolRuntimeSpec vllm_spec = spec();
+  vllm_spec.profile.pool.provider_id = xllm::proto::PROVIDER_ID_VLLM_ASCEND;
+  vllm_spec.profile.pool.role = xllm::proto::ENGINE_ROLE_AGGREGATED;
+  vllm_spec.external.confirmed_store_coverage = 1.0;
+  provider::EngineRegistryMemberSnapshot vllm_member =
+      member("vllm-agent", "vllm-inc", xllm::proto::ENGINE_LIFECYCLE_READY);
+  vllm_member.descriptor.mutable_identity()->set_provider_id(
+      xllm::proto::PROVIDER_ID_VLLM_ASCEND);
+  vllm_member.descriptor.mutable_serving()->set_role(
+      xllm::proto::ENGINE_ROLE_AGGREGATED);
+  vllm_member.state->set_provider_id(xllm::proto::PROVIDER_ID_VLLM_ASCEND);
+
+  std::vector<PlacementPoolCycleInput> inputs;
+  ASSERT_EQ(
+      builder(4, 16, &index)
+          .build({vllm_spec}, {vllm_member}, &observations, 3000, &inputs),
+      PlacementInputBuildStatus::OK);
+  ASSERT_EQ(inputs[0].replicas.size(), 1u);
+  EXPECT_TRUE(inputs[0].replicas[0].cache_value_known);
+  EXPECT_DOUBLE_EQ(inputs[0].replicas[0].cache_value, 0.0);
+
+  vllm_spec.external.confirmed_store_coverage = 0.99;
+  ASSERT_EQ(
+      builder(4, 16, &index)
+          .build({vllm_spec}, {vllm_member}, &observations, 3000, &inputs),
+      PlacementInputBuildStatus::OK);
+  EXPECT_FALSE(inputs[0].replicas[0].cache_value_known);
 }
 
 TEST(PlacementInputBuilderTest, IgnoresMembersFromAnotherExactPool) {

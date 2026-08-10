@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
+#include <brpc/builtin/prometheus_metrics_service.h>
 #include <brpc/controller.h>
 #include <brpc/progressive_reader.h>
 #include <glog/logging.h>
@@ -127,9 +128,8 @@ bool schedule_request(Scheduler* scheduler,
   if (!scheduler->accepting_new_requests()) {
     reply_service_not_ready(scheduler, controller);
   } else {
-    controller->SetFailed(
-        "SCHEDULE_REJECTED; request_uid=" +
-        request->correlation.request_uid());
+    controller->SetFailed("SCHEDULE_REJECTED; request_uid=" +
+                          request->correlation.request_uid());
   }
   return false;
 }
@@ -345,6 +345,12 @@ bool dispatch_native_request(std::shared_ptr<T> call_data,
       !request.correlation.has_attempt_seq()) {
     return false;
   }
+  LOG_FIRST_N(INFO, 16) << "native_request_dispatch request_uid="
+                        << request.correlation.request_uid()
+                        << " attempt_seq=" << request.correlation.attempt_seq()
+                        << " prefill_engine_uid="
+                        << request.routing.prefill_name
+                        << " decode_engine_uid=" << request.routing.decode_name;
   const uint64_t remaining_ms = request.request_deadline->remaining_ms();
   if (remaining_ms == 0) {
     return false;
@@ -450,18 +456,52 @@ class CustomProgressiveReader final : public brpc::ProgressiveReader {
 // arrived, attach a progressive reader that relays the SSE body straight to
 // the client. The reader takes ownership of redirect_cntl. `channel` is held
 // only to keep the shared_ptr alive until the asynchronous call completes.
+bool retry_vllm_drain_rejection(brpc::Controller* redirect_cntl,
+                                Scheduler* scheduler,
+                                const std::string& instance_name,
+                                const std::string& incarnation_id,
+                                const std::string& request_uid,
+                                uint64_t attempt_seq,
+                                const std::shared_ptr<Request>& request) {
+  if (request == nullptr ||
+      !provider::is_retryable_vllm_agent_drain_rejection(
+          redirect_cntl->http_response().status_code(),
+          redirect_cntl->response_attachment().to_string(),
+          request_uid,
+          attempt_seq,
+          incarnation_id)) {
+    return false;
+  }
+  return scheduler->retry_vllm_drain_rejection(
+      request, instance_name, incarnation_id);
+}
+
 template <typename T>
 void handle_vllm_stream_done(brpc::Controller* redirect_cntl,
                              std::shared_ptr<T> call_data,
                              Scheduler* scheduler,
                              std::string instance_name,
                              std::string incarnation_id,
+                             std::string request_uid,
+                             uint64_t attempt_seq,
                              std::shared_ptr<Request> request,
                              std::shared_ptr<brpc::Channel> channel) {
   XLLM_SERVICE_UNUSED_PARAMETER(channel);
   const int32_t status_code = redirect_cntl->http_response().status_code();
   const bool success =
       !redirect_cntl->Failed() && status_code >= 200 && status_code < 300;
+  if (!success && retry_vllm_drain_rejection(redirect_cntl,
+                                             scheduler,
+                                             instance_name,
+                                             incarnation_id,
+                                             request_uid,
+                                             attempt_seq,
+                                             request)) {
+    scheduler->record_direct_engine_evidence(
+        instance_name, incarnation_id, false);
+    delete redirect_cntl;
+    return;
+  }
   scheduler->record_direct_engine_evidence(
       instance_name, incarnation_id, success);
   if (redirect_cntl->Failed()) {
@@ -500,12 +540,26 @@ void handle_vllm_non_stream_done(brpc::Controller* redirect_cntl,
                                  Scheduler* scheduler,
                                  std::string instance_name,
                                  std::string incarnation_id,
+                                 std::string request_uid,
+                                 uint64_t attempt_seq,
                                  std::shared_ptr<Request> request,
                                  std::shared_ptr<brpc::Channel> channel) {
   XLLM_SERVICE_UNUSED_PARAMETER(channel);
   const int32_t status_code = redirect_cntl->http_response().status_code();
   bool success =
       !redirect_cntl->Failed() && status_code >= 200 && status_code < 300;
+  if (!success && retry_vllm_drain_rejection(redirect_cntl,
+                                             scheduler,
+                                             instance_name,
+                                             incarnation_id,
+                                             request_uid,
+                                             attempt_seq,
+                                             request)) {
+    scheduler->record_direct_engine_evidence(
+        instance_name, incarnation_id, false);
+    delete redirect_cntl;
+    return;
+  }
   scheduler->record_direct_engine_evidence(
       instance_name, incarnation_id, success);
   if (success && request != nullptr) {
@@ -605,26 +659,30 @@ void handle_vllm(std::shared_ptr<T> call_data,
 
   if (stream) {
     redirect_cntl->response_will_be_read_progressively();
-    google::protobuf::Closure* done =
-        brpc::NewCallback(&handle_vllm_stream_done<T>,
-                          redirect_cntl,
-                          call_data,
-                          scheduler,
-                          target_name,
-                          target_incarnation_id,
-                          request,
-                          channel);
+    google::protobuf::Closure* done = brpc::NewCallback(
+        &handle_vllm_stream_done<T>,
+        redirect_cntl,
+        call_data,
+        scheduler,
+        target_name,
+        target_incarnation_id,
+        correlation.request_uid(),
+        correlation.has_attempt_seq() ? correlation.attempt_seq() : 0,
+        request,
+        channel);
     channel->CallMethod(nullptr, redirect_cntl, nullptr, nullptr, done);
   } else {
-    google::protobuf::Closure* done =
-        brpc::NewCallback(&handle_vllm_non_stream_done<T>,
-                          redirect_cntl,
-                          call_data,
-                          scheduler,
-                          target_name,
-                          target_incarnation_id,
-                          request,
-                          channel);
+    google::protobuf::Closure* done = brpc::NewCallback(
+        &handle_vllm_non_stream_done<T>,
+        redirect_cntl,
+        call_data,
+        scheduler,
+        target_name,
+        target_incarnation_id,
+        correlation.request_uid(),
+        correlation.has_attempt_seq() ? correlation.attempt_seq() : 0,
+        request,
+        channel);
     channel->CallMethod(nullptr, redirect_cntl, nullptr, nullptr, done);
   }
 }
@@ -1305,7 +1363,15 @@ void XllmHttpServiceImpl::Metrics(::google::protobuf::RpcController* controller,
                                   proto::HttpResponse* response,
                                   ::google::protobuf::Closure* done) {
   ClosureGuard done_guard(done);
-  // TODO: implement metrics endpoint
+  brpc::Controller* cntl = reinterpret_cast<brpc::Controller*>(controller);
+  if (cntl == nullptr || request == nullptr || response == nullptr) {
+    return;
+  }
+  cntl->http_response().set_status_code(200);
+  cntl->http_response().set_content_type("text/plain; version=0.0.4");
+  if (brpc::DumpPrometheusMetricsToIOBuf(&cntl->response_attachment()) != 0) {
+    cntl->SetFailed("Failed to dump Prometheus metrics");
+  }
 }
 
 void XllmHttpServiceImpl::Livez(::google::protobuf::RpcController* controller,

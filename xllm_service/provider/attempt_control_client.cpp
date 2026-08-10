@@ -267,4 +267,41 @@ AttemptControlResult parse_vllm_agent_attempt_response(
   return result;
 }
 
+bool is_retryable_vllm_agent_drain_rejection(
+    int32_t http_status_code,
+    const std::string& response_body,
+    const std::string& expected_request_uid,
+    uint64_t expected_attempt_seq,
+    const std::string& expected_incarnation_id) {
+  if (http_status_code != 503) {
+    return false;
+  }
+  const nlohmann::json response =
+      nlohmann::json::parse(response_body, nullptr, /*allow_exceptions=*/false);
+  return !response.is_discarded() && response.is_object() &&
+         response.contains("accepted") &&
+         response.at("accepted").is_boolean() &&
+         !response.at("accepted").get<bool>() &&
+         response.contains("replayed") &&
+         response.at("replayed").is_boolean() &&
+         !response.at("replayed").get<bool>() && response.contains("state") &&
+         response.at("state").is_string() &&
+         response.at("state").get<std::string>() ==
+             "ATTEMPT_LIFECYCLE_STATE_FAILED" &&
+         response.contains("reason") && response.at("reason").is_string() &&
+         response.at("reason").get<std::string>() ==
+             "ADMISSION_REASON_ENGINE_DRAINING" &&
+         response.contains("request_uid") &&
+         response.at("request_uid").is_string() &&
+         response.at("request_uid").get<std::string>() ==
+             expected_request_uid &&
+         response.contains("attempt_seq") &&
+         response.at("attempt_seq").is_number_unsigned() &&
+         response.at("attempt_seq").get<uint64_t>() == expected_attempt_seq &&
+         response.contains("incarnation_id") &&
+         response.at("incarnation_id").is_string() &&
+         response.at("incarnation_id").get<std::string>() ==
+             expected_incarnation_id;
+}
+
 }  // namespace xllm_service::provider

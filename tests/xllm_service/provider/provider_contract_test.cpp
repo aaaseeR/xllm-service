@@ -707,6 +707,52 @@ TEST(ProviderContractTest, RegistryLazilyReusesIdenticalAdapter) {
   EXPECT_EQ(found, first);
 }
 
+TEST(ProviderContractTest, RegistryReusesProfileAcrossEngineReplicas) {
+  ProviderAdapterRegistry registry;
+  ProviderDescriptor first_descriptor = make_descriptor(kOpenModeCases[1]);
+  ProviderDescriptor replica_descriptor = first_descriptor;
+  replica_descriptor.mutable_identity()->set_engine_uid("engine-replica-2");
+  replica_descriptor.mutable_identity()->set_incarnation_id("incarnation-2");
+  replica_descriptor.mutable_endpoint()->set_address("127.0.0.1:19001");
+  const ProviderAdapter* first = nullptr;
+  const ProviderAdapter* replica = nullptr;
+
+  ASSERT_TRUE(registry
+                  .find_or_register_adapter(
+                      std::make_unique<TestAdapter>(first_descriptor), &first)
+                  .ok());
+  ASSERT_TRUE(
+      registry
+          .find_or_register_adapter(
+              std::make_unique<TestAdapter>(replica_descriptor), &replica)
+          .ok());
+  EXPECT_NE(first, nullptr);
+  EXPECT_EQ(replica, first);
+  EXPECT_EQ(registry.size(), 1u);
+
+  const ProviderAdapter* found = nullptr;
+  ASSERT_TRUE(
+      registry.find_compatible_adapter(replica_descriptor, &found).ok());
+  EXPECT_EQ(found, first);
+}
+
+TEST(ProviderContractTest, RegistryStillRejectsProfileRuntimeCollision) {
+  ProviderAdapterRegistry registry;
+  ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[1]);
+  const ProviderAdapter* registered = nullptr;
+  ASSERT_TRUE(registry
+                  .find_or_register_adapter(
+                      std::make_unique<TestAdapter>(descriptor), &registered)
+                  .ok());
+
+  ProviderDescriptor collision = descriptor;
+  collision.mutable_identity()->set_runtime_version("different-runtime");
+  const ProviderAdapter* conflicting = nullptr;
+  EXPECT_EQ(registry.find_compatible_adapter(collision, &conflicting).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH);
+  EXPECT_EQ(conflicting, nullptr);
+}
+
 TEST(ProviderContractTest, RegistryRejectsProfileDigestCollision) {
   ProviderAdapterRegistry registry;
   ProviderDescriptor descriptor = make_descriptor(kOpenModeCases[1]);

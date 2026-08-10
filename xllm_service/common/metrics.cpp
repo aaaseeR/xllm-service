@@ -55,6 +55,12 @@ DEFINE_GAUGE(xllm_service_v3_placement_pools,
              "Configured V3 Placement pool count");
 DEFINE_GAUGE(xllm_service_v3_placement_operations,
              "Current bounded V3 operation ledger records");
+DEFINE_GAUGE(xllm_service_v3_placement_pending_operations,
+             "Current non-terminal V3 Placement operations");
+DEFINE_GAUGE(xllm_service_v3_placement_timed_out_operations,
+             "Current V3 Placement operations past their timeout");
+DEFINE_GAUGE(xllm_service_v3_placement_oldest_pending_operation_age_seconds,
+             "Age in seconds of the oldest pending V3 Placement operation");
 
 DEFINE_MULTI_COUNTER(xllm_service_v2_request_lifecycle_total,
                      "phase",
@@ -74,6 +80,9 @@ DEFINE_MULTI_COUNTER(xllm_service_v2_observability_events_total,
 DEFINE_MULTI_COUNTER(xllm_service_v2_output_sequence_total,
                      "outcome",
                      "Output sequencing outcomes");
+DEFINE_MULTI_COUNTER(xllm_service_v2_attempt_retries_total,
+                     "outcome",
+                     "Bounded first-output retry outcomes");
 DEFINE_MULTI_COUNTER(xllm_service_v3_placement_cycles_total,
                      "outcome",
                      "V3 Placement control cycles by bounded outcome");
@@ -107,3 +116,7 @@ DEFINE_MULTI_HISTOGRAM(xllm_service_v2_e2e_milliseconds,
                        "Server E2E by execution mode");
 DEFINE_HISTOGRAM(xllm_service_v3_placement_cycle_milliseconds,
                  "V3 Placement control-cycle latency in milliseconds");
+DEFINE_MULTI_HISTOGRAM(
+    xllm_service_v3_placement_operation_duration_milliseconds,
+    "action",
+    "V3 Placement terminal operation duration by bounded action");

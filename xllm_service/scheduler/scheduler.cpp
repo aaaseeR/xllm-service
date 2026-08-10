@@ -53,6 +53,7 @@ namespace {
 constexpr int32_t kHeartbeatInterval = 3;  // in seconds
 constexpr int32_t kRegistrationMaxRetries = 5;
 constexpr size_t kMaxObservabilityEventCapacity = 1 << 20;
+constexpr uint64_t kPlacementSnapshotIntervalMs = 5000;
 
 constexpr const char* kEtcdUsernameEnvVar = "ETCD_USERNAME";
 constexpr const char* kEtcdPasswordEnvVar = "ETCD_PASSWORD";
@@ -66,6 +67,28 @@ bool valid_log_token(const std::string& value) {
                   character == '_' || character == '.' || character == ':' ||
                   character == '/' || character == '@' || character == '+';
          });
+}
+
+std::string escape_log_value(const std::string& value) {
+  constexpr char kHex[] = "0123456789ABCDEF";
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const unsigned char character : value) {
+    const bool unreserved = (character >= 'a' && character <= 'z') ||
+                            (character >= 'A' && character <= 'Z') ||
+                            (character >= '0' && character <= '9') ||
+                            character == '-' || character == '_' ||
+                            character == '.' || character == '~' ||
+                            character == ':' || character == '/';
+    if (unreserved) {
+      escaped.push_back(static_cast<char>(character));
+      continue;
+    }
+    escaped.push_back('%');
+    escaped.push_back(kHex[character >> 4]);
+    escaped.push_back(kHex[character & 0x0f]);
+  }
+  return escaped;
 }
 
 uint64_t monotonic_time_ms() {
@@ -1029,6 +1052,16 @@ SaturationState Scheduler::flow_saturation_state() const {
 
 bool Scheduler::admit_flow_control_locked(
     const std::shared_ptr<Request>& request) {
+  if (request != nullptr && request->first_output_retry_budget == nullptr) {
+    request->first_output_retry_budget =
+        std::make_unique<FirstOutputRetryBudget>(FirstOutputRetryBudget::Config{
+            .max_attempt_retries = options_.max_first_output_attempt_retries(),
+            .max_wasted_device_ms =
+                options_.max_nonstream_retry_wasted_device_ms(),
+            .min_remaining_deadline_ms =
+                options_.min_first_output_retry_remaining_ms(),
+        });
+  }
   if (request->dispatch_callback == nullptr ||
       !request->request_deadline.has_value() ||
       !request->canonical_request.has_value() ||
@@ -1066,10 +1099,17 @@ bool Scheduler::admit_flow_control_locked(
       .deadline = request->request_deadline->time_point(),
       .strict = canonical.strict(),
   };
+  const SaturationState saturation = flow_saturation_state();
   const FlowControlAdmission admission = flow_control_queue_->admit(
-      work, FlowControlQueue::Clock::now(), flow_saturation_state());
+      work, FlowControlQueue::Clock::now(), saturation);
   request->admission_status = admission.status;
   if (admission.status != FlowControlStatus::OK) {
+    LOG(WARNING) << "flow_control_admission_rejected request_uid="
+                 << request->correlation.request_uid()
+                 << " status=" << static_cast<int32_t>(admission.status)
+                 << " saturation=" << saturation_state_name(saturation)
+                 << " earliest_dispatch_ms_ub="
+                 << admission.earliest_dispatch_ms_ub;
     if (placement_observation_collector_ != nullptr) {
       const placement::PlacementObservationStatus observation_status =
           placement_observation_collector_->record_admission_reject(
@@ -1252,6 +1292,10 @@ std::shared_ptr<brpc::Channel> Scheduler::get_channel(
 }
 
 void Scheduler::activate_as_master() {
+  // Master address and incarnation are watched independently and their
+  // callbacks may run concurrently. Serialize the transition so two positive
+  // observations cannot both replace a still-joinable heartbeat thread.
+  std::lock_guard<std::mutex> transition_lock(master_transition_mutex_);
   const bool was_master =
       is_master_service_.exchange(true, std::memory_order_acq_rel);
   if (!was_master) {
@@ -1274,11 +1318,13 @@ void Scheduler::activate_as_master() {
   if (!kv_state_replica_->set_master(service_incarnation_id_)) {
     LOG(ERROR) << "Failed to fence KV State on master activation.";
   }
+  refresh_readiness();
   kv_state_cv_.notify_all();
   placement_cv_.notify_all();
 }
 
 void Scheduler::deactivate_as_master() {
+  std::lock_guard<std::mutex> transition_lock(master_transition_mutex_);
   const bool was_master =
       is_master_service_.exchange(false, std::memory_order_acq_rel);
   if (!was_master) {
@@ -1289,6 +1335,7 @@ void Scheduler::deactivate_as_master() {
   if (!kv_state_replica_->set_master("")) {
     LOG(ERROR) << "Failed to fence KV State on master deactivation.";
   }
+  refresh_readiness();
   placement_cv_.notify_all();
 }
 
@@ -1831,6 +1878,7 @@ void Scheduler::initialize_placement() {
 
 void Scheduler::run_placement_controller() {
   std::optional<placement::PlacementLeaderIdentity> active_leader;
+  uint64_t last_snapshot_ms = 0;
   while (!exited_.load(std::memory_order_acquire)) {
     const auto cycle_started = std::chrono::steady_clock::now();
     bool cycle_attempted = false;
@@ -1892,8 +1940,16 @@ void Scheduler::run_placement_controller() {
           if (recover_status != placement::PlacementControllerStatus::OK) {
             active_leader.reset();
             GAUGE_SET(xllm_service_v3_placement_leader, 0);
-            MULTI_COUNTER_INC(xllm_service_v3_placement_cycles_total,
-                              "RECOVERY_ERROR");
+            MULTI_COUNTER_INC(
+                xllm_service_v3_placement_cycles_total,
+                placement::placement_controller_status_name(recover_status));
+            GAUGE_SET(xllm_service_v3_placement_operations,
+                      placement_operation_executor_->size());
+            GAUGE_SET(xllm_service_v3_placement_pending_operations, 0);
+            GAUGE_SET(xllm_service_v3_placement_timed_out_operations, 0);
+            GAUGE_SET(
+                xllm_service_v3_placement_oldest_pending_operation_age_seconds,
+                0);
             LOG_EVERY_N(ERROR, 10)
                 << "Placement recovery failed, status="
                 << placement::placement_controller_status_name(recover_status);
@@ -1956,11 +2012,12 @@ void Scheduler::run_placement_controller() {
             MULTI_COUNTER_INC(
                 xllm_service_v3_placement_recommendations_total,
                 placement_action_name(pool.recommendation.action));
-            VLOG(1) << "placement_pool_cycle provider="
+            VLOG(1) << "xllm_service_v3_placement_pool_cycle provider="
                     << static_cast<int32_t>(pool.pool.provider_id)
-                    << " model=" << pool.pool.model_revision
+                    << " model=" << escape_log_value(pool.pool.model_revision)
                     << " role=" << static_cast<int32_t>(pool.pool.role)
-                    << " profile=" << pool.pool.profile_digest << " action="
+                    << " profile=" << escape_log_value(pool.pool.profile_digest)
+                    << " action="
                     << placement_action_name(pool.recommendation.action)
                     << " reason="
                     << placement::placement_reason_name(
@@ -1973,6 +2030,14 @@ void Scheduler::run_placement_controller() {
           }
           GAUGE_SET(xllm_service_v3_placement_operations,
                     placement_operation_executor_->size());
+          GAUGE_SET(xllm_service_v3_placement_pending_operations,
+                    result.actuator.pending);
+          GAUGE_SET(xllm_service_v3_placement_timed_out_operations,
+                    result.actuator.timed_out);
+          GAUGE_SET(
+              xllm_service_v3_placement_oldest_pending_operation_age_seconds,
+              static_cast<double>(result.actuator.oldest_pending_age_ms) /
+                  1000.0);
           if (result.intents_added > 0) {
             MULTI_COUNTER_ADD(xllm_service_v3_placement_operations_total,
                               "ADDED",
@@ -1988,7 +2053,60 @@ void Scheduler::run_placement_controller() {
                               "COMPACTED",
                               result.actuator.compacted);
           }
-          VLOG(1) << "placement_cycle status="
+          if (result.actuator.timeout_transitions > 0) {
+            MULTI_COUNTER_ADD(xllm_service_v3_placement_operations_total,
+                              "TIMEOUT",
+                              result.actuator.timeout_transitions);
+          }
+          if (result.actuator.unknown > 0) {
+            MULTI_COUNTER_ADD(xllm_service_v3_placement_operations_total,
+                              "UNKNOWN",
+                              result.actuator.unknown);
+          }
+          if (result.actuator.conflict > 0) {
+            MULTI_COUNTER_ADD(xllm_service_v3_placement_operations_total,
+                              "CONFLICT",
+                              result.actuator.conflict);
+          }
+          if (result.actuator.fenced > 0) {
+            MULTI_COUNTER_ADD(xllm_service_v3_placement_operations_total,
+                              "FENCED",
+                              result.actuator.fenced);
+          }
+          for (const placement::PlacementOperationEvent& event :
+               result.actuator.events) {
+            if (placement::placement_operation_terminal(event.status)) {
+              MULTI_HISTOGRAM_OBSERVE(
+                  xllm_service_v3_placement_operation_duration_milliseconds,
+                  placement::placement_operation_action_name(event.action),
+                  static_cast<int64_t>(event.duration_ms));
+            }
+            VLOG(1) << "xllm_service_v3_placement_operation operation_id="
+                    << escape_log_value(event.operation_id) << " action="
+                    << placement::placement_operation_action_name(event.action)
+                    << " engine_uid=" << escape_log_value(event.engine_uid)
+                    << " expected_incarnation="
+                    << escape_log_value(event.expected_incarnation)
+                    << " observed_incarnation="
+                    << escape_log_value(event.engine_incarnation) << " status="
+                    << placement::placement_operation_status_name(event.status)
+                    << " code="
+                    << placement::placement_actuator_code_name(event.code)
+                    << " execute_attempts=" << event.execute_attempts
+                    << " query_attempts=" << event.query_attempts
+                    << " duration_ms=" << event.duration_ms
+                    << " timed_out=" << event.timed_out
+                    << " message=" << escape_log_value(event.message);
+          }
+          if (result.actuator.timed_out > 0) {
+            LOG_EVERY_N(ERROR, 10)
+                << "V3 Placement has timed-out operations, pending="
+                << result.actuator.pending
+                << ", timed_out=" << result.actuator.timed_out
+                << ", oldest_pending_age_ms="
+                << result.actuator.oldest_pending_age_ms;
+          }
+          VLOG(1) << "xllm_service_v3_placement_cycle status="
                   << placement::placement_controller_status_name(result.status)
                   << " mode=" << placement::placement_mode_name(result.mode)
                   << " pools=" << result.pools.size()
@@ -1998,6 +2116,26 @@ void Scheduler::run_placement_controller() {
                   << " actuator_terminal=" << result.actuator.terminal
                   << " actuator_unknown=" << result.actuator.unknown
                   << " actuator_compacted=" << result.actuator.compacted;
+          if (last_snapshot_ms == 0 || now_monotonic_ms - last_snapshot_ms >=
+                                           kPlacementSnapshotIntervalMs) {
+            last_snapshot_ms = now_monotonic_ms;
+            const int64_t snapshot_elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - cycle_started)
+                    .count();
+            LOG(INFO) << "xllm_service_v3_placement_snapshot leader=1 mode="
+                      << placement::placement_mode_name(result.mode)
+                      << " status="
+                      << placement::placement_controller_status_name(
+                             result.status)
+                      << " pools=" << result.pools.size()
+                      << " operations=" << placement_operation_executor_->size()
+                      << " pending_operations=" << result.actuator.pending
+                      << " timed_out_operations=" << result.actuator.timed_out
+                      << " oldest_pending_age_ms="
+                      << result.actuator.oldest_pending_age_ms
+                      << " elapsed_ms=" << snapshot_elapsed_ms;
+          }
         }
       }
     }
@@ -3713,6 +3851,117 @@ void Scheduler::handle_attempt_dispatch_failure(const std::string& request_uid,
   execution_hold_cleanup_cv_.notify_all();
 }
 
+bool Scheduler::retry_vllm_drain_rejection(
+    const std::shared_ptr<Request>& request,
+    const std::string& failed_engine_uid,
+    const std::string& failed_incarnation_id) {
+  const auto rejected = [&](const char* outcome) {
+    MULTI_COUNTER_INC(xllm_service_v2_attempt_retries_total, outcome);
+    LOG(WARNING) << "vLLM drain retry rejected, outcome=" << outcome
+                 << ", request_uid="
+                 << (request == nullptr ? "absent"
+                                        : request->correlation.request_uid())
+                 << ", failed_engine_uid=" << failed_engine_uid
+                 << ", failed_incarnation_id=" << failed_incarnation_id;
+    return false;
+  };
+  if (request == nullptr || failed_engine_uid.empty() ||
+      failed_incarnation_id.empty()) {
+    return rejected("VLLM_DRAIN_INVALID_CONTEXT");
+  }
+
+  std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
+  if (request->output_dispatch_closed ||
+      request->provider_id != xllm::proto::PROVIDER_ID_VLLM_ASCEND ||
+      request->queue_state.load(std::memory_order_acquire) !=
+          RequestQueueState::DISPATCHED ||
+      request->first_token_emitted.load(std::memory_order_acquire) ||
+      !request->correlation.has_attempt_seq() ||
+      !request->request_deadline.has_value() ||
+      request->first_output_retry_budget == nullptr ||
+      request->dispatch_callback == nullptr ||
+      request->routing.prefill_name != failed_engine_uid ||
+      request->prefill_incarnation_id != failed_incarnation_id) {
+    return rejected("VLLM_DRAIN_STALE_CONTEXT");
+  }
+  {
+    std::lock_guard<std::mutex> request_guard(request_mutex_);
+    const auto iterator = requests_.find(request->correlation.request_uid());
+    if (iterator == requests_.end() || iterator->second != request) {
+      return rejected("VLLM_DRAIN_REQUEST_ENDED");
+    }
+  }
+
+  const FirstOutputRetryBudget::TimePoint now =
+      FirstOutputRetryBudget::Clock::now();
+  const FirstOutputRetryDecision decision =
+      request->first_output_retry_budget->evaluate(
+          /*first_output_emitted=*/false,
+          request->request_deadline->remaining_ms(),
+          now);
+  if (decision != FirstOutputRetryDecision::ALLOWED) {
+    return rejected(retry_decision_name(decision));
+  }
+  if (request->correlation.attempt_seq() ==
+      std::numeric_limits<uint64_t>::max()) {
+    return rejected("VLLM_DRAIN_ATTEMPT_SEQUENCE_EXHAUSTED");
+  }
+  // Publish the exact Agent rejection before asking the routing policy for a
+  // replacement. Otherwise a still-READY heartbeat can let round-robin pick
+  // the same admission-closed incarnation again in this retry window.
+  if (!instance_mgr_->record_direct_engine_evidence(
+          failed_engine_uid, failed_incarnation_id, false)) {
+    return rejected("VLLM_DRAIN_EVIDENCE_REJECTED");
+  }
+  if (!resolve_terminal_execution_hold(request)) {
+    return rejected("VLLM_DRAIN_REJECTION_PROOF_MISMATCH");
+  }
+
+  request->correlation.set_attempt_seq(request->correlation.attempt_seq() + 1);
+  if (!select_and_prepare_dispatch(request) ||
+      request->provider_id != xllm::proto::PROVIDER_ID_VLLM_ASCEND ||
+      request->routing.prefill_name.empty() ||
+      request->routing.prefill_name == failed_engine_uid ||
+      !request->routing.decode_name.empty()) {
+    return rejected("VLLM_DRAIN_NO_ALTERNATE_ROUTE");
+  }
+  if (!request->first_output_retry_budget->commit_retry(now)) {
+    return rejected("VLLM_DRAIN_BUDGET_COMMIT_FAILED");
+  }
+
+  {
+    std::lock_guard<std::mutex> cleanup_guard(execution_hold_cleanup_mutex_);
+    std::lock_guard<std::mutex> request_guard(request_mutex_);
+    const auto iterator = requests_.find(request->correlation.request_uid());
+    if (iterator == requests_.end() || iterator->second != request ||
+        !install_execution_hold_locked(request)) {
+      return rejected("VLLM_DRAIN_REPLACEMENT_HOLD_FAILED");
+    }
+  }
+  request->latest_generate_time = absl::Now();
+  record_request_event(request,
+                       xllm::proto::REQUEST_EVENT_TYPE_ROUTE,
+                       xllm::proto::EVENT_RESULT_SUCCEEDED,
+                       xllm::proto::ERROR_STAGE_NONE,
+                       xllm::proto::EVENT_REASON_NONE,
+                       request->routing.prefill_name,
+                       request->prefill_incarnation_id);
+  if (!request->dispatch_callback(request)) {
+    request->execution_hold.abandon_before_dispatch();
+    return rejected("VLLM_DRAIN_REPLACEMENT_DISPATCH_FAILED");
+  }
+
+  MULTI_COUNTER_INC(xllm_service_v2_attempt_retries_total,
+                    "VLLM_DRAIN_RESELECTED");
+  LOG(INFO) << "vLLM drain rejection safely reselected, request_uid="
+            << request->correlation.request_uid()
+            << ", attempt_seq=" << request->correlation.attempt_seq()
+            << ", failed_engine_uid=" << failed_engine_uid
+            << ", replacement_engine_uid=" << request->routing.prefill_name
+            << ", retries=" << request->first_output_retry_budget->retries();
+  return true;
+}
+
 bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
                                    std::shared_ptr<Request> request) {
   {
@@ -4882,6 +5131,7 @@ bool Scheduler::has_available_instances() const {
 void Scheduler::refresh_readiness() {
   const uint64_t now_monotonic_ms = monotonic_time_ms();
   provider::ReadinessInput input;
+  input.is_leader = is_master_service_.load(std::memory_order_acquire);
   input.has_accepted_full_snapshot =
       instance_mgr_->has_accepted_engine_state_full_snapshot();
   input.has_compatible_capacity =

@@ -18,9 +18,9 @@ limitations under the License.
 ## 基本信息
 
 - Owner：xLLM Service
-- 状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
-- 范围：V3-P0 至 P5 可移植代码、CPU/fake/loopback 验证已完成；P6 真实 NPU、HBM、
-  etcd、部署系统和生产流量验证待执行
+- 状态：`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`
+- 范围：V3-P0 至 P5 可移植代码、CPU 单元/loopback 和离线多进程集群验证已完成；
+  P6 真实 NPU/HBM、生产 etcd/部署系统和生产流量验证待执行
 - 关联设计：[V3 Placement 与 Autoscale](../14_XLLM_SERVICE_V3_PLACEMENT_AUTOSCALE_DESIGN.md)
 - 当前能力入口：[V3 当前能力与远端代码索引](../15_XLLM_SERVICE_V3_CURRENT_CAPABILITIES.md)
 - 线上入口：[V3 线上验证手册](./V3_ONLINE_VALIDATION_RUNBOOK.md)
@@ -35,8 +35,8 @@ limitations under the License.
 | V3-P2 | CPU_VERIFIED | desired/command/status codec、快照容量门、master 三元组 fencing、CAS、leader 恢复 |
 | V3-P3 | CPU_VERIFIED | 确定性 reconcile、create/drain/cancel/terminate、unknown-only-query、proof、operation GC |
 | V3-P4 | CPU_VERIFIED | xLLM Native BRPC 与 vLLM-Ascend HTTP lifecycle conformance、loopback 和严格 token |
-| V3-P5 | CPU_VERIFIED | Scheduler 慢环、SHADOW/create-only/ENFORCED、动态回滚、部署 gateway、日志/指标、三 serving binary |
-| V3-P6 | NPU_AND_CLUSTER_PENDING | 真实 load/warmup/HBM/drain/设备释放、etcd/leader/部署故障、阶梯流量和 24h+ soak |
+| V3-P5 | CPU_AND_OFFLINE_CLUSTER_VERIFIED | Scheduler 慢环、SHADOW/create-only/ENFORCED、动态回滚、部署 gateway、日志/指标、三 serving binary；双 Service/etcd/Agent/Runtime 多进程压力与故障门通过 |
+| V3-P6 | NPU_AND_ONLINE_PENDING | 真实 load/warmup/HBM/drain/设备释放、etcd/leader/部署故障、阶梯流量和 24h+ soak |
 
 ## 已验证的关键语义
 
@@ -69,19 +69,21 @@ limitations under the License.
 | Runtime config | `placement_config_test` 8 tests（含文档样例） | PASS |
 | Controller | `placement_controller_test` 5 tests | PASS |
 | Deployment/Provider loopback | `placement_deployment_actuator_test`、`provider_lifecycle_actuator_test` | PASS |
+| 离线多进程集群 | `online_cluster_stress.py --scenario v3 --mode smoke/stress` | PASS；1→3→1、响应丢失、Drain race、Leader SIGKILL、Torch HBM 清零 |
 | V2 HBM/KV 与 flow 回归 | KV Shadow、flow control 既有 CPU suite | PASS |
 | Serving 链接门 | master、RPC、HTTP 三个 serving binary | PASS |
-| 全仓 Service CPU | 沙箱 `ctest --test-dir build/local-arm64-Debug` | 501/501 PASS |
-| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | 122/122 PASS |
+| 全仓 Service CPU | 沙箱 `ctest --test-dir build/local-arm64-Debug-xllm-override` | 511/511 PASS |
+| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | 140/140 PASS |
 | xLLM simulated HBM/allocator | `simulated_hbm_test` | 15/15 PASS |
 
 ## 线上前不可误报的边界
 
 - 未验证真实 NPU 模型加载与 warmup p99、CANN/通信故障、真实 HBM 释放与 cache-loss；
 - 未验证真实 deployment gateway 的 operation 幂等保留、Registry lease 延迟与终止证明；
-- 未验证多 Service leader kill、etcd stall/compact、部署超时和网络分区组合；
+- 已离线验证多 Service leader kill、etcd 短/长 stall、部署响应丢失；尚未验证生产 etcd
+  集群的 compact、仲裁丢失、真实网络分区和部署系统超时组合；
 - 未用生产短/长 prompt、长 output、多模型与 KV pressure 跑阶梯流量和 24h+ soak；
 - 未完成线上 capacity profile、阈值、SLO residual 和低基数 dashboard 校准。
 
 上述 P6 全部通过前，V3 只能标记
-`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`，不能标记生产 `VERIFIED`。
+`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`，不能标记生产 `VERIFIED`。

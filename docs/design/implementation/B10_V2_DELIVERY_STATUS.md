@@ -16,14 +16,15 @@ limitations under the License.
 # V2-B10 首版代码交付状态
 
 更新时间：2026-08-10
-状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
+状态：`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`
 
 ## 结论
 
 首个版本按设计直接交付 V2，没有独立 V1。B0-B10 的仓库内生产代码、公共协议、
 CPU 可达链路、生产 BlockManager 资源适配、simulated HBM、支持矩阵和运维文档已闭环；
-代码可以进入 NPU 与真实集群验证。`CPU_VERIFIED` 只证明控制面、协议、状态机、host
-资源和模拟 HBM 不变量，不证明 CANN、真实 HBM/DMA/Link、设备吞吐或生产 SLO。
+离线双 Service/etcd/2P+2D 多进程 smoke/stress 交付门也已通过，代码可以进入 NPU 与
+真实集群验证。该状态只证明 CPU 控制面、协议、状态机、host 资源、模拟 HBM 和离线
+故障语义，不证明 CANN、真实 HBM/DMA/Link、设备吞吐或生产 SLO。
 
 ## 支持矩阵
 
@@ -83,9 +84,11 @@ event、allocator 或 kernel。生产资源适配器包装实际 BlockManager le
 最终验证命令与精确计数记录在本提交的验证日志和
 [B6-B10 总状态](./B6_B10_STATUS.md)。全量门包括外部 xLLM override、Service pinned
 gitlink、三个生产二进制动态链接、vLLM sidecar pytest、压力重复和 sanitizer 切片。
-当前 pin 为已推送的 xLLM `6c9d661e`。本轮重新验证 xLLM 公共 CPU 门 121/121，包含
-production-adapter/simulated-HBM 15/15；Service pinned 与外部 override 均为 391/391，
-vLLM sidecar 60/60，三个生产 ELF build/link 通过。完整无设备 xLLM 推理 runtime 仍可能
+B10 初始收口 pin 为 xLLM `6c9d661e`；当前跨仓 pin 已推进到带 Native lifecycle 诊断的
+`8db2f1b5`。后续累计门已增长到 Service 511/511、xLLM 140/140，并新增 V2/V3 离线
+多进程 smoke/stress；该段保留的 xLLM 公共 CPU 门 121/121、
+production-adapter/simulated-HBM 15/15 和 vLLM sidecar 60/60 是 B10 收口时证据。三个
+生产 ELF build/link 通过。完整无设备 xLLM 推理 runtime 仍可能
 受第三方 Mooncake Clang 构建边界影响；公共 CPU contract 通过不冒充完整推理 runtime
 或真实 HBM 证明。
 xLLM attempt/simulated-HBM/RequestEvent 三个目标各重复 100 轮；Service 的 recorder、

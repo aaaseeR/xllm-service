@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import threading
 
+from scripts.logger import logger
+
 from .attempts import AttemptLedger, DrainSnapshot
 
 
@@ -349,6 +351,32 @@ class LifecycleController:
             lifecycle = "ENGINE_LIFECYCLE_DRAINING"
         else:
             lifecycle = "ENGINE_LIFECYCLE_READY"
+        log = logger.debug
+        if code in {
+            "PROVIDER_LIFECYCLE_CODE_FENCED",
+            "PROVIDER_LIFECYCLE_CODE_CONFLICT",
+            "PROVIDER_LIFECYCLE_CODE_RETRYABLE_ERROR",
+            "PROVIDER_LIFECYCLE_CODE_TERMINAL_ERROR",
+            "PROVIDER_LIFECYCLE_CODE_INVALID",
+        }:
+            log = logger.warning
+        elif code == "PROVIDER_LIFECYCLE_CODE_SUCCEEDED" and not replayed:
+            log = logger.info
+        log(
+            "xllm_service_v3_agent_lifecycle operation_id=%r action=%s "
+            "engine_uid=%r engine_incarnation=%r code=%s lifecycle=%s "
+            "replayed=%s active_attempts=%d admission_closed=%s message=%r",
+            command.operation_id,
+            command.action,
+            command.engine_uid,
+            command.engine_incarnation,
+            code,
+            lifecycle,
+            replayed,
+            drain.active_attempts,
+            drain.admission_closed,
+            message,
+        )
         return {
             "code": code,
             "operation_id": command.operation_id,

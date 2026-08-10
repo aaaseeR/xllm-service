@@ -1,7 +1,7 @@
 # xLLM Service V2 当前能力与代码索引
 
 更新时间：2026-08-10
-状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
+状态：`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`
 
 ## 1. 一页结论
 
@@ -13,7 +13,9 @@ Agent、attempt/commit/fencing、deadline/cancel、输出定序、KV-aware SHADO
 
 这不是 NPU 生产验收结论。CPU 结果只证明协议、状态机、并发账本、错误和资源不变量；
 simulated HBM 以及包装真实 `BlockManager` free-list 的 CPU 契约测试，不证明 CANN、真实
-HBM/DMA/Link、设备性能、集群容错或生产 SLO。
+HBM/DMA/Link、设备性能或生产 SLO。独立 etcd、双 Service、2P+2D 的离线多进程 E2E 已
+证明进程内实现的租约恢复、self-fencing、Leader 切换和并发链路，但不冒充生产网络、
+部署系统或 NPU 集群结论。
 
 本文所有代码位置均指向远端 `service_dev` 分支：
 [xllm-service](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev) 与
@@ -26,7 +28,7 @@ HBM/DMA/Link、设备性能、集群容错或生产 SLO。
 | API 接入与规范化 | OpenAI Completion/Chat、Anthropic Messages；统一 `CanonicalRequest`、UUIDv7 `request_uid` | [HTTP Service](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/http_service/service.cpp)、[Canonical Builder](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/canonical_request_builder.cpp) | [HTTP/API tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/http_service) | CPU_VERIFIED；真实 Gateway/客户端矩阵待集群验证 |
 | 身份与 KV 隔离 | tenant/flow/priority 只接受可信网关声明；标准 SDK `user` 仅与网关注入的已认证 client-id 派生；否则使用有 TTL、可轮转 HMAC token | [Trust Policy](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/http_service/request_trust_policy.cpp)、[Options/flags](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/common/options.h) | [Trust tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/http_service/request_trust_policy_test.cpp) | 默认 fail-safe；可信 header 开关默认关闭，网关不可旁路 |
 | Provider Contract | 不按产品名猜能力；Descriptor、profile、capability、mode、incarnation 做硬兼容 | [Service Contract](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/provider_contract.cpp)、[统一 proto](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/proto/provider.proto) | [Service contract tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/provider/provider_contract_test.cpp)、[wire tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/tests/proto/provider_protocol_test.cpp) | CPU_VERIFIED；跨 Provider P/D 稳定拒绝 |
-| Registry 与观测状态 | etcd 保存低频身份/lease；高频 EngineState、LinkState、KV events 走独立有界通道；陈旧状态 fail closed | [Engine Registry](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/engine_registry.cpp)、[State Outbox](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/state_stream_outbox.cpp)、[KV State](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/kv_state_outbox.cpp) | [Registry/state tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/provider) | CPU_VERIFIED；真实 etcd/watch/切主故障注入待验证 |
+| Registry 与观测状态 | etcd 保存低频身份/lease；高频 EngineState、LinkState、KV events 走独立有界通道；陈旧状态 fail closed | [Engine Registry](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/engine_registry.cpp)、[State Outbox](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/state_stream_outbox.cpp)、[KV State](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/kv_state_outbox.cpp) | [Registry/state tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/provider)、[offline E2E](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/online_cluster_stress.py) | CPU/OFFLINE_CLUSTER_VERIFIED；生产 etcd 集群和网络分区待线上验证 |
 | 有界流控与公平 | crash/memory/queue/token/tenant/model 多重硬预算；priority band、tenant→flow 两级轮转、FCFS/EDF、starvation bound | [Flow Queue](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/scheduler/flow_control_queue.cpp) | [Flow tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/scheduler/flow_control_queue_test.cpp) | CPU_VERIFIED；含 late-flow 公平与 flow 状态回收回归；生产饱和曲线待测 |
 | P/D 候选与选点 | model/provider/profile/mode/incarnation/link/state 先硬过滤；公平出队后再做 load/KV/SLO 排序和稳定 tie-break | [Route Selector](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/provider_route_selector.cpp)、[Instance Manager](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/scheduler/managers/instance_mgr.cpp)、[KV Planner](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/kv_route_planner.cpp) | [Route/planner tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/provider) | CPU_VERIFIED；ENFORCED 需完整校准参数和灰度 bucket |
 | HBM KV-aware K0–K2 | canonical chained block hash；本地有界 KVIndex；HBM 精确位置与新鲜度；HOST 只作上界；SSD/STORE 在 V2 删除并 reserved | [KV Index](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/kv_shadow_index.cpp)、[KV metrics](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/provider/kv_route_metrics.cpp)、[xLLM hash](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/core/framework/prefix_cache/canonical_block_hash.cpp) | [Service KV tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/provider)、[xLLM hash tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/tests/core/framework/prefix_cache/canonical_block_hash_test.cpp) | CPU_VERIFIED；真实 HBM 命中收益与多卡一致性待 NPU |
@@ -36,6 +38,7 @@ HBM/DMA/Link、设备性能、集群容错或生产 SLO。
 | 输出、deadline 与重试 | 跨 P/D sender sequence、重复/迟到 fencing、有界 gap recovery；客户端断连和 deadline cancel；只在首输出前有限重试 | [Output Sequencer](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/request/output_event_sequencer.cpp)、[Deadline queue](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/request/request_deadline_queue.cpp)、[Retry budget](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/request/first_output_retry_budget.cpp) | [Request tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/request) | CPU_VERIFIED；首输出后绝不自动重试 |
 | vLLM-Ascend Provider | V2 只开放严格 `AGGREGATED`；Agent 是唯一 ingress，带 token 鉴权、attempt/deadline/query/cancel/fencing 与健康门 | [Agent](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/vllm_sidecar/agent.py)、[Attempt ledger](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/vllm_sidecar/attempts.py) | [Agent pytest](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/vllm_sidecar/tests) | CPU_VERIFIED 控制链；真实 Ascend、同命部署和原始端口隔离待验证 |
 | Debug 与性能分析 | 五级关联键、稳定事件族、常开低基数 bvar、`VLOG(1)` 有界逐请求 JSON、周期 cluster snapshot、ring drop 自监控 | [Event Recorder](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/observability/request_event_recorder.cpp)、[Scheduler events/snapshot](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/scheduler/scheduler.cpp)、[共享事件 proto](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/proto/observability.proto) | [Observability tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/xllm_service/observability)、[wire tests](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/tests/proto/request_event_protocol_test.cpp) | CPU_VERIFIED；集群阈值、采样开销和告警需生产校准 |
+| 离线模拟线上硬门 | 生产 Service 二进制 + etcd + 2P/2D + 并发 HTTP；Engine loss、短/长 etcd outage、物理 self-fence、新 incarnation、Leader SIGKILL、Torch HBM 清零 | [E2E harness](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/online_cluster_stress.py)、[Native Engine](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/mock_native_engine.cpp)、[gate README](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/README.md) | smoke/stress JSON report 与独立进程日志 | CPU/OFFLINE_CLUSTER_VERIFIED；smoke 为 CI 硬门、stress 为版本交付硬门 |
 | 仓库门禁 | pin/proto 校验、Service 全量 CTest、三个 serving 二进制、vLLM pytest、xLLM CPU contract | [Coding CI](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/.coding-ci.yml)、[GitHub mirror CI](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/.github/workflows/v2_cpu.yml) | [pin guard](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/scripts/verify_v2_pin.sh) | 仓库定义完成；Coding 首次远端执行和受保护分支 required check 仍需平台确认 |
 
 ## 3. P/D 选择策略：当前真实顺序
@@ -106,7 +109,7 @@ DECODE/RESOURCE_RELEASE/REQUEST_END`。事件 ring 丢失可见但不能反压�
 
 ## 6. 验证证据与未完成项
 
-本次本地 Linux CPU 门为 Service 391/391；三个 ARM64 Debug serving ELF 均完成编译和
+本次本地 Linux CPU 门为 Service 511/511；三个 ARM64 Debug serving ELF 均完成编译和
 动态链接检查。xLLM 公共 contract、attempt、registration、Provider wire、RequestEvent
 和 simulated-HBM 测试继续由独立 CPU 门覆盖。精确命令由仓库
 [Coding CI](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/.coding-ci.yml)
@@ -116,6 +119,7 @@ DECODE/RESOURCE_RELEASE/REQUEST_END`。事件 ring 丢失可见但不能反压�
 
 - NPU/CANN 的三种 Native mode 与 vLLM-Ascend AGGREGATED 实测；
 - 真实 HBM 分配、碎片、D2H/H2D、逐层 Link、DMA 隔离和故障回收；
-- 多 Service、P/D、etcd watch/lease/切主、Agent 同命和端口隔离故障矩阵；
+- 生产多 Service/P/D、etcd quorum/网络分区、Agent 同命和端口隔离故障矩阵；离线
+  多进程、watch/lease、自隔离/重建和切主已通过 hard gate；
 - 固定 profile 的阶梯 QPS、KV/credit 拐点、TTFT/TPOT/goodput、观测开销和长时 soak；
 - Coding 流水线首次远端运行、受保护分支 required check 与告警平台接线。

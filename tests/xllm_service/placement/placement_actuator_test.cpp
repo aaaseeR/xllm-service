@@ -363,12 +363,44 @@ TEST(PlacementOperationExecutorTest, TimeoutStaysQueryableAndClockFailsClosed) {
       PlacementActuatorResponse{.code = PlacementActuatorCode::UNKNOWN});
   ASSERT_EQ(executor.add_intents({create}, 1000).added, 1u);
   executor.drive(1100, 1);
-  EXPECT_EQ(executor.drive(2500, 1).unknown, 1u);
+  const PlacementExecutorResult timed_out = executor.drive(2500, 1);
+  EXPECT_EQ(timed_out.unknown, 1u);
+  EXPECT_EQ(timed_out.timeout_transitions, 1u);
+  EXPECT_EQ(timed_out.pending, 1u);
+  EXPECT_EQ(timed_out.timed_out, 1u);
+  EXPECT_EQ(timed_out.oldest_pending_age_ms, 1500u);
+  ASSERT_EQ(timed_out.events.size(), 1u);
+  EXPECT_EQ(timed_out.events[0].operation_id, create.operation_id);
+  EXPECT_EQ(timed_out.events[0].status, PlacementOperationStatus::UNKNOWN);
+  EXPECT_TRUE(timed_out.events[0].timed_out);
   EXPECT_TRUE(executor.snapshot()[0].timed_out);
   EXPECT_EQ(actuator.execute_calls[create.operation_id], 1u);
   EXPECT_EQ(actuator.query_calls[create.operation_id], 1u);
   EXPECT_EQ(executor.drive(900, 1).status,
             PlacementExecutorStatus::CLOCK_REGRESSION);
+}
+
+TEST(PlacementOperationExecutorTest, TerminalEventCarriesBoundedDiagnosis) {
+  FakePlacementActuator actuator;
+  PlacementOperationExecutor executor(config(), &actuator);
+  const PlacementOperationIntent create = intent();
+  PlacementActuatorResponse response = create_success();
+  response.message = "registry proved ready";
+  actuator.execute_responses[create.operation_id].push_back(response);
+  ASSERT_EQ(executor.add_intents({create}, 1000).added, 1u);
+
+  const PlacementExecutorResult result = executor.drive(1250, 1);
+  ASSERT_EQ(result.events.size(), 1u);
+  const PlacementOperationEvent& event = result.events[0];
+  EXPECT_EQ(event.action, PlacementOperationAction::CREATE);
+  EXPECT_EQ(event.status, PlacementOperationStatus::SUCCEEDED);
+  EXPECT_EQ(event.code, PlacementActuatorCode::SUCCEEDED);
+  EXPECT_EQ(event.engine_uid, "engine-new");
+  EXPECT_EQ(event.engine_incarnation, "inc-new");
+  EXPECT_EQ(event.execute_attempts, 1u);
+  EXPECT_EQ(event.query_attempts, 0u);
+  EXPECT_EQ(event.duration_ms, 250u);
+  EXPECT_EQ(event.message, "registry proved ready");
 }
 
 }  // namespace

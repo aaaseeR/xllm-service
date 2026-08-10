@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -133,6 +134,37 @@ TEST(FlowControlQueueTest, RejectsUnsatisfiableDeadlineFromWorkAhead) {
   EXPECT_EQ(queue.admit(late, now, SaturationState::AVAILABLE).status,
             FlowControlStatus::QUEUE_DEADLINE_UNSATISFIABLE);
   EXPECT_EQ(queue.snapshot().queued_requests, 1);
+}
+
+TEST(FlowControlQueueTest, StrictSaturatedUsesFreshRateAndWaitsForCapacity) {
+  FlowControlQueue queue(config());
+  const auto now = FlowControlQueue::Clock::now();
+  FlowControlWork strict = work("strict-saturated", now);
+  strict.strict = true;
+
+  const FlowControlAdmission admission =
+      queue.admit(strict, now, SaturationState::SATURATED);
+  ASSERT_EQ(admission.status, FlowControlStatus::OK);
+  EXPECT_NE(admission.earliest_dispatch_ms_ub,
+            std::numeric_limits<uint64_t>::max());
+  EXPECT_EQ(queue.take_next(now, SaturationState::SATURATED).status,
+            FlowControlStatus::QUEUE_CAPACITY_EXHAUSTED);
+
+  const FlowControlDispatch dispatch =
+      queue.take_next(now, SaturationState::AVAILABLE);
+  ASSERT_TRUE(dispatch.work.has_value());
+  EXPECT_EQ(dispatch.work->request_uid, "strict-saturated");
+}
+
+TEST(FlowControlQueueTest, StrictUnknownStillFailsClosedWithoutRateProof) {
+  FlowControlQueue queue(config());
+  const auto now = FlowControlQueue::Clock::now();
+  FlowControlWork strict = work("strict-unknown", now);
+  strict.strict = true;
+
+  EXPECT_EQ(queue.admit(strict, now, SaturationState::UNKNOWN).status,
+            FlowControlStatus::QUEUE_DEADLINE_UNSATISFIABLE);
+  EXPECT_EQ(queue.snapshot().queued_requests, 0);
 }
 
 TEST(FlowControlQueueTest, PriorityThenTenantRoundRobinIsDeterministic) {

@@ -328,6 +328,11 @@ TEST(PlacementOperationStoreTest, OrphanStatusAndEpochChangeFailClosed) {
   std::vector<PlacementPersistedOperation> snapshot;
   EXPECT_EQ(store.load_snapshot(8, 65536, &snapshot),
             PlacementStoreStatus::CORRUPT);
+  RecordingActuator actuator;
+  PlacementOperationExecutor executor(
+      executor_config(), &actuator, &store, leader());
+  EXPECT_EQ(executor.recover(100, 65536),
+            PlacementExecutorStatus::CORRUPT_SNAPSHOT);
 
   PlacementLeaderIdentity stale = leader();
   stale.epoch--;

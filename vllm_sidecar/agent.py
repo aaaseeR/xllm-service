@@ -36,6 +36,7 @@ _INFERENCE_PATHS = {
 }
 _READ_ONLY_PATHS = {"/v1/models"}
 _MAX_CONTROL_BODY_BYTES = 64 * 1024
+_INGRESS_LISTEN_BACKLOG = 1024
 _HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -53,6 +54,13 @@ _AGENT_ONLY_HEADERS = {
     "x-remaining-deadline-ms",
     "x-request-uid",
 }
+
+
+class _AgentHttpServer(ThreadingHTTPServer):
+    """Threaded ingress whose socket backlog matches bursty model traffic."""
+
+    daemon_threads = True
+    request_queue_size = _INGRESS_LISTEN_BACKLOG
 
 
 def _positive_finite(value: object) -> bool:
@@ -188,8 +196,7 @@ class AgentRuntime:
         self._lifecycle = LifecycleController(
             self._ledger, max_records=max_lifecycle_records
         )
-        self._server = ThreadingHTTPServer((host, port), self._handler_type())
-        self._server.daemon_threads = True
+        self._server = _AgentHttpServer((host, port), self._handler_type())
         self._thread: threading.Thread | None = None
         self._reaper_stop = threading.Event()
         self._reaper_thread: threading.Thread | None = None

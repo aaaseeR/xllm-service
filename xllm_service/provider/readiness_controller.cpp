@@ -48,6 +48,8 @@ const char* readiness_reason_name(ReadinessReason reason) {
       return "DRAINING";
     case ReadinessReason::RECOVERY_HOLD:
       return "RECOVERY_HOLD";
+    case ReadinessReason::NOT_LEADER:
+      return "NOT_LEADER";
   }
   return "OBSERVATION_UNAVAILABLE";
 }
@@ -107,6 +109,9 @@ std::optional<ReadinessSnapshot> ReadinessController::update(
 
 std::optional<ReadinessReason> ReadinessController::unsafe_reason(
     const ReadinessInput& input) const {
+  if (!input.is_leader) {
+    return ReadinessReason::NOT_LEADER;
+  }
   if (input.draining) {
     return ReadinessReason::DRAINING;
   }

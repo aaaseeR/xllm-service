@@ -205,8 +205,14 @@ TEST(PlacementDesiredStoreTest, CreatesReadsAndRequiresMonotonicGeneration) {
   EXPECT_EQ(snapshot.desired.generation, 1u);
 
   EXPECT_EQ(store.compare_and_set(first, snapshot.mod_revision, leader()),
+            PlacementStoreStatus::OK);
+  PlacementDesiredState conflicting = first;
+  conflicting.desired_replicas = 2;
+  EXPECT_EQ(store.compare_and_set(conflicting, snapshot.mod_revision, leader()),
             PlacementStoreStatus::REVISION_CONFLICT);
   PlacementDesiredState second = desired(2);
+  EXPECT_EQ(store.compare_and_set(second, snapshot.mod_revision, leader()),
+            PlacementStoreStatus::OK);
   EXPECT_EQ(store.compare_and_set(second, snapshot.mod_revision, leader()),
             PlacementStoreStatus::OK);
 }

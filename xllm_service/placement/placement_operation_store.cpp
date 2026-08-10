@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "placement/placement_operation_store.h"
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -26,6 +28,33 @@ namespace {
 
 bool add_overflows(size_t left, size_t right) {
   return left > std::numeric_limits<size_t>::max() - right;
+}
+
+std::string bounded_log_value(const std::string& value) {
+  constexpr size_t kMaxLoggedBytes = 64;
+  constexpr char kHex[] = "0123456789ABCDEF";
+  std::string escaped;
+  escaped.reserve(std::min(value.size(), kMaxLoggedBytes) * 3);
+  const size_t limit = std::min(value.size(), kMaxLoggedBytes);
+  for (size_t index = 0; index < limit; ++index) {
+    const unsigned char character = static_cast<unsigned char>(value[index]);
+    const bool unreserved = (character >= 'a' && character <= 'z') ||
+                            (character >= 'A' && character <= 'Z') ||
+                            (character >= '0' && character <= '9') ||
+                            character == '-' || character == '_' ||
+                            character == '.' || character == ':';
+    if (unreserved) {
+      escaped.push_back(static_cast<char>(character));
+    } else {
+      escaped.push_back('%');
+      escaped.push_back(kHex[character >> 4]);
+      escaped.push_back(kHex[character & 0x0f]);
+    }
+  }
+  if (value.size() > limit) {
+    escaped.append("...");
+  }
+  return escaped;
 }
 
 bool json_uint64(const nlohmann::json& json, const char* key, uint64_t* value) {
@@ -388,6 +417,23 @@ PlacementStoreStatus PlacementOperationStore::load_snapshot(
     previous_id = raw.key_suffix;
   }
   if (!status_by_id.empty()) {
+    constexpr size_t kMaxLoggedOrphans = 4;
+    std::string orphan_ids;
+    size_t logged = 0;
+    for (const auto& [operation_id, raw] : status_by_id) {
+      static_cast<void>(raw);
+      if (logged == kMaxLoggedOrphans) {
+        break;
+      }
+      if (!orphan_ids.empty()) {
+        orphan_ids.push_back(',');
+      }
+      orphan_ids.append(bounded_log_value(operation_id));
+      ++logged;
+    }
+    LOG(ERROR) << "Corrupt V3 Placement snapshot has orphan STATUS records, "
+               << "count=" << status_by_id.size()
+               << ", sampled_operation_ids=" << orphan_ids;
     return PlacementStoreStatus::CORRUPT;
   }
   *snapshot = std::move(parsed);

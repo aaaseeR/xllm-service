@@ -19,6 +19,19 @@ def _agent(*args, **kwargs) -> AgentRuntime:
     return AgentRuntime(*args, **kwargs)
 
 
+def test_agent_ingress_backlog_covers_admitted_concurrency() -> None:
+    agent = _agent(
+        "127.0.0.1:0",
+        "http://127.0.0.1:1",
+        max_inflight_requests=256,
+    )
+    try:
+        assert agent._server.request_queue_size >= 256
+        assert agent._server.daemon_threads
+    finally:
+        agent.stop()
+
+
 class UpstreamHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 

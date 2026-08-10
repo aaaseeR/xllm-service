@@ -144,8 +144,12 @@ uint64_t FlowControlQueue::earliest_dispatch_ms_ub_locked(
   if (immediate) {
     return 0;
   }
+  // SATURATED is a normal, observed capacity state: keep the request at the
+  // Service and use the fresh dispatch-rate lower bound to estimate when it
+  // can be reconsidered.  UNKNOWN is different because the observation
+  // contract no longer provides a trustworthy rate for STRICT work.
   if (config_.dispatch_rate_lb_per_second == 0.0 ||
-      state != SaturationState::AVAILABLE) {
+      state == SaturationState::UNKNOWN) {
     return std::numeric_limits<uint64_t>::max();
   }
 

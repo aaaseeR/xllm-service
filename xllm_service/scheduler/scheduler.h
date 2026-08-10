@@ -139,6 +139,12 @@ class Scheduler final {
                                        uint64_t attempt_seq,
                                        std::string message);
 
+  // Replaces only an exact Agent pre-execution ENGINE_DRAINING rejection.
+  // The caller must validate the signed attempt tuple in the Agent response.
+  bool retry_vllm_drain_rejection(const std::shared_ptr<Request>& request,
+                                  const std::string& failed_engine_uid,
+                                  const std::string& failed_incarnation_id);
+
   // Provider ingress calls these at the mode-specific GenerationCommit and
   // terminal boundaries. They validate the exact attempt/holder installed
   // before dispatch and never infer proof from transport success alone.
@@ -310,6 +316,9 @@ class Scheduler final {
   std::atomic_bool exited_ = false;
 
   std::atomic_bool is_master_service_ = false;
+  // The master address/incarnation watches are independent callbacks. Guard
+  // their shared activation state, especially heartbeat_thread_.
+  std::mutex master_transition_mutex_;
 
   TokenizerArgs tokenizer_args_;
 

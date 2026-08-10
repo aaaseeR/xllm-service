@@ -20,7 +20,8 @@
         apt-get install -y --no-install-recommends \
           autoconf automake bison build-essential ca-certificates ccache \
           clang cmake curl file flex git libasio-dev libcurl4-openssl-dev \
-          libibverbs-dev libmsgpack-cxx-dev libnuma-dev libssl-dev libtool \
+          etcd-client etcd-server libibverbs-dev libmsgpack-cxx-dev \
+          libnuma-dev libssl-dev libtool \
           libunwind-dev liburing-dev libxxhash-dev libzstd-dev nasm \
           ninja-build patch patchelf pkg-config python3-dev python3-venv \
           rsync unzip zip zlib1g-dev
@@ -32,6 +33,12 @@
         .ci/venv/bin/python -m pip install pytest requests
         .ci/venv/bin/python -m pip install \
           --index-url https://download.pytorch.org/whl/cpu torch==2.10.0
+
+    - name: Verify changed C++ format
+      script: |
+        git diff-tree --no-commit-id --name-only -r -z HEAD -- \
+          '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' | \
+          xargs -0 --no-run-if-empty clang-format --dry-run --Werror
 
     - name: Verify and prepare pinned dependencies
       script: |
@@ -65,8 +72,15 @@
         ctest --test-dir build/v2-cpu-service \
           --output-on-failure --no-tests=error
         cmake --build build/v2-cpu-service --target \
-          xllm_master_serving xllm_http_serving xllm_rpc_serving
+          xllm_master_serving xllm_http_serving xllm_rpc_serving \
+          xllm_service_mock_native_engine
         .ci/venv/bin/python -m pytest vllm_sidecar/tests -q
+
+    - name: V2 and V3 offline cluster E2E hard gate
+      script: |
+        export PATH="$PWD/.ci/venv/bin:$PATH"
+        .ci/venv/bin/python tests/e2e/online_cluster_stress.py \
+          --scenario all --mode smoke --build-dir build/v2-cpu-service
 
     - name: Build and test pinned xLLM CPU contracts
       script: |
@@ -89,12 +103,15 @@
         cmake --build build/v2-cpu-xllm --target \
           xllm_proto partial_json_parser_test anthropic_protocol_test \
           anthropic_stream_utils_test attempt_lifecycle_table_test \
-          simulated_hbm_test registration_lifecycle_test \
+          simulated_hbm_test native_lifecycle_controller_test \
+          native_provider_contract_test registration_lifecycle_test \
           provider_protocol_test request_event_protocol_test
         build/v2-cpu-xllm/tests/api_service/anthropic_protocol_test
         build/v2-cpu-xllm/tests/api_service/anthropic_stream_utils_test
         build/v2-cpu-xllm/tests/core/distributed_runtime/attempt_lifecycle_table_test
         build/v2-cpu-xllm/tests/core/framework/kv_cache/simulated_hbm_test
+        build/v2-cpu-xllm/tests/core/runtime/native_lifecycle_controller_test
+        build/v2-cpu-xllm/tests/core/runtime/native_provider_contract_test
         build/v2-cpu-xllm/tests/core/runtime/registration_lifecycle_test
         build/v2-cpu-xllm/tests/function_call/partial_json_parser/partial_json_parser_test
         build/v2-cpu-xllm/tests/proto/provider_protocol_test

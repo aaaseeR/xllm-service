@@ -50,11 +50,32 @@ ContractResult validate_adapter(const ProviderAdapter* adapter) {
   return ContractResult::success();
 }
 
+bool same_adapter_contract(const xllm::proto::ProviderDescriptor& left,
+                           const xllm::proto::ProviderDescriptor& right) {
+  // An Adapter is cached at provider-profile scope and is deliberately not
+  // bound to an Engine incarnation.  Engine UID, incarnation and dial address
+  // differ between replicas of the same immutable profile; every other field
+  // remains part of the collision check.  Keeping transport/runtime/model/KV/
+  // scheduler/capabilities in the comparison preserves fail-closed behavior
+  // if a producer incorrectly reuses a profile digest.
+  xllm::proto::ProviderDescriptor left_contract = left;
+  xllm::proto::ProviderDescriptor right_contract = right;
+  left_contract.mutable_identity()->clear_engine_uid();
+  left_contract.mutable_identity()->clear_incarnation_id();
+  left_contract.mutable_endpoint()->clear_address();
+  right_contract.mutable_identity()->clear_engine_uid();
+  right_contract.mutable_identity()->clear_incarnation_id();
+  right_contract.mutable_endpoint()->clear_address();
+  return google::protobuf::util::MessageDifferencer::Equivalent(left_contract,
+                                                                right_contract);
+}
+
 bool same_adapter_contract(const ProviderAdapter& left,
                            const ProviderAdapter& right) {
-  return left.dispatch_kind() == right.dispatch_kind() &&
-         google::protobuf::util::MessageDifferencer::Equivalent(
-             left.describe(), right.describe());
+  if (left.dispatch_kind() != right.dispatch_kind()) {
+    return false;
+  }
+  return same_adapter_contract(left.describe(), right.describe());
 }
 
 }  // namespace
@@ -140,8 +161,7 @@ ContractResult ProviderAdapterRegistry::find_compatible_adapter(
   if (existing == adapters_.end()) {
     return ContractResult::success();
   }
-  if (!google::protobuf::util::MessageDifferencer::Equivalent(
-          existing->second->describe(), descriptor)) {
+  if (!same_adapter_contract(existing->second->describe(), descriptor)) {
     return ContractResult::failure(
         xllm::proto::PROVIDER_CONTRACT_ERROR_DESCRIPTOR_MISMATCH,
         "Provider Adapter key collides with a different Descriptor");

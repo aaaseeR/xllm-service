@@ -43,6 +43,7 @@ enum class PlacementControllerStatus : int8_t {
   PERSISTENCE_ERROR = 4,
   CAPACITY_EXCEEDED = 5,
   BUDGET_ERROR = 6,
+  CORRUPT_SNAPSHOT = 7,
 };
 
 struct PlacementControllerConfig {

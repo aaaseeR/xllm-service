@@ -58,6 +58,28 @@ bool managed_replica(PlacementLifecycleState state) {
          state == PlacementLifecycleState::READY;
 }
 
+bool occupies_device(PlacementLifecycleState state) {
+  // Admission and serving state are not allocation state. DRAINING,
+  // UNLOADING, and FAILED replicas continue to consume their devices until
+  // the deployment system proves termination and Registry reports ABSENT.
+  return state != PlacementLifecycleState::ABSENT;
+}
+
+bool add_occupied_devices(uint64_t replicas,
+                          uint64_t devices_per_replica,
+                          uint64_t* occupied_devices) {
+  if (occupied_devices == nullptr || devices_per_replica == 0 ||
+      replicas > std::numeric_limits<uint64_t>::max() / devices_per_replica) {
+    return false;
+  }
+  const uint64_t devices = replicas * devices_per_replica;
+  if (*occupied_devices > std::numeric_limits<uint64_t>::max() - devices) {
+    return false;
+  }
+  *occupied_devices += devices;
+  return true;
+}
+
 void update_actual_state(const PlacementPoolCycleInput& input,
                          const std::vector<PlacementOperationView>& operations,
                          PlacementPoolState* state) {
@@ -116,6 +138,8 @@ PlacementControllerStatus controller_status(PlacementExecutorStatus status) {
       return PlacementControllerStatus::INVALID_INPUT;
     case PlacementExecutorStatus::PERSISTENCE_ERROR:
       return PlacementControllerStatus::PERSISTENCE_ERROR;
+    case PlacementExecutorStatus::CORRUPT_SNAPSHOT:
+      return PlacementControllerStatus::CORRUPT_SNAPSHOT;
   }
   return PlacementControllerStatus::INVALID_INPUT;
 }
@@ -144,6 +168,9 @@ PlacementControllerStatus PlacementController::recover(
       config_.max_pools, config_.max_desired_snapshot_bytes, &desired);
   if (desired_status == PlacementStoreStatus::CAPACITY_EXCEEDED) {
     return PlacementControllerStatus::CAPACITY_EXCEEDED;
+  }
+  if (desired_status == PlacementStoreStatus::CORRUPT) {
+    return PlacementControllerStatus::CORRUPT_SNAPSHOT;
   }
   if (desired_status != PlacementStoreStatus::OK) {
     return PlacementControllerStatus::PERSISTENCE_ERROR;
@@ -202,6 +229,7 @@ PlacementControllerResult PlacementController::run_cycle(
   std::vector<PlacementBudgetCandidate> candidates;
   candidates.reserve(inputs.size());
   output.pools.reserve(inputs.size());
+  uint64_t occupied_devices = 0;
   for (const PlacementPoolCycleInput& input : inputs) {
     const std::string key = pool_key(input.profile.pool);
     if (!valid_placement_capacity_profile(input.profile) ||
@@ -209,6 +237,32 @@ PlacementControllerResult PlacementController::run_cycle(
         !std::isfinite(input.slo_risk_score) || input.slo_risk_score < 0.0 ||
         !valid_placement_identity(input.config_digest) ||
         !input_keys.insert(key).second) {
+      output.status = PlacementControllerStatus::INVALID_INPUT;
+      return output;
+    }
+    std::set<std::pair<std::string, std::string>> observed_identities;
+    uint64_t occupied_replicas = 0;
+    for (const PlacementReplicaFact& replica : input.replicas) {
+      observed_identities.emplace(replica.engine_uid,
+                                  replica.engine_incarnation);
+      occupied_replicas += occupies_device(replica.state) ? 1 : 0;
+    }
+    for (const PlacementOperationView& operation : operation_views) {
+      if (!placement_pool_keys_equal(operation.pool, input.profile.pool) ||
+          operation.action != PlacementOperationAction::CREATE ||
+          placement_operation_terminal(operation.status)) {
+        continue;
+      }
+      const bool observed =
+          !operation.engine_uid.empty() &&
+          observed_identities.find(
+              {operation.engine_uid, operation.engine_incarnation}) !=
+              observed_identities.end();
+      occupied_replicas += observed ? 0 : 1;
+    }
+    if (!add_occupied_devices(occupied_replicas,
+                              input.profile.devices_per_replica,
+                              &occupied_devices)) {
       output.status = PlacementControllerStatus::INVALID_INPUT;
       return output;
     }
@@ -322,6 +376,24 @@ PlacementControllerResult PlacementController::run_cycle(
       report.reconcile.intents.resize(remaining_new_operations);
       output.status = PlacementControllerStatus::HOLD;
     }
+    std::vector<PlacementOperationIntent> capacity_allowed;
+    capacity_allowed.reserve(report.reconcile.intents.size());
+    for (PlacementOperationIntent& intent : report.reconcile.intents) {
+      if (intent.action == PlacementOperationAction::CREATE &&
+          (occupied_devices >= config_.max_devices ||
+           input.profile.devices_per_replica >
+               config_.max_devices - occupied_devices)) {
+        if (output.status == PlacementControllerStatus::OK) {
+          output.status = PlacementControllerStatus::HOLD;
+        }
+        continue;
+      }
+      if (intent.action == PlacementOperationAction::CREATE) {
+        occupied_devices += input.profile.devices_per_replica;
+      }
+      capacity_allowed.emplace_back(std::move(intent));
+    }
+    report.reconcile.intents = std::move(capacity_allowed);
     if (report.reconcile.intents.empty()) {
       continue;
     }
@@ -483,6 +555,8 @@ const char* placement_controller_status_name(PlacementControllerStatus status) {
       return "CAPACITY_EXCEEDED";
     case PlacementControllerStatus::BUDGET_ERROR:
       return "BUDGET_ERROR";
+    case PlacementControllerStatus::CORRUPT_SNAPSHOT:
+      return "CORRUPT_SNAPSHOT";
   }
   return "UNKNOWN";
 }

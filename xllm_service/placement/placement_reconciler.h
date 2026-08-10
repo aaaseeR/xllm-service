@@ -99,6 +99,7 @@ struct PlacementOperationView {
   uint64_t leader_epoch = 0;
   uint64_t desired_generation = 0;
   uint64_t updated_at_ms = 0;
+  bool visibility_grace_eligible = true;
 };
 
 struct PlacementOperationIntent {
@@ -143,6 +144,8 @@ std::string make_placement_operation_id(const PlacementLeaderIdentity& leader,
 bool placement_operation_terminal(PlacementOperationStatus status);
 
 const char* placement_operation_action_name(PlacementOperationAction action);
+
+const char* placement_operation_status_name(PlacementOperationStatus status);
 
 const char* placement_reconcile_reason_name(PlacementReconcileReason reason);
 

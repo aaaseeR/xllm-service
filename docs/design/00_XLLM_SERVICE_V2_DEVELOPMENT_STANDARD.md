@@ -180,14 +180,32 @@ KV cache/HBM 模拟测试还必须覆盖：
 6. 涉及 KV cache 时的 simulated HBM 容量/内容/所有权测试；
 7. 故障注入、资源泄漏和确定性回归测试。
 
+单元、组件和 loopback 测试不能替代模拟线上端到端压测。V2/V3 的每次交付还必须在
+CPU 沙箱启动真实 `xllm-service` 二进制、独立 etcd、Engine/Agent/Runtime/部署网关进程
+和并发 HTTP 客户端，覆盖实际网络、watch/lease、Leader 选举、扩缩容及进程故障。
+该门禁固定分两档：
+
+- `smoke`：进入持续集成，每次合入必须通过；
+- `stress`：版本交付、重要状态机/并发/容错变更以及上线前必须通过。
+
+硬门必须至少验证：安全负载零请求失败；多条物理路由实际承载流量；瞬时饱和有界排队
+而非误拒绝；Engine/Agent 进程丢失；Leader `SIGKILL`；etcd 短暂失联的 grace 内连续服务；
+超过 ownership deadline 后旧进程物理 self-fence、结构化 fail-closed 和新 incarnation
+恢复；V3 的 1→N→1 扩缩、Drain 与在飞请求竞态、执行成功但响应丢失后的 Query 收敛；
+Torch CPU simulated HBM 的容量、高水位、内容清零和最终零泄漏；以及低基数指标、日志、
+etcd durable state 和 JSON report 证据。测试不得通过降低并发、放宽失败数、客户端无界重试
+或把应失败关闭的长期故障算作成功来“稳定”。
+
 合入前必须满足：
 
 - 两仓受影响 CPU 目标成功编译和动态链接；
 - 所有新增测试及受影响既有测试通过，无静默 skip；
 - 测试失败、flaky 或缺失必须记录为未完成，禁止把失败基线算作通过；
-- 测试可以离线复现，不依赖真实 etcd、在线模型服务或 NPU；
+- 测试可以离线复现；允许启动本地真实 etcd 进程，但不依赖外部在线 etcd、模型服务或 NPU；
 - 涉及 KV/HBM 的 CPU 合入门必须通过模拟 HBM，不得仅用链路 mock 替代；
 - 修复缺陷时先增加能够稳定复现缺陷的测试，再提交修复。
+- `tests/e2e/online_cluster_stress.py --scenario all --mode smoke` 通过；版本交付还必须
+  通过 `--mode stress`，并保存 `build/e2e-artifacts/<run-id>/report.json` 与日志。
 
 ## 5. 开发文档与完成度
 
@@ -253,6 +271,8 @@ Provider / mode / model / dtype / topology 支持矩阵
 6. 资源释放、失败收敛、并发和回滚路径已验证；
 7. NPU 专项已通过，或在开发阶段准确标记 `NPU_PENDING`；
 8. 没有新增测试失败、未解释 warning、flaky 或业务源码脏改动。
+9. 离线多进程 E2E smoke/stress 按变更级别通过，故障、资源和指标证据完整；只有单测
+   或组件测试通过时不得标记交付完成。
 
 整个首发版本只有在 02/08/09/11 的 V2 范围全部达到上述门禁后，才能称为
 “V2 已交付”。

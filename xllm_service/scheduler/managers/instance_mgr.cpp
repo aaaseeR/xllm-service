@@ -497,6 +497,17 @@ bool InstanceMgr::get_next_instance_pair(Routing* routing,
 
   routing->prefill_name = selection.prefill_engine_uid;
   routing->decode_name = selection.decode_engine_uid;
+  LOG_FIRST_N(INFO, 16) << "provider_route_selection provider_id="
+                        << static_cast<int32_t>(provider_id)
+                        << " prefill_candidates=" << prefill_candidates.size()
+                        << " decode_candidates=" << decode_candidates.size()
+                        << " prefill_start_index=" << next_prefill_index_
+                        << " decode_start_index=" << next_decode_index_
+                        << " selected_prefill=" << selection.prefill_engine_uid
+                        << " selected_decode=" << selection.decode_engine_uid
+                        << " next_prefill_index="
+                        << selection.next_prefill_index
+                        << " next_decode_index=" << selection.next_decode_index;
   next_prefill_index_ = selection.next_prefill_index;
   next_decode_index_ = selection.next_decode_index;
   return true;

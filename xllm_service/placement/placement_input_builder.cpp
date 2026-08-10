@@ -100,6 +100,14 @@ PlacementLifecycleState lifecycle_state(
     case xllm::proto::ENGINE_LIFECYCLE_STARTING:
       return PlacementLifecycleState::WARMING;
     case xllm::proto::ENGINE_LIFECYCLE_READY:
+      // Registry membership remains creation proof while State Stream and
+      // heartbeats converge after a service failover.  Keep a stale READY
+      // member managed but non-fresh so it cannot be routed to or selected as
+      // a scale-down victim, and so the new leader cannot create a duplicate.
+      if (member.state_freshness != provider::EngineStateFreshness::FRESH ||
+          !member.heartbeat_fresh) {
+        return PlacementLifecycleState::WARMING;
+      }
       return member.schedulable ? PlacementLifecycleState::READY
                                 : PlacementLifecycleState::FAILED;
     case xllm::proto::ENGINE_LIFECYCLE_DRAINING:
@@ -247,6 +255,20 @@ PlacementInputBuildStatus PlacementInputBuilder::build(
         replica.cache_value_known =
             cache.health == provider::KVShadowHealth::READY;
         replica.cache_value = static_cast<double>(cache.hbm_entries);
+      }
+      // Aggregated vLLM does not publish Native KV event streams.  A pool-level
+      // proof of complete store coverage makes every local-only cache entry
+      // recoverable, so zero is the exact non-recoverable victim cost.  Below
+      // full coverage we deliberately keep cache value unknown and fail scale
+      // down closed.
+      if (!replica.cache_value_known &&
+          member.descriptor.identity().provider_id() ==
+              xllm::proto::PROVIDER_ID_VLLM_ASCEND &&
+          member.descriptor.serving().role() ==
+              xllm::proto::ENGINE_ROLE_AGGREGATED &&
+          external.confirmed_store_coverage == 1.0) {
+        replica.cache_value_known = true;
+        replica.cache_value = 0.0;
       }
       if (member.state.has_value()) {
         if (!populate_activity(*member.state,

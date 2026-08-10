@@ -67,4 +67,14 @@ AttemptControlResult parse_vllm_agent_attempt_response(
     uint64_t expected_attempt_seq,
     const std::string& expected_incarnation_id);
 
+// Accepts only the Agent's exact pre-execution drain rejection. A positive
+// result proves that this attempt created no provider execution and can be
+// replaced within the Service's bounded first-output retry budget.
+bool is_retryable_vllm_agent_drain_rejection(
+    int32_t http_status_code,
+    const std::string& response_body,
+    const std::string& expected_request_uid,
+    uint64_t expected_attempt_seq,
+    const std::string& expected_incarnation_id);
+
 }  // namespace xllm_service::provider

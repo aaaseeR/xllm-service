@@ -43,10 +43,11 @@ double quantile95(std::vector<double> samples) {
   if (samples.empty()) {
     return 0.0;
   }
-  std::sort(samples.begin(), samples.end());
   const size_t rank = static_cast<size_t>(
       std::ceil(0.95 * static_cast<double>(samples.size())));
-  return samples[std::max<size_t>(rank, 1) - 1];
+  const size_t index = std::max<size_t>(rank, 1) - 1;
+  std::nth_element(samples.begin(), samples.begin() + index, samples.end());
+  return samples[index];
 }
 
 }  // namespace
@@ -201,17 +202,24 @@ PlacementObservationStatus PlacementObservationCollector::snapshot(
       external.confirmed_store_coverage > 1.0) {
     return PlacementObservationStatus::INVALID_INPUT;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
-  const auto iterator = models_.find(model_revision);
-  if (iterator == models_.end()) {
-    return PlacementObservationStatus::NOT_FOUND;
-  }
-  ModelWindow& model = iterator->second;
   const uint64_t now_epoch = now_monotonic_ms / config_.bucket_width_ms;
-  if (now_epoch < model.latest_epoch) {
-    return PlacementObservationStatus::CLOCK_REGRESSION;
+  uint64_t generation = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto iterator = models_.find(model_revision);
+    if (iterator == models_.end()) {
+      return PlacementObservationStatus::NOT_FOUND;
+    }
+    ModelWindow& model = iterator->second;
+    if (now_epoch < model.latest_epoch) {
+      return PlacementObservationStatus::CLOCK_REGRESSION;
+    }
+    if (model.next_generation == std::numeric_limits<uint64_t>::max()) {
+      return PlacementObservationStatus::CAPACITY_EXCEEDED;
+    }
+    model.latest_epoch = now_epoch;
+    generation = model.next_generation++;
   }
-  model.latest_epoch = now_epoch;
   const uint64_t earliest_epoch =
       now_epoch >= config_.bucket_count - 1
           ? now_epoch - static_cast<uint64_t>(config_.bucket_count - 1)
@@ -236,7 +244,20 @@ PlacementObservationStatus PlacementObservationCollector::snapshot(
       data_loss = true;
     }
   };
-  for (const Bucket& bucket : model.buckets) {
+  for (size_t bucket_index = 0; bucket_index < config_.bucket_count;
+       ++bucket_index) {
+    Bucket bucket;
+    {
+      // Copy at most one bounded bucket while request producers are paused.
+      // Aggregation and quantile selection deliberately remain outside the
+      // request-path mutex.
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto iterator = models_.find(model_revision);
+      if (iterator == models_.end()) {
+        return PlacementObservationStatus::NOT_FOUND;
+      }
+      bucket = iterator->second.buckets[bucket_index];
+    }
     if (!bucket.initialized || bucket.epoch < earliest_epoch ||
         bucket.epoch > now_epoch) {
       continue;
@@ -294,11 +315,8 @@ PlacementObservationStatus PlacementObservationCollector::snapshot(
       !std::isfinite(average_output)) {
     return PlacementObservationStatus::CAPACITY_EXCEEDED;
   }
-  if (model.next_generation == std::numeric_limits<uint64_t>::max()) {
-    return PlacementObservationStatus::CAPACITY_EXCEEDED;
-  }
   *observation = PlacementObservation{
-      .generation = model.next_generation++,
+      .generation = generation,
       .observed_at_ms = now_monotonic_ms,
       .window_ms = observed_window_ms,
       .forecast_horizon_ms = config_.forecast_horizon_ms,
@@ -341,6 +359,12 @@ bool valid_placement_observation_collector_config(
       config.forecast_headroom < 1.0) {
     return false;
   }
+  if (config.max_models > kMaxPlacementObservationModels ||
+      config.bucket_count > kMaxPlacementObservationBuckets ||
+      config.max_latency_samples_per_bucket >
+          kMaxPlacementLatencySamplesPerBucket) {
+    return false;
+  }
   if (config.bucket_count >
           std::numeric_limits<uint64_t>::max() / config.bucket_width_ms ||
       config.bucket_count > std::numeric_limits<size_t>::max() /
@@ -352,7 +376,9 @@ bool valid_placement_observation_collector_config(
               config.max_latency_samples_per_bucket) {
     return false;
   }
-  return true;
+  return config.max_models * config.bucket_count *
+             config.max_latency_samples_per_bucket <=
+         kMaxPlacementLatencySlots;
 }
 
 const char* placement_observation_status_name(

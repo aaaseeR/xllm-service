@@ -237,7 +237,8 @@ PlacementReconcileResult reconcile_placement_pool(
       }
       if (operation.status == PlacementOperationStatus::SUCCEEDED &&
           operation.action == PlacementOperationAction::CREATE) {
-        if (actual_states.find(identity) == actual_states.end() &&
+        if (operation.visibility_grace_eligible &&
+            actual_states.find(identity) == actual_states.end() &&
             now_ms - operation.updated_at_ms <=
                 config.terminal_visibility_grace_ms) {
           ++managed_replicas;
@@ -601,6 +602,28 @@ const char* placement_operation_action_name(PlacementOperationAction action) {
       return "CANCEL_DRAIN";
     case PlacementOperationAction::TERMINATE:
       return "TERMINATE";
+  }
+  return "UNKNOWN";
+}
+
+const char* placement_operation_status_name(PlacementOperationStatus status) {
+  switch (status) {
+    case PlacementOperationStatus::PLANNED:
+      return "PLANNED";
+    case PlacementOperationStatus::SUBMITTED:
+      return "SUBMITTED";
+    case PlacementOperationStatus::IN_PROGRESS:
+      return "IN_PROGRESS";
+    case PlacementOperationStatus::UNKNOWN:
+      return "UNKNOWN";
+    case PlacementOperationStatus::SUCCEEDED:
+      return "SUCCEEDED";
+    case PlacementOperationStatus::FAILED:
+      return "FAILED";
+    case PlacementOperationStatus::FENCED:
+      return "FENCED";
+    case PlacementOperationStatus::CANCELED:
+      return "CANCELED";
   }
   return "UNKNOWN";
 }

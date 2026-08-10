@@ -202,6 +202,22 @@ TEST(AttemptControlClientTest, RejectedCancelCannotProveFenceInstallation) {
   EXPECT_EQ(rejected.state, xllm::proto::ATTEMPT_LIFECYCLE_STATE_FAILED);
 }
 
+TEST(AttemptControlClientTest, DrainRejectionIsExactRetryProof) {
+  const std::string drain =
+      R"({"accepted":false,"replayed":false,"state":"ATTEMPT_LIFECYCLE_STATE_FAILED","reason":"ADMISSION_REASON_ENGINE_DRAINING","request_uid":"request-1","attempt_seq":7,"incarnation_id":"incarnation-1"})";
+  EXPECT_TRUE(is_retryable_vllm_agent_drain_rejection(
+      503, drain, "request-1", 7, "incarnation-1"));
+  EXPECT_FALSE(is_retryable_vllm_agent_drain_rejection(
+      409, drain, "request-1", 7, "incarnation-1"));
+  EXPECT_FALSE(is_retryable_vllm_agent_drain_rejection(
+      503, drain, "request-1", 8, "incarnation-1"));
+
+  const std::string capacity =
+      R"({"accepted":false,"replayed":false,"state":"ATTEMPT_LIFECYCLE_STATE_FAILED","reason":"ADMISSION_REASON_TOMBSTONE_CAPACITY","request_uid":"request-1","attempt_seq":7,"incarnation_id":"incarnation-1"})";
+  EXPECT_FALSE(is_retryable_vllm_agent_drain_rejection(
+      503, capacity, "request-1", 7, "incarnation-1"));
+}
+
 TEST(AttemptControlClientTest, BindsSubmitHeadersToExactIncarnation) {
   brpc::Controller controller;
   ASSERT_TRUE(set_vllm_agent_internal_token(&controller, "test-token"));

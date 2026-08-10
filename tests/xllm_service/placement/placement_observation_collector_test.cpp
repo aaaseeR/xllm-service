@@ -195,6 +195,21 @@ TEST(PlacementObservationCollectorTest, RejectsInvalidConfiguration) {
   invalid = config();
   invalid.bucket_count = std::numeric_limits<size_t>::max();
   EXPECT_FALSE(valid_placement_observation_collector_config(invalid));
+  invalid = config();
+  invalid.max_models = kMaxPlacementObservationModels + 1;
+  EXPECT_FALSE(valid_placement_observation_collector_config(invalid));
+  invalid = config();
+  invalid.bucket_count = kMaxPlacementObservationBuckets + 1;
+  EXPECT_FALSE(valid_placement_observation_collector_config(invalid));
+  invalid = config();
+  invalid.max_latency_samples_per_bucket =
+      kMaxPlacementLatencySamplesPerBucket + 1;
+  EXPECT_FALSE(valid_placement_observation_collector_config(invalid));
+  invalid = config();
+  invalid.max_models = kMaxPlacementObservationModels;
+  invalid.bucket_count = 2;
+  invalid.max_latency_samples_per_bucket = 1024;
+  EXPECT_FALSE(valid_placement_observation_collector_config(invalid));
 }
 
 }  // namespace

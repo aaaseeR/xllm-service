@@ -185,6 +185,9 @@ PlacementExecutorStatus PlacementOperationExecutor::recover(
   if (status == PlacementStoreStatus::CAPACITY_EXCEEDED) {
     return PlacementExecutorStatus::CAPACITY_EXCEEDED;
   }
+  if (status == PlacementStoreStatus::CORRUPT) {
+    return PlacementExecutorStatus::CORRUPT_SNAPSHOT;
+  }
   if (status != PlacementStoreStatus::OK) {
     return PlacementExecutorStatus::PERSISTENCE_ERROR;
   }
@@ -194,10 +197,12 @@ PlacementExecutorStatus PlacementOperationExecutor::recover(
       // Persisted monotonic timestamps are process-local. Start a fresh,
       // conservative retention window after leadership recovery.
       record.updated_at_ms = now_ms;
+      record.visibility_grace_eligible = false;
     } else {
       record.created_at_ms = now_ms;
       record.updated_at_ms = now_ms;
       record.timed_out = false;
+      record.visibility_grace_eligible = true;
     }
     record.command_revision = persisted.command_revision;
     record.status_revision = persisted.status_revision;
@@ -332,11 +337,56 @@ PlacementExecutorResult PlacementOperationExecutor::drive(
     result.status = PlacementExecutorStatus::INVALID_INPUT;
     return result;
   }
+  const auto observe_pending = [&records = records_,
+                                now_ms,
+                                timeout_ms = config_.operation_timeout_ms,
+                                &result] {
+    result.pending = 0;
+    result.timed_out = 0;
+    result.oldest_pending_age_ms = 0;
+    for (const auto& [operation_id, record] : records) {
+      static_cast<void>(operation_id);
+      if (placement_operation_terminal(record.status)) {
+        continue;
+      }
+      ++result.pending;
+      const bool expired = now_ms >= record.created_at_ms &&
+                           now_ms - record.created_at_ms >= timeout_ms;
+      result.timed_out += record.timed_out || expired ? 1 : 0;
+      if (now_ms >= record.created_at_ms) {
+        result.oldest_pending_age_ms = std::max(result.oldest_pending_age_ms,
+                                                now_ms - record.created_at_ms);
+      }
+    }
+  };
+  result.events.reserve(
+      std::min(records_.size(), static_cast<size_t>(max_actions)));
+  const auto append_event = [&result,
+                             now_ms](const PlacementOperationRecord& record) {
+    result.events.emplace_back(PlacementOperationEvent{
+        .operation_id = record.intent.operation_id,
+        .action = record.intent.action,
+        .status = record.status,
+        .code = record.last_code,
+        .engine_uid = record.engine_uid.empty() ? record.intent.engine_uid
+                                                : record.engine_uid,
+        .engine_incarnation = record.engine_incarnation.empty()
+                                  ? record.intent.engine_incarnation
+                                  : record.engine_incarnation,
+        .expected_incarnation = record.intent.engine_incarnation,
+        .execute_attempts = record.execute_attempts,
+        .query_attempts = record.query_attempts,
+        .duration_ms = now_ms - record.created_at_ms,
+        .timed_out = record.timed_out,
+        .message = record.message,
+    });
+  };
   for (const auto& [operation_id, record] : records_) {
     static_cast<void>(operation_id);
     if (!placement_operation_terminal(record.status) &&
         (now_ms < record.created_at_ms || now_ms < record.updated_at_ms)) {
       result.status = PlacementExecutorStatus::CLOCK_REGRESSION;
+      observe_pending();
       return result;
     }
   }
@@ -350,6 +400,7 @@ PlacementExecutorResult PlacementOperationExecutor::drive(
       continue;
     }
     if (now_ms - record.created_at_ms >= config_.operation_timeout_ms) {
+      result.timeout_transitions += record.timed_out ? 0 : 1;
       record.timed_out = true;
     }
     PlacementActuatorResponse response;
@@ -361,6 +412,7 @@ PlacementExecutorResult PlacementOperationExecutor::drive(
       const PlacementExecutorStatus persist_status = persist(&record);
       if (persist_status != PlacementExecutorStatus::OK) {
         result.status = persist_status;
+        observe_pending();
         return result;
       }
       response = actuator_->execute(record.intent);
@@ -374,6 +426,8 @@ PlacementExecutorResult PlacementOperationExecutor::drive(
       record.status = PlacementOperationStatus::UNKNOWN;
       record.last_code = PlacementActuatorCode::UNKNOWN;
       result.status = persist_status;
+      append_event(record);
+      observe_pending();
       return result;
     }
     ++result.driven;
@@ -382,6 +436,10 @@ PlacementExecutorResult PlacementOperationExecutor::drive(
     } else if (record.status == PlacementOperationStatus::UNKNOWN) {
       ++result.unknown;
     }
+    result.conflict +=
+        record.last_code == PlacementActuatorCode::CONFLICT ? 1 : 0;
+    result.fenced += record.last_code == PlacementActuatorCode::FENCED ? 1 : 0;
+    append_event(record);
   }
   uint32_t canceled = 0;
   if (result.status == PlacementExecutorStatus::OK) {
@@ -391,6 +449,7 @@ PlacementExecutorResult PlacementOperationExecutor::drive(
   if (result.status == PlacementExecutorStatus::OK) {
     result.status = compact_terminal(now_ms, &result.compacted);
   }
+  observe_pending();
   return result;
 }
 
@@ -623,6 +682,7 @@ PlacementOperationExecutor::operation_views() const {
         .leader_epoch = record.intent.leader_epoch,
         .desired_generation = record.intent.desired_generation,
         .updated_at_ms = record.updated_at_ms,
+        .visibility_grace_eligible = record.visibility_grace_eligible,
     });
   }
   return views;

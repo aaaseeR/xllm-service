@@ -22,10 +22,11 @@ B6-B10 是完整 V2 首个交付版本的后半程开发门，不是独立产品
 通过后才能标记 `CPU_VERIFIED`。最终 `VERIFIED` 还要求对应 NPU、真实 P/D/etcd、
 故障注入和容量门禁通过；`CPU_VERIFIED` 不得改写为生产硬件已验证。
 
-当前总状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`。B6-B10 的仓库内代码、
-CPU/Torch CPU 可达路径、simulated HBM、双 Provider CPU conformance、压力回归和
-交付文档已完成。平台 branch protection、真实多 Service/P/D/etcd/Link 集群、NPU、
-长时 soak 和线上校准保持 pending；这些外部证据不能由 CPU 结果替代。
+当前总状态：`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`。B6-B10 的
+仓库内代码、CPU/Torch CPU 可达路径、simulated HBM、双 Provider CPU conformance、
+双 Service/etcd/2P+2D 多进程 smoke/stress、压力回归和交付文档已完成。平台 branch
+protection、真实生产 P/D/etcd/Link 集群、NPU、长时 soak 和线上校准保持 pending；
+这些外部证据不能由离线结果替代。
 
 ## 门级范围
 

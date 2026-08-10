@@ -27,6 +27,11 @@ limitations under the License.
 
 namespace xllm_service::placement {
 
+inline constexpr size_t kMaxPlacementObservationModels = 4096;
+inline constexpr size_t kMaxPlacementObservationBuckets = 4096;
+inline constexpr size_t kMaxPlacementLatencySamplesPerBucket = 4096;
+inline constexpr size_t kMaxPlacementLatencySlots = 4 * 1024 * 1024;
+
 enum class PlacementObservationStatus : int8_t {
   OK = 0,
   INVALID_INPUT = 1,

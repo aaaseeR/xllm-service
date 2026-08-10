@@ -297,6 +297,10 @@ PlacementStoreStatus PlacementDesiredStore::compare_and_set(
       desired.leader.epoch != expected_leader.epoch) {
     return PlacementStoreStatus::INVALID_INPUT;
   }
+  std::string value;
+  if (!serialize_placement_desired_state(desired, &value)) {
+    return PlacementStoreStatus::INVALID_INPUT;
+  }
   if (expected_mod_revision > 0) {
     PlacementDesiredSnapshot current;
     const PlacementStoreStatus read_status = read(desired.pool, &current);
@@ -305,14 +309,18 @@ PlacementStoreStatus PlacementDesiredStore::compare_and_set(
                  ? PlacementStoreStatus::REVISION_CONFLICT
                  : read_status;
     }
+    std::string current_value;
+    if (!serialize_placement_desired_state(current.desired, &current_value)) {
+      return PlacementStoreStatus::CORRUPT;
+    }
+    const bool exact_replay = current_value == value;
+    if (exact_replay) {
+      return PlacementStoreStatus::OK;
+    }
     if (current.mod_revision != expected_mod_revision ||
         desired.generation <= current.desired.generation) {
       return PlacementStoreStatus::REVISION_CONFLICT;
     }
-  }
-  std::string value;
-  if (!serialize_placement_desired_state(desired, &value)) {
-    return PlacementStoreStatus::INVALID_INPUT;
   }
   return backend_->compare_and_set(std::string(kPlacementDesiredPrefix) +
                                        placement_pool_key_suffix(desired.pool),

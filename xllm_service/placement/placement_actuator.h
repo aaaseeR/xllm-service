@@ -47,6 +47,7 @@ enum class PlacementExecutorStatus : int8_t {
   CAPACITY_EXCEEDED = 2,
   CLOCK_REGRESSION = 3,
   PERSISTENCE_ERROR = 4,
+  CORRUPT_SNAPSHOT = 5,
 };
 
 struct PlacementDrainProof {
@@ -92,6 +93,10 @@ struct PlacementOperationRecord {
   uint64_t created_at_ms = 0;
   uint64_t updated_at_ms = 0;
   bool timed_out = false;
+  // This process-local bit prevents a recovered terminal result from gaining
+  // a fresh Registry-visibility grace period when its monotonic timestamp is
+  // rebased. It is deliberately not serialized.
+  bool visibility_grace_eligible = true;
   std::string message;
   int64_t command_revision = 0;
   int64_t status_revision = 0;
@@ -105,6 +110,21 @@ struct PlacementOperationExecutorConfig {
   uint32_t max_terminal_compactions_per_cycle = 0;
 };
 
+struct PlacementOperationEvent {
+  std::string operation_id;
+  PlacementOperationAction action = PlacementOperationAction::CREATE;
+  PlacementOperationStatus status = PlacementOperationStatus::PLANNED;
+  PlacementActuatorCode code = PlacementActuatorCode::NOT_FOUND;
+  std::string engine_uid;
+  std::string engine_incarnation;
+  std::string expected_incarnation;
+  uint32_t execute_attempts = 0;
+  uint32_t query_attempts = 0;
+  uint64_t duration_ms = 0;
+  bool timed_out = false;
+  std::string message;
+};
+
 struct PlacementExecutorResult {
   PlacementExecutorStatus status = PlacementExecutorStatus::INVALID_INPUT;
   uint32_t added = 0;
@@ -112,7 +132,16 @@ struct PlacementExecutorResult {
   uint32_t driven = 0;
   uint32_t terminal = 0;
   uint32_t unknown = 0;
+  uint32_t conflict = 0;
+  uint32_t fenced = 0;
+  uint32_t timeout_transitions = 0;
+  uint32_t pending = 0;
+  uint32_t timed_out = 0;
+  uint64_t oldest_pending_age_ms = 0;
   uint32_t compacted = 0;
+  // At most one entry is emitted for each record driven in this cycle, so the
+  // vector is bounded by min(max_actions, max_records).
+  std::vector<PlacementOperationEvent> events;
 };
 
 class PlacementOperationExecutor final {

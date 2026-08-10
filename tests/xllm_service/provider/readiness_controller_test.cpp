@@ -34,6 +34,7 @@ ObservationSnapshot observation(ObservationMode mode, bool within_grace) {
 
 ReadinessInput healthy_input() {
   return ReadinessInput{
+      .is_leader = true,
       .has_accepted_full_snapshot = true,
       .has_compatible_capacity = true,
       .draining = false,
@@ -49,6 +50,24 @@ ReadinessSnapshot update(ReadinessController* controller,
       controller->update(input, now_monotonic_ms, &error);
   EXPECT_TRUE(snapshot.has_value()) << error;
   return snapshot.value_or(ReadinessSnapshot{});
+}
+
+TEST(ReadinessControllerTest, FollowerFailsClosedAndPromotionUsesHold) {
+  ReadinessController controller(
+      ReadinessControllerConfig{.recovery_hold_ms = 10});
+  ReadinessInput follower = healthy_input();
+  follower.is_leader = false;
+
+  ReadinessSnapshot snapshot = update(&controller, follower, 100);
+  EXPECT_FALSE(snapshot.accepting_new_requests);
+  EXPECT_EQ(snapshot.reason, ReadinessReason::NOT_LEADER);
+
+  snapshot = update(&controller, healthy_input(), 101);
+  EXPECT_FALSE(snapshot.accepting_new_requests);
+  EXPECT_EQ(snapshot.reason, ReadinessReason::RECOVERY_HOLD);
+  snapshot = update(&controller, healthy_input(), 111);
+  EXPECT_TRUE(snapshot.accepting_new_requests);
+  EXPECT_EQ(snapshot.reason, ReadinessReason::READY);
 }
 
 TEST(ReadinessControllerTest, RejectsInvalidConfigAndClockRegression) {

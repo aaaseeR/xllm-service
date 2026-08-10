@@ -154,6 +154,22 @@ TEST(PlacementReconcilerTest, CreateProofGraceCannotMaskPermanentAbsence) {
   EXPECT_EQ(expired.intents[0].action, PlacementOperationAction::CREATE);
 }
 
+TEST(PlacementReconcilerTest, RecoveredCreateProofGetsNoFreshGrace) {
+  PlacementOperationView created =
+      operation("create-succeeded",
+                PlacementOperationAction::CREATE,
+                PlacementOperationStatus::SUCCEEDED);
+  created.engine_uid = "engine-created";
+  created.engine_incarnation = "inc-created";
+  created.visibility_grace_eligible = false;
+
+  const PlacementReconcileResult result = reconcile_placement_pool(
+      config(), desired(1), leader(), {}, {created}, /*now_ms=*/2001);
+  EXPECT_EQ(result.reason, PlacementReconcileReason::SCALE_UP);
+  ASSERT_EQ(result.intents.size(), 1u);
+  EXPECT_EQ(result.intents[0].action, PlacementOperationAction::CREATE);
+}
+
 TEST(PlacementReconcilerTest, ExplicitFailureOverridesTerminalProofGrace) {
   PlacementOperationView created =
       operation("create-succeeded",

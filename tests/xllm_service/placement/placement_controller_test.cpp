@@ -331,6 +331,34 @@ TEST(PlacementControllerTest, EnforcedPersistsReconcilesAndExecutesCreate) {
   EXPECT_EQ(executor.snapshot()[0].status, PlacementOperationStatus::SUCCEEDED);
 }
 
+TEST(PlacementControllerTest, HardDeviceLimitCountsDrainingReplica) {
+  FakeFencedKv backend(leader());
+  PlacementDesiredStore desired_store(&backend);
+  PlacementOperationStore operation_store(&backend);
+  FakeActuator actuator;
+  PlacementOperationExecutor executor(
+      executor_config(), &actuator, &operation_store, leader());
+  PlacementControllerConfig config = controller_config(PlacementMode::ENFORCED);
+  config.max_devices = 1;
+  PlacementController controller(config, &desired_store, &executor);
+  PlacementPoolCycleInput cycle_input = input();
+  PlacementReplicaFact draining = ready_replica(1);
+  draining.state = PlacementLifecycleState::DRAINING;
+  cycle_input.replicas = {draining};
+
+  ASSERT_EQ(controller.recover(leader(), 1000), PlacementControllerStatus::OK);
+  const PlacementControllerResult result =
+      controller.run_cycle(leader(), {cycle_input}, 2000, 100000);
+
+  EXPECT_EQ(result.status, PlacementControllerStatus::HOLD);
+  EXPECT_EQ(result.intents_added, 0u);
+  EXPECT_EQ(actuator.execute_calls, 0u);
+  ASSERT_EQ(result.pools.size(), 1u);
+  EXPECT_EQ(result.pools[0].reconcile.reason,
+            PlacementReconcileReason::SCALE_UP);
+  EXPECT_TRUE(result.pools[0].reconcile.intents.empty());
+}
+
 TEST(PlacementControllerTest, CreateOnlyNeverReducesDesiredOrBeginsDrain) {
   FakeFencedKv backend(leader());
   PlacementDesiredStore desired_store(&backend);
