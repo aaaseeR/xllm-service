@@ -44,8 +44,9 @@ CPU 可达链路、生产 BlockManager 资源适配、simulated HBM、支持矩�
   BEST_EFFORT 兼容，不获得 V2 多模型声明。
 - tenant/KV 隔离：租户/flow/model 键有 256 字节上限并拒绝 NUL/CR/LF。默认忽略不可信
   客户端 tenant/flow/priority 头；标准 OpenAI `user` 或 Anthropic `metadata.user_id` 只有
-  与认证身份共同 HMAC 派生后才能跨请求复用，自研客户端可回传有 TTL/轮转的 opaque
-  session token。只有鉴权 Gateway 部署显式开启可信头开关后，才允许可信 tenant 复用。
+  与鉴权 Gateway 剥离并重写的 `x-authenticated-client-id` 共同 HMAC 派生后才能跨请求
+  复用；Service 不把客户端原始 Authorization/API-Key 当作已认证身份。自研客户端可回传
+  有 TTL/轮转的 opaque session token。tenant 与 client-id 两个可信开关独立且默认关闭。
 - K2 组合：tenant→flow 公平队列先决定下一个请求，KV/load planner 只在出队后、公共
   硬过滤后的候选中排序，不反向改变 priority/tenant 账本。HOST 只查询有界 shortlist，
   只形成命中 token 上界，不进入 V2 cost、route 或 admission；SSD/STORE 不查询。
@@ -82,11 +83,11 @@ event、allocator 或 kernel。生产资源适配器包装实际 BlockManager le
 最终验证命令与精确计数记录在本提交的验证日志和
 [B6-B10 总状态](./B6_B10_STATUS.md)。全量门包括外部 xLLM override、Service pinned
 gitlink、三个生产二进制动态链接、vLLM sidecar pytest、压力重复和 sanitizer 切片。
-当前 pin 为已推送的 xLLM `6c9d661e`。本批重建的 production-adapter/simulated-HBM
-快速目标 15/15、request-output admission wire 3/3；Service pinned 与外部 override 均为
-388/388，三个生产 ELF build/link 通过。xLLM `446bae12` 的 118/118 与 vLLM sidecar
-60/60 是上一个完整公共基线；本批完整 xLLM runtime build 在修复本仓无硬件编译问题后
-停于第三方 Mooncake Clang 错误，未把旧 118/118 数字冒充为新提交的全量结果。
+当前 pin 为已推送的 xLLM `6c9d661e`。本轮重新验证 xLLM 公共 CPU 门 121/121，包含
+production-adapter/simulated-HBM 15/15；Service pinned 与外部 override 均为 391/391，
+vLLM sidecar 60/60，三个生产 ELF build/link 通过。完整无设备 xLLM 推理 runtime 仍可能
+受第三方 Mooncake Clang 构建边界影响；公共 CPU contract 通过不冒充完整推理 runtime
+或真实 HBM 证明。
 xLLM attempt/simulated-HBM/RequestEvent 三个目标各重复 100 轮；Service 的 recorder、
 hash/namespace、KV planner/metrics、Provider route 和 flow-control 57 项各重复 100 轮，
 共 5700 次，无失败。同一组 57 项还在 GCC 13 `-fsanitize=address,undefined` 下通过，
@@ -112,8 +113,9 @@ Engine KV 压力、标准 SDK 会话、安全轮转和宏/配置边界。当前�
 
 - 关闭 `kv_route_enforced_gate_open` 或把 bucket 设为 0，立即回到 SHADOW；切换
   load-balance policy 可回到 load-only。HOST tier 无需单独回滚，因为不参与 V2 决策。
-- 关闭 `--trusted_tenant_headers_enabled` 会忽略租户头、关闭跨请求 KV credit；发布
-  系统必须同时确保 Gateway 去除客户端自报头，不能只依赖文档约定。
+- 关闭 `--trusted_tenant_headers_enabled` 会忽略租户头；关闭
+  `--trusted_client_identity_headers_enabled` 会忽略 body `user` 的跨请求亲和提示。两个
+  开关默认关闭；开启任一个都必须确保 Gateway 去除并重写对应自报头且 Service 不可旁路。
 - 多副本必须共享 `--kv_session_hmac_secret`；轮转时 previous key 只用于验证，并在最大
   token TTL 后移除。随机实例 key 只允许 SHADOW/dev sticky routing。
 - `--v=1` 只用于需要逐请求诊断的实例/窗口；关闭后不构造逐请求 protobuf，常开

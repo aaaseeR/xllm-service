@@ -250,7 +250,35 @@ flowchart TB
 
 这个分层与 llm-d/Dynamo 的共同点是把请求决策、执行资源和异步状态分开；关键差异是 xLLM Service 对每个 attempt 负责跨 P/D 协调和输出提交屏障，而 Engine/Agent 对准入、KV、执行、deadline 和 fencing 保持最终权威。CPU 与 Torch CPU 测试只验证同一 Provider/Engine 契约及 simulated HBM 资源链路；上 NPU 时替换的是硬件 backend 和真实传输证据，不改变 Service 架构。
 
-### 4.2 组件职责
+### 4.2 简化请求与数据流（原流程图保留）
+
+下图保留原有的端到端流程表达，用来快速阅读“请求从哪里进入、P/D 如何协作、输出如何返回”。它是**简化流程图**，不替代上面的静态组件拓扑，也不定义严格时序、准入原子性或故障恢复语义；这些细节以 §5 和专项设计为准。
+
+```mermaid
+%%{init: {"flowchart": {"useMaxWidth": true, "rankSpacing": 70, "nodeSpacing": 45}, "themeVariables": {"fontSize": "21px"}}}%%
+flowchart TB
+  C["Client"] -->|"HTTP / SSE"| LB["L4 / L7 Load Balancer"]
+  LB --> S["xLLM Service replicas<br/>normalize / Filter / Score / Pick<br/>ExecutionPlan / retry / output relay"]
+
+  REG["Engine Registry<br/>identity / capability / lease"] --> S
+  STATE["State Stream<br/>queue / KV / credit / latency"] --> S
+  INDEX["Local KVIndex<br/>Prefix location / tier hint"] --> S
+
+  S --> A["Provider Adapter<br/>xLLM Native / vLLM-Ascend Agent"]
+  A -->|"REMOTE_PD plan"| P["P Engine"]
+  A -->|"AGGREGATED plan"| E["Aggregated Engine"]
+  P -->|"AddNewRequests / KV PUSH / FirstGeneration"| D["D Engine"]
+  P -->|"first event"| OUT["Service output relay"]
+  D -->|"subsequent Generations"| OUT
+  OUT --> C
+
+  STORE["V2.5 Mooncake Store<br/>cross-request KV write / restore / replicate"] <--> P
+  STORE <--> D
+  PLACE["V3+ Placement Controller<br/>model / role / replica desired state"] --> P
+  PLACE --> D
+```
+
+### 4.3 组件职责
 
 | 组件 | 职责 |
 | --- | --- |
@@ -271,7 +299,7 @@ flowchart TB
 
 V2 不引入请求级 Coordination Store、Request Journal、Stable Request Plane、Engine manager 或 Capability Issuer。
 
-### 4.3 多 Service 的集群视图
+### 4.4 多 Service 的集群视图
 
 当前 `xllm-service` 的每个副本已经 watch etcd 中的全部 Engine 注册信息，并各自维护 `InstanceMgr`、本地请求表和 RR/CAR/SLO-aware 策略；Engine heartbeat 只发往 etcd 选出的 master。master 目前每 3 秒把 `waiting_requests_num` 和 `gpu_cache_usage_perc` 等粗粒度负载写回 etcd，其他副本通过 watch 更新。当前选择结果是一个 `Routing{prefill_name, decode_name}`，即请求到达时一次锁定单个 P 和单个 D；实例故障直接失败相关请求，没有跨 Service 请求接管。
 
@@ -290,7 +318,7 @@ V1 直接扩展这些现有类：`Scheduler` 继续负责请求规范化和调�
 
 State Stream 是 `Scheduler/InstanceMgr` 的内部模块，不是新部署服务。master 只负责软状态聚合，不拥有请求或 Engine；切主无需请求对账。现有 `service_name` 就是 `ip:rpc_port`，继续作为 Registry member value 和推送地址，不改 value 格式。master 枚举成员时必须先按完整 key 排除 `XLLM:SERVICE:MASTER`，再校验地址并去重；普通 Service 不保存其他 Service 的请求、负载或 ownership 信息，也不执行 Service 间请求级调用。
 
-### 4.4 公共标识
+### 4.5 公共标识
 
 ```text
 request_id        API/业务追踪 ID，不承担 Engine 唯一性

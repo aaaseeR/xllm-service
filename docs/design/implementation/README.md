@@ -21,6 +21,9 @@ limitations under the License.
 
 ## 状态索引
 
+面向评审和汇报的单页能力入口见
+[V2 当前能力与远端代码索引](../12_XLLM_SERVICE_V2_CURRENT_CAPABILITIES.md)；本目录继续保存各功能的细粒度开发证据。
+
 | 功能 | 状态 | 文档 |
 | --- | --- | --- |
 | 双仓 CPU 开发基线 | CPU_VERIFIED | [V2_BASELINE_STATUS.md](./V2_BASELINE_STATUS.md) |

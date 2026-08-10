@@ -19,7 +19,7 @@ limitations under the License.
 
 - Review 输入：工作区根目录 `opus_sevice_review.md`
 - 整改分支：xLLM 与 xllm-service 均为 `service_dev`
-- xLLM 整改基线：`b1cc43dc`
+- xLLM 整改基线：`6c9d661e`
 - xllm-service 整改基线：本文档所在提交
 - 验证环境：xllm-dev-sandbox，Ubuntu 24.04 ARM64、Clang 18、
   PyTorch 2.10.0+cpu
@@ -66,17 +66,17 @@ lease，现有接口也没有 incarnation compare，盲删会删除重启后新 
 | N2 | FIXED（参数与部署约束） | fail-stop 安全语义不变；默认且最小 TTL 为 15 秒，heartbeat/reconcile 必须不大于 TTL 三分之一，非法配置在建立 etcd 客户端前拒绝。KeepAlive 失败回调记录 key、TTL 和异常。没有采用连续 N 次 authoritative missing，因为成员已被 Service 移除后继续保留旧 incarnation 会破坏 fencing 证明。更复杂的排空 ledger 后原地轮换仍不属于当前版本。 |
 | N3 | FIXED | 删除两个生产者都写常量 `READY` 的 Engine connector 字段并 reserved tag 12/name；Registry 不再使用伪信号。严格 Remote PD 仍要求真实 `LinkState=READY`，没有降低 connector handshake 门禁。 |
 | N4 | FIXED | `.github/workflows/v2_cpu.yml` 对 PR/push 执行 pinned proto/gitlink 守卫、Service CTest、三个生产服务构建、Agent pytest 和 pinned xLLM 七个 CPU contract 目标。 |
-| N5 | REPO FIXED / PLATFORM PENDING | pin/proto 守卫抽成 `scripts/verify_v2_pin.sh` 唯一入口，GitHub 镜像的 PR 触发已覆盖 `main` 与 `service_dev`。JD Coding 受保护分支仍须在平台侧把该脚本及完整 V2 CPU gate 配成合入前必需检查；仓库文件不能替代服务端 branch protection。 |
+| N5 | REPO FIXED / PLATFORM ACTIVATION PENDING | pin/proto 守卫抽成 `scripts/verify_v2_pin.sh` 唯一入口；GitHub 镜像和根目录 `.coding-ci.yml` 均覆盖 `main/service_dev` 的 push/MR，并显式构建三个 serving 二进制。Coding 首次远端执行与受保护分支 required check 仍需平台确认。 |
 
 ## CPU 验证证据
 
 | 范围 | 命令/目标 | 结果 |
 | --- | --- | --- |
-| xLLM 公共回归 | `xllm-dev xllm-test <xllm> native Debug` | 113/113 PASS，含 simulated HBM 10/10 |
+| xLLM 公共回归 | `xllm-dev xllm-test <xllm> native Debug` | 121/121 PASS，含 simulated HBM/生产 BlockManager adapter 15/15 |
 | xLLM Provider wire | `ProviderProtocolTest` | 8/8 PASS |
 | xLLM 地址归一化 | `util_test --gtest_filter=NetTest.*` | 5/5 PASS |
-| xllm-service pinned xLLM | `xllm-dev service-test <service> native Debug` | 304/304 PASS |
-| xllm-service 外部 xLLM | `XLLM_SOURCE_DIR=<xllm> ... service-test` | 304/304 PASS |
+| xllm-service pinned xLLM | `xllm-dev service-test <service> native Debug` | 391/391 PASS |
+| xllm-service 外部 xLLM | `XLLM_SOURCE_DIR=<xllm> ... service-test` | 391/391 PASS |
 | vLLM Agent/sidecar | `python3 -m pytest vllm_sidecar/tests -q` | 60/60 PASS |
 | 生产目标 | `xllm-dev service-verify <service> native Debug` | 三个 ARM64 ELF 编译、动态链接 PASS |
 
@@ -103,8 +103,8 @@ simulated HBM 的固定容量、block 所有权、内容/checksum、OOM/碎片�
 
 | ID | 状态 | 整改与证据 |
 | --- | --- | --- |
-| D1 / D9 | FIXED | xLLM 新增生产 `BlockManagerKVResourceBackend`，直接持有并释放真实 `BlockManager` leaf 返回的 RAII `Block`；`BlockManagerPool` 为每个 DP/cache leaf 构造并暴露该适配器，因此资源契约和序列调度共享同一 free-list 与物理容量。fence/transfer/generation ledger 全部有界，耗尽时整 leaf fail closed。simulated HBM 保留为故障注入工具，不再宣称是 NPU/HBM 证明；真实 `BlockManagerImpl` 的容量、generation、transfer pin/fence 场景补入既有 block-manager 测试。轻量适配器/模拟器 15/15，并发压力 100 轮通过。 |
-| D2 / D17 | FIXED | 不可信 header 模式支持两种可复用会话：自研客户端可回传 HMAC token；标准 OpenAI SDK 使用请求体 `user`，Anthropic SDK 使用 `metadata.user_id`，并与 `Authorization/x-api-key` 共同 HMAC 派生，客户端不能仅靠猜测 user 值进入他人 namespace。缺少认证身份和 body hint 时才签发 opaque token。伪造 token fail closed。 |
+| D1 / D9 | CPU CONTRACT FIXED / NPU INTEGRATION GATE | xLLM 新增 `BlockManagerKVResourceBackend`，直接持有并释放真实 `BlockManager` leaf 返回的 RAII `Block`；测试因此与生产 allocator 共享 free-list，而不是平行账本。`BlockManagerPool::kv_resource_backend()` 已进入生产对象图但尚无运行时消费者；不能为“消除残留”让 scheduler 通过第二路径重复记账。NPU 接入时必须让真实资源协议消费该 seam，或删除 accessor；此前只标记 CPU 契约闭环，不宣称运行时 HBM 数据路径完成。 |
+| D2 / D17 / D19 | FIXED | 自研客户端可回传 HMAC token；标准 OpenAI `user`/Anthropic `metadata.user_id` 只有在独立的 `trusted_client_identity_headers_enabled` 门开启时，才与 Gateway 剥离并重写的 `x-authenticated-client-id` 派生。Service 不再读取原始 Authorization/API-Key 作为认证身份；开关默认 false，未建立可信边界时伪造 credential+user 仍得到不同 per-request 域和独立 token。 |
 | D3 | FIXED | band 内改为 tenant→flow 两级轮转；新 flow 从当前队尾加入，不从终生计数 0 开始，派发后回队尾，空闲即擦除。新增新 flow、轮换 flow-id、取消、过期、return-to-queue 与并发账本测试。 |
 | D4 | FIXED | tenant、flow、priority 作为同一个信任单元；未开启可信 Gateway 模式时客户端 priority 一律归一为默认 band。 |
 | D5 | FIXED | ENFORCED 启动同时要求 CAR、ENFORCED mode、非零 bucket、`bytes_per_token`、Prefill token cost 和有限正 transfer-byte cost，缺任一项拒绝启动。 |
@@ -119,6 +119,21 @@ simulated HBM 的固定容量、block 所有权、内容/checksum、OOM/碎片�
 | D15 | FIXED | Service 宏全部改为 `XLLM_SERVICE_*` 前缀，queue 私有宏在文件末尾 `#undef`；xLLM detector 显式包含 xLLM 自己的 macro header。Service 不再定义通用 `PROPERTY/CALLBACK_WITH_ERROR`。 |
 | D16 | FIXED | planner 成本、reserve、margin、near-equal 等全部开放 gflag并做范围校验；提供 `examples/v2_shadow.flags`，保持 SHADOW、alternate mode 关闭、ENFORCED 所需模型参数为 0。ENFORCED 还拒绝 development/placeholder build ID。会话 secret 只允许部署 secret 注入，不写 flagfile。 |
 | D18 | FIXED | token 升级为 `v2.<issued_at>.<session>.<hmac>`，TTL 范围 1 秒至 30 天，拒绝过期和超前超过 60 秒的 token；active key 签发、previous key 仅验证，实现有界轮转。ENFORCED 且无可信 tenant header 时强制所有副本配置同一个 shared secret；shadow/dev 的随机本地 key 只允许 sticky replica 并明确 WARNING。 |
+
+## §14 第五轮复核新增问题闭环
+
+| §14 项 | 结论 | 本轮处理与验证 |
+| --- | --- | --- |
+| 14.9 主程序编译 P0 | FIXED | `main()` 中 `KVSessionTokenCodec` 补全 `xllm_service::` 限定；`xllm_master_serving`、`xllm_http_serving`、`xllm_rpc_serving` 均完成 Linux ARM64 编译和动态链接检查。 |
+| 14.10 CI 平台不匹配 | REPO FIXED / PLATFORM ACTIVATION PENDING | 根目录新增 `.coding-ci.yml`，覆盖 `main/service_dev` push/MR，执行 pin guard、Service 391 项、三个 serving binary、vLLM 60 项和 xLLM CPU contract。YAML 与官方 schema 本地检查通过；首次 Coding 远端运行和 required check 仍需平台确认。 |
+| 14.11 公平性无回归 | FIXED | 两个临时 probe 并入正式 `FlowControlQueueTest`：late flow 与 established flow 各获得 10/20 slots 且最大连续派发不超过 2；200 个 drained flow 不残留 active state。两例进入全量 CTest。 |
+| 14.6 D13 最后兜底 | FIXED | `Schedule request failed!` 改为稳定 `SCHEDULE_REJECTED; request_uid=...`，保留公开定位键且不泄露内部 message。 |
+| 14.8 D19 | FIXED | 原始 Authorization/API-Key 不再作为身份；只有显式可信 Gateway client-id 门才能把标准 SDK `user` 变成跨请求域。默认关闭的负向测试证明伪造 credential+user 不能共享 namespace。 |
+| 14.3 D9 残留 | ACCEPTED AS EXPLICIT NPU GATE | accessor 留作真实 BlockManager conformance seam，但尚非运行时数据路径；NPU 接入时消费或删除，当前文档不宣称生产 HBM 闭环。 |
+| D14 命名统一 | RESOLVED BY DOMAIN BOUNDARY | 四类状态保持领域强类型，统一公开翻译纪律；强行合成万能 Status 会让 allocator、replica sequence、flow admission 与 Provider contract 错误耦合，因此不做无收益重构。 |
+
+本轮最终证据：xLLM 121/121、xllm-service pinned 391/391、外部 xLLM override
+391/391、vLLM sidecar 60/60、三个 serving ELF build/link PASS。
 
 ### 状态类型边界
 
@@ -142,6 +157,6 @@ simulated HBM 的固定容量、block 所有权、内容/checksum、OOM/碎片�
 当前 CPU 结论仍为 `CPU_VERIFIED / NPU_PENDING`。完整无设备 runtime build 已修复 xLLM
 自身的 `shared_mutex` 锁类型和无硬件 process-group 工厂编译问题，随后停在第三方 Mooncake
 Clang thread-safety/incomplete-type 错误；这不影响重新构建的轻量 resource target 或
-xllm-service pinned/override 388/388 和三个生产 ELF build/link，但也不被包装成真实
+xllm-service pinned/override 391/391 和三个生产 ELF build/link，但也不被包装成真实
 HBM/Torch 全 runtime 证明。xLLM 整改提交 `6c9d661e` 已先推送到远端 `service_dev`，
 Service gitlink 再固定到该提交。

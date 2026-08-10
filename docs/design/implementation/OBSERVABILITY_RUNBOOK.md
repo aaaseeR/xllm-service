@@ -34,7 +34,9 @@ limitations under the License.
 
 `build_id` 只能包含字母、数字及 `-_.:/@+`。ring 最大 1,048,576；batch 必须不大于
 ring。配置非法时 Service 拒绝启动。若租户头由鉴权 Gateway 注入并且下游无法被客户
-端绕过，才可开启 `--trusted_tenant_headers_enabled=true`；否则保持 false。
+端绕过，才可开启 `--trusted_tenant_headers_enabled=true`；否则保持 false。标准 SDK 的
+`user` 会话提示只有在 Gateway 同样剥离并重写 `x-authenticated-client-id`、且部署显式
+开启 `--trusted_client_identity_headers_enabled=true` 时才参与跨请求 KV 域派生。
 
 ## 2. 日志族与关联
 
@@ -126,8 +128,10 @@ CANN/CUDA allocator、stream/event 或 device pointer。
 Provider cache semantics 或未来 dynamic adapter identity 均生成不同 namespace。
 
 标准 OpenAI SDK 可用请求体 `user`，Anthropic SDK 可用 `metadata.user_id`；Service 会把
-它们与 `Authorization`/`x-api-key` 身份共同 HMAC 派生，不能只凭可猜测的 user 值跨客户
-复用。自研客户端可回传 Service 签发的 `v2.<issued_at>.<session>.<hmac>` opaque token。
+它们与鉴权 Gateway 注入的 `x-authenticated-client-id` 共同 HMAC 派生，不能只凭可猜测的
+user 值跨客户复用。原始 `Authorization`/`x-api-key` 不作为身份断言；没有显式开启可信
+client-id 边界时，即使客户端同时伪造凭据和 user，也只能获得独立 opaque session。
+自研客户端可回传 Service 签发的 `v2.<issued_at>.<session>.<hmac>` opaque token。
 生产多副本必须配置同一 `--kv_session_hmac_secret`；轮转时先配置
 `--kv_session_hmac_previous_secret`，等待 `--kv_session_token_ttl_seconds` 窗口后移除旧
 key。随机本地 key 只适合 SHADOW/dev 且必须 sticky routing；flagfile 和日志禁止写 secret。
