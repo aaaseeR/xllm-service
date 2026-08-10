@@ -81,16 +81,7 @@ event、allocator 或 kernel。生产资源适配器包装实际 BlockManager le
 | 双 Provider 与执行模式 | Native/vLLM conformance、loopback、稳定拒绝 PASS | Native transfer/hold PASS | 待两种真实 runtime |
 | 日志与性能分析 | schema、presence、无正文 JSON、ring/drop、clock/metric validity PASS | KV predicted/actual 对账 PASS | 待采样开销、告警阈值与集群聚合 |
 
-最终验证命令与精确计数记录在本提交的验证日志和
-[B6-B10 总状态](./B6_B10_STATUS.md)。全量门包括外部 xLLM override、Service pinned
-gitlink、三个生产二进制动态链接、vLLM sidecar pytest、压力重复和 sanitizer 切片。
-B10 初始收口 pin 为 xLLM `6c9d661e`；当前跨仓 pin 已推进到带 Native lifecycle 诊断的
-`8db2f1b5`。后续累计门已增长到 Service 511/511、xLLM 140/140，并新增 V2/V3 离线
-多进程 smoke/stress；该段保留的 xLLM 公共 CPU 门 121/121、
-production-adapter/simulated-HBM 15/15 和 vLLM sidecar 60/60 是 B10 收口时证据。三个
-生产 ELF build/link 通过。完整无设备 xLLM 推理 runtime 仍可能
-受第三方 Mooncake Clang 构建边界影响；公共 CPU contract 通过不冒充完整推理 runtime
-或真实 HBM 证明。
+最终验证命令与精确计数记录在本提交的验证日志和 [B6-B10 总状态](./B6_B10_STATUS.md)。全量门包括外部 xLLM override、Service pinned gitlink、三个生产二进制动态链接、vLLM sidecar pytest、压力重复和 sanitizer 切片。B10 初始收口 pin 为 xLLM `6c9d661e`；当前跨仓 pin 已推进到统一 Service/Engine 日志字段转义契约的 `b2547a20`。后续累计门已增长到 Service 512/512、xLLM 141/141，并新增 V2/V3 离线多进程 smoke/stress；该段保留的 xLLM 公共 CPU 门 121/121、production-adapter/simulated-HBM 15/15 和 vLLM sidecar 60/60 是 B10 收口时证据。三个生产 ELF build/link 通过。完整无设备 xLLM 推理 runtime 仍可能受第三方 Mooncake Clang 构建边界影响；公共 CPU contract 通过不冒充完整推理 runtime 或真实 HBM 证明。
 xLLM attempt/simulated-HBM/RequestEvent 三个目标各重复 100 轮；Service 的 recorder、
 hash/namespace、KV planner/metrics、Provider route 和 flow-control 57 项各重复 100 轮，
 共 5700 次，无失败。同一组 57 项还在 GCC 13 `-fsanitize=address,undefined` 下通过，

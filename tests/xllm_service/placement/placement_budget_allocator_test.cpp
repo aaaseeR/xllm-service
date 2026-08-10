@@ -52,10 +52,9 @@ PlacementRecommendation recommendation(uint32_t previous,
                                        uint32_t desired,
                                        uint32_t safe_required) {
   const PlacementAction action =
-      desired > previous
-          ? PlacementAction::SCALE_UP
-          : (desired < previous ? PlacementAction::SCALE_DOWN
-                                : PlacementAction::NONE);
+      desired > previous ? PlacementAction::SCALE_UP
+                         : (desired < previous ? PlacementAction::SCALE_DOWN
+                                               : PlacementAction::NONE);
   return PlacementRecommendation{
       .status = action == PlacementAction::NONE ? PlacementPlanStatus::HOLD
                                                 : PlacementPlanStatus::OK,
@@ -75,8 +74,7 @@ PlacementBudgetCandidate candidate(const std::string& model,
                                    double risk) {
   return PlacementBudgetCandidate{
       .profile = profile(model),
-      .recommendation =
-          recommendation(previous, desired, safe_required),
+      .recommendation = recommendation(previous, desired, safe_required),
       .priority = priority,
       .slo_risk_score = risk,
   };
@@ -104,10 +102,8 @@ TEST(PlacementBudgetAllocatorTest, ApprovesWithinBudget) {
       allocate_placement_budget(/*max_devices=*/14, candidates);
   EXPECT_EQ(result.status, PlacementBudgetStatus::OK);
   EXPECT_EQ(result.approved_devices, 14u);
-  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas,
-            4u);
-  EXPECT_EQ(find_allocation(result, "model-b").approved_desired_replicas,
-            3u);
+  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas, 4u);
+  EXPECT_EQ(find_allocation(result, "model-b").approved_desired_replicas, 3u);
 }
 
 TEST(PlacementBudgetAllocatorTest, ProtectsRequiredBeforeDiscretionaryGrowth) {
@@ -118,10 +114,8 @@ TEST(PlacementBudgetAllocatorTest, ProtectsRequiredBeforeDiscretionaryGrowth) {
   const PlacementBudgetResult result =
       allocate_placement_budget(/*max_devices=*/14, candidates);
   EXPECT_EQ(result.status, PlacementBudgetStatus::OK);
-  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas,
-            3u);
-  EXPECT_EQ(find_allocation(result, "model-b").approved_desired_replicas,
-            4u);
+  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas, 3u);
+  EXPECT_EQ(find_allocation(result, "model-b").approved_desired_replicas, 4u);
 }
 
 TEST(PlacementBudgetAllocatorTest, RanksDiscretionaryGrowthDeterministically) {
@@ -132,10 +126,8 @@ TEST(PlacementBudgetAllocatorTest, RanksDiscretionaryGrowthDeterministically) {
   const PlacementBudgetResult result =
       allocate_placement_budget(/*max_devices=*/10, candidates);
   EXPECT_EQ(result.status, PlacementBudgetStatus::OK);
-  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas,
-            3u);
-  EXPECT_EQ(find_allocation(result, "model-z").approved_desired_replicas,
-            2u);
+  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas, 3u);
+  EXPECT_EQ(find_allocation(result, "model-z").approved_desired_replicas, 2u);
 }
 
 TEST(PlacementBudgetAllocatorTest, ScaleDownFreesBudgetInSameCycle) {
@@ -146,10 +138,8 @@ TEST(PlacementBudgetAllocatorTest, ScaleDownFreesBudgetInSameCycle) {
   const PlacementBudgetResult result =
       allocate_placement_budget(/*max_devices=*/12, candidates);
   EXPECT_EQ(result.status, PlacementBudgetStatus::OK);
-  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas,
-            3u);
-  EXPECT_EQ(find_allocation(result, "model-b").approved_desired_replicas,
-            3u);
+  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas, 3u);
+  EXPECT_EQ(find_allocation(result, "model-b").approved_desired_replicas, 3u);
 }
 
 TEST(PlacementBudgetAllocatorTest, OvercommitNeverForcesUnsafeScaleDown) {
@@ -160,10 +150,8 @@ TEST(PlacementBudgetAllocatorTest, OvercommitNeverForcesUnsafeScaleDown) {
   const PlacementBudgetResult result =
       allocate_placement_budget(/*max_devices=*/10, candidates);
   EXPECT_EQ(result.status, PlacementBudgetStatus::OVERCOMMITTED);
-  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas,
-            4u);
-  EXPECT_EQ(find_allocation(result, "model-b").approved_desired_replicas,
-            2u);
+  EXPECT_EQ(find_allocation(result, "model-a").approved_desired_replicas, 4u);
+  EXPECT_EQ(find_allocation(result, "model-b").approved_desired_replicas, 2u);
 }
 
 TEST(PlacementBudgetAllocatorTest, ReportsProtectedBudgetShortfall) {
@@ -187,8 +175,7 @@ TEST(PlacementBudgetAllocatorTest, RejectsDuplicateInvalidAndOverflowInput) {
             PlacementBudgetStatus::INVALID_INPUT);
 
   candidates.resize(1);
-  candidates.front().slo_risk_score =
-      std::numeric_limits<double>::infinity();
+  candidates.front().slo_risk_score = std::numeric_limits<double>::infinity();
   EXPECT_EQ(allocate_placement_budget(100, candidates).status,
             PlacementBudgetStatus::INVALID_INPUT);
 

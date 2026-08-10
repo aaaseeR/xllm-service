@@ -30,15 +30,13 @@
       script: |
         python3 -m venv .ci/venv
         .ci/venv/bin/python -m pip install --upgrade pip
-        .ci/venv/bin/python -m pip install pytest requests
+        .ci/venv/bin/python -m pip install pre-commit==4.2.0 pytest requests
         .ci/venv/bin/python -m pip install \
           --index-url https://download.pytorch.org/whl/cpu torch==2.10.0
 
-    - name: Verify changed C++ format
+    - name: Verify repository C++ format
       script: |
-        git diff-tree --no-commit-id --name-only -r -z HEAD -- \
-          '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' | \
-          xargs -0 --no-run-if-empty clang-format --dry-run --Werror
+        .ci/venv/bin/pre-commit run --all-files --show-diff-on-failure
 
     - name: Verify and prepare pinned dependencies
       script: |

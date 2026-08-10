@@ -98,8 +98,7 @@ TEST(PlacementTypesTest, RejectsInvalidAndDelimitedPoolIdentity) {
   value.pool.model_revision = "bad\nmodel";
   EXPECT_FALSE(valid_placement_pool_key(value.pool));
   value = profile();
-  value.pool.profile_digest =
-      std::string(kMaxPlacementIdentityBytes + 1, 'p');
+  value.pool.profile_digest = std::string(kMaxPlacementIdentityBytes + 1, 'p');
   EXPECT_FALSE(valid_placement_pool_key(value.pool));
   value = profile(xllm::proto::ENGINE_ROLE_UNSPECIFIED);
   EXPECT_FALSE(valid_placement_capacity_profile(value));
@@ -148,18 +147,18 @@ TEST(PlacementPlannerTest, ComputesPrefillDecodeAndAggregatedIndependently) {
 
   const PlacementRecommendation prefill = plan_placement_pool(
       planner_config, profile(), input, state(), /*now_ms=*/2000);
-  const PlacementRecommendation decode = plan_placement_pool(
-      planner_config,
-      profile(xllm::proto::ENGINE_ROLE_DECODE),
-      input,
-      state(),
-      /*now_ms=*/2000);
-  const PlacementRecommendation aggregated = plan_placement_pool(
-      planner_config,
-      profile(xllm::proto::ENGINE_ROLE_AGGREGATED),
-      input,
-      state(),
-      /*now_ms=*/2000);
+  const PlacementRecommendation decode =
+      plan_placement_pool(planner_config,
+                          profile(xllm::proto::ENGINE_ROLE_DECODE),
+                          input,
+                          state(),
+                          /*now_ms=*/2000);
+  const PlacementRecommendation aggregated =
+      plan_placement_pool(planner_config,
+                          profile(xllm::proto::ENGINE_ROLE_AGGREGATED),
+                          input,
+                          state(),
+                          /*now_ms=*/2000);
 
   EXPECT_EQ(prefill.safe_required_replicas, 6u);
   EXPECT_EQ(decode.safe_required_replicas, 4u);
@@ -172,8 +171,8 @@ TEST(PlacementPlannerTest, ComputesPrefillDecodeAndAggregatedIndependently) {
 TEST(PlacementPlannerTest, ShortForecastKeepsWarmSpare) {
   PlacementObservation input = observation();
   input.forecast_horizon_ms = 1000;
-  const PlacementRecommendation result = plan_placement_pool(
-      config(), profile(), input, state(), /*now_ms=*/2000);
+  const PlacementRecommendation result =
+      plan_placement_pool(config(), profile(), input, state(), /*now_ms=*/2000);
   EXPECT_EQ(result.warm_spare_replicas, 1u);
   EXPECT_EQ(result.safe_required_replicas, 3u);
 }
@@ -251,8 +250,8 @@ TEST(PlacementPlannerTest, ReplayedObservationIsIdempotent) {
   PlacementPoolState current = state();
   current.last_observation_generation = 7;
   PlacementObservation input = observation(7);
-  const PlacementRecommendation result = plan_placement_pool(
-      config(), profile(), input, current, /*now_ms=*/2000);
+  const PlacementRecommendation result =
+      plan_placement_pool(config(), profile(), input, current, /*now_ms=*/2000);
   EXPECT_EQ(result.status, PlacementPlanStatus::HOLD);
   EXPECT_EQ(result.reason, PlacementReason::REPLAYED_OBSERVATION);
   EXPECT_EQ(result.next_state.last_observation_generation, 7u);
@@ -288,20 +287,20 @@ TEST(PlacementPlannerTest, ScaleDownRequiresSamplesAndStableWindow) {
 TEST(PlacementPlannerTest, OodColdStartAndCooldownBlockScaleDown) {
   PlacementObservation input = observation();
   input.out_of_distribution = true;
-  EXPECT_EQ(plan_placement_pool(
-                config(), profile(), input, state(4), /*now_ms=*/2000)
-                .reason,
-            PlacementReason::OUT_OF_DISTRIBUTION);
+  EXPECT_EQ(
+      plan_placement_pool(config(), profile(), input, state(4), /*now_ms=*/2000)
+          .reason,
+      PlacementReason::OUT_OF_DISTRIBUTION);
 
   PlacementPoolState current = state(4);
   current.low_signal_since_ms = 1000;
   current.last_scale_at_ms = 9000;
   input = observation(2);
   input.observed_at_ms = 10000;
-  EXPECT_EQ(plan_placement_pool(
-                config(), profile(), input, current, /*now_ms=*/11000)
-                .reason,
-            PlacementReason::COOLDOWN);
+  EXPECT_EQ(
+      plan_placement_pool(config(), profile(), input, current, /*now_ms=*/11000)
+          .reason,
+      PlacementReason::COOLDOWN);
 }
 
 TEST(PlacementPlannerTest, ConfirmedStoreCoverageCanUnlockScaleDown) {
@@ -326,8 +325,8 @@ TEST(PlacementPlannerTest, ConfirmedStoreCoverageCanUnlockScaleDown) {
 TEST(PlacementPlannerTest, ClockRegressionFailsClosed) {
   PlacementObservation input = observation();
   input.observed_at_ms = 3000;
-  const PlacementRecommendation result = plan_placement_pool(
-      config(), profile(), input, state(), /*now_ms=*/2000);
+  const PlacementRecommendation result =
+      plan_placement_pool(config(), profile(), input, state(), /*now_ms=*/2000);
   EXPECT_EQ(result.status, PlacementPlanStatus::INVALID_INPUT);
   EXPECT_EQ(result.reason, PlacementReason::CLOCK_REGRESSION);
 }

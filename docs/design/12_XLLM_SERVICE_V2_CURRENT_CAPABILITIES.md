@@ -109,11 +109,7 @@ DECODE/RESOURCE_RELEASE/REQUEST_END`。事件 ring 丢失可见但不能反压�
 
 ## 6. 验证证据与未完成项
 
-本次本地 Linux CPU 门为 Service 511/511；三个 ARM64 Debug serving ELF 均完成编译和
-动态链接检查。xLLM 公共 contract、attempt、registration、Provider wire、RequestEvent
-和 simulated-HBM 测试继续由独立 CPU 门覆盖。精确命令由仓库
-[Coding CI](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/.coding-ci.yml)
-固化。
+本次本地 Linux CPU 门为 Service 512/512；三个 ARM64 Debug serving ELF 均完成编译和动态链接检查。xLLM 公共 contract、attempt、registration、Provider wire、RequestEvent 和 simulated-HBM 测试继续由独立 141/141 CPU 门覆盖。精确命令由仓库 [Coding CI](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/.coding-ci.yml) 固化。
 
 达到生产 `VERIFIED` 仍缺：
 

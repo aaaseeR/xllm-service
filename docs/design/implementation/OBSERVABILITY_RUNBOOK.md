@@ -13,13 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================-->
 
-# xLLM Service V2 Debug、日志与性能分析手册
+# xLLM Service V2/V3 Debug、日志与性能分析手册
 
 ## 1. 使用原则
 
-默认运行保留低基数 bvar、周期集群快照、WARNING/ERROR 和 xLLM 既有日志。需要定位
-单请求或拆解阶段耗时时，在限定实例和时间窗口开启 `--v=1`；完成后关闭。逐请求事件
-会增加 protobuf、ring 和日志量，不应在未做容量评估时全集群长期打开。
+默认运行保留低基数 bvar、周期集群快照、WARNING/ERROR 和 xLLM 既有日志。需要定位单请求或拆解阶段耗时时，在限定实例和时间窗口开启 `--v=1`；完成后关闭。逐请求事件会增加 protobuf、ring 和日志量，不应在未做容量评估时全集群长期打开。
 
 推荐启动参数：
 
@@ -60,6 +58,46 @@ event_seq，因此不能假设 terminal 是物理最后一行。若 event loss �
 正常 shutdown 会先停止 cleanup producer、把未收敛的资源释放 trace 标成 FAILED，再由
 exporter 排空 ring。强制 shutdown 超时或进程被外部杀死时仍可能来不及形成终态；这种
 窗口视为 trace 不完整，必须结合 shutdown、event-loss 与 terminal counter 判断。
+
+### 2.1 V3 Placement 稳定事件与指标目录
+
+V3 Placement 的 metrics label 只使用下面列出的有界 outcome/action；pool、model、profile、engine 和 operation 身份只进入结构化日志，禁止加入 bvar label。`mode` 数值固定为 `0=DISABLED`、`1=SHADOW`、`2=ENFORCED_CREATE_ONLY`、`3=ENFORCED`。
+
+| 指标 | 类型/label | 运维含义 |
+| --- | --- | --- |
+| `xllm_service_v3_placement_leader` | gauge | 当前 Service 是否持有经过 address/incarnation/epoch 校验的 Placement leader 身份 |
+| `xllm_service_v3_placement_mode` | gauge | 当前运行模式；运行时回滚应在一个 loop interval 内反映 |
+| `xllm_service_v3_placement_pools` | gauge | 配置的 pool 数量 |
+| `xllm_service_v3_placement_operations` | gauge | 当前有界 operation ledger 记录总数 |
+| `xllm_service_v3_placement_pending_operations` | gauge | 当前非终态 operation 数 |
+| `xllm_service_v3_placement_timed_out_operations` | gauge | 已跨过 `operation_timeout_ms` 的 operation 数，非零立即告警 |
+| `xllm_service_v3_placement_oldest_pending_operation_age_seconds` | gauge | 最老 pending operation 年龄，用于识别 Query/收敛停滞 |
+| `xllm_service_v3_placement_cycles_total{outcome}` | counter | `FOLLOWER`、`LEADER_FENCE_UNAVAILABLE` 或稳定 controller status 的 cycle 数 |
+| `xllm_service_v3_placement_observations_total{outcome}` | counter | Registry/observation input 构建结果；持续非 `OK` 时不能进入副作用 |
+| `xllm_service_v3_placement_recommendations_total{action}` | counter | `NONE/SCALE_UP/SCALE_DOWN` 推荐分布，用于发现振荡和长期单向偏差 |
+| `xllm_service_v3_placement_operations_total{outcome}` | counter | `ADDED/DRIVEN/COMPACTED/TIMEOUT/UNKNOWN/CONFLICT/FENCED` operation 变化 |
+| `xllm_service_v3_placement_cycle_milliseconds` | histogram | leader 实际执行控制 cycle 的耗时；p99 必须显著低于 loop interval |
+| `xllm_service_v3_placement_operation_duration_milliseconds{action}` | histogram | terminal operation 按 action 分组的端到端耗时 |
+
+| 稳定事件名 | 级别 | 必查字段 |
+| --- | --- | --- |
+| `xllm_service_v3_placement_pool_cycle` | VLOG(1) | provider/model/role/profile、action/reason、previous/next desired、persisted、intents_added |
+| `xllm_service_v3_placement_operation` | VLOG(1) | operation/action、engine/incarnation、status/code、execute/query attempts、duration、timed_out、message |
+| `xllm_service_v3_placement_cycle` | VLOG(1) | status/mode、pool/desired/intent 数、actuator driven/terminal/unknown/compacted |
+| `xllm_service_v3_placement_snapshot` | INFO，每 5 秒 | leader/mode/status、pool/ledger/pending/timed-out、oldest pending、cycle elapsed |
+
+日志身份使用 xLLM `proto/log_value.h` 的单一跨层契约：仅 `[A-Za-z0-9-_.:]` 原样保留，其他 UTF-8 字节统一编码为大写 `%HH`；普通值最多消费 256 个输入字节，孤儿 operation 样本最多 64 个字节，截断后追加 `...`。因此跨 Service/Agent/Engine 查询含 `/`、`~`、空格或非 ASCII 的身份时必须使用同一编码值，不能按原文 grep。
+
+| 现象 | 指标/事件组合 | 动作 |
+| --- | --- | --- |
+| 预期 leader 的 `leader=0` | cycles 中 `LEADER_FENCE_UNAVAILABLE` 增长，缺少正常 snapshot | 核对 master address/incarnation/epoch 和 etcd 可见性；保持 SHADOW/停止副作用 |
+| observation 持续非 `OK` | `observations_total` 非 OK 增长，cycle 为 HOLD/错误 | 检查 Registry freshness、EngineState 和输入容量门，不用缺失事实扩缩容 |
+| pending 与 oldest age 同时增长 | operation 日志长期非终态，query attempts 增长 | 核对 Provider/Gateway Query、command/status 和 Registry 证明；不得新建替代副作用 |
+| `timed_out_operations>0` 或 TIMEOUT 增长 | operation `timed_out=1`，snapshot oldest 超过配置 | 立即告警并回 SHADOW；保留 durable 记录，按 Query/fence 收敛 |
+| UNKNOWN/CONFLICT/FENCED 增长 | operation code 与 observed/expected incarnation 不一致 | 检查响应丢失、并发 leader、旧 incarnation 和 Provider 幂等，不手工改终态 |
+| ledger 接近 `executor.max_records` | operations 增长而 COMPACTED 不增 | 停止放量，检查 terminal retention、孤儿 STATUS/CORRUPT 和 GC；禁止直接删 durable 记录 |
+| recommendation 在 SCALE_UP/DOWN 间振荡 | pool cycle reason、desired 反复变化，cycle latency 正常 | 校准 hold/stabilization/cooldown、forecast 和 cache-loss；先在 SHADOW 重放 |
+| cycle p99 接近或超过 interval | cycle histogram 与 snapshot elapsed 同步升高 | 检查 pool/operation 上界、etcd/部署延迟和 CPU 抢占；不得用缩短 interval 掩盖 |
 
 ## 3. 单请求定位顺序
 

@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/xllm/uuid.h"
+#include "proto/log_value.h"
 
 namespace xllm_service::observability {
 namespace {
@@ -117,6 +118,13 @@ TEST(RequestIdentityTest, InvalidInjectedExecutionUidFallsBackToUuidV7) {
   auto correlation = make_request_correlation(input, generator);
 
   EXPECT_TRUE(llm::is_uuid_v7(correlation.request_uid()));
+}
+
+TEST(RequestIdentityTest, UsesTheCrossLayerLogValueEscapingContract) {
+  EXPECT_EQ(xllm::observability::escape_log_value("engine/a:b~ c\n"),
+            "engine%2Fa:b%7E%20c%0A");
+  EXPECT_EQ(xllm::observability::escape_log_value("abcdef", 3), "abc...");
+  EXPECT_EQ(xllm::observability::escape_log_value("\xe4\xb8\xad"), "%E4%B8%AD");
 }
 
 }  // namespace

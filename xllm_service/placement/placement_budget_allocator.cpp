@@ -25,8 +25,7 @@ limitations under the License.
 namespace xllm_service::placement {
 namespace {
 
-using PoolIdentity =
-    std::tuple<int32_t, std::string, int32_t, std::string>;
+using PoolIdentity = std::tuple<int32_t, std::string, int32_t, std::string>;
 
 struct PendingScaleUp {
   size_t allocation_index = 0;
@@ -101,8 +100,7 @@ bool reserve_replicas(uint64_t available_devices,
     return false;
   }
   const uint64_t capacity = available_devices / devices_per_replica;
-  const uint64_t approved =
-      std::min<uint64_t>(capacity, requested_replicas);
+  const uint64_t approved = std::min<uint64_t>(capacity, requested_replicas);
   *approved_replicas = static_cast<uint32_t>(approved);
   *approved_devices = approved * devices_per_replica;
   return true;
@@ -127,8 +125,7 @@ PlacementBudgetResult allocate_placement_budget(
   uint64_t baseline_devices = 0;
   for (const PlacementBudgetCandidate& candidate : candidates) {
     const PlacementCapacityProfile& profile = candidate.profile;
-    const PlacementRecommendation& recommendation =
-        candidate.recommendation;
+    const PlacementRecommendation& recommendation = candidate.recommendation;
     const PoolIdentity identity = pool_identity(profile.pool);
     if (!valid_placement_capacity_profile(profile) ||
         !valid_recommendation(profile, recommendation) ||
@@ -143,15 +140,13 @@ PlacementBudgetResult allocate_placement_budget(
         recommendation.action == PlacementAction::SCALE_DOWN
             ? recommendation.desired_replicas
             : recommendation.previous_desired_replicas;
-    if (multiply_overflows(baseline_replicas,
-                           profile.devices_per_replica)) {
+    if (multiply_overflows(baseline_replicas, profile.devices_per_replica)) {
       result.status = PlacementBudgetStatus::INVALID_INPUT;
       result.allocations.clear();
       return result;
     }
     const uint64_t pool_baseline_devices =
-        static_cast<uint64_t>(baseline_replicas) *
-        profile.devices_per_replica;
+        static_cast<uint64_t>(baseline_replicas) * profile.devices_per_replica;
     if (add_overflows(baseline_devices, pool_baseline_devices)) {
       result.status = PlacementBudgetStatus::INVALID_INPUT;
       result.allocations.clear();
@@ -162,8 +157,7 @@ PlacementBudgetResult allocate_placement_budget(
     PlacementBudgetAllocation allocation{
         .pool = profile.pool,
         .decision = PlacementBudgetDecision::APPROVED,
-        .previous_desired_replicas =
-            recommendation.previous_desired_replicas,
+        .previous_desired_replicas = recommendation.previous_desired_replicas,
         .requested_desired_replicas = recommendation.desired_replicas,
         .approved_desired_replicas = baseline_replicas,
         .approved_devices = pool_baseline_devices,
@@ -173,10 +167,10 @@ PlacementBudgetResult allocate_placement_budget(
     if (recommendation.action == PlacementAction::SCALE_UP) {
       const uint32_t requested_delta =
           recommendation.desired_replicas - baseline_replicas;
-      const uint32_t protected_target = std::min(
-          recommendation.desired_replicas,
-          std::max(profile.min_replicas,
-                   recommendation.safe_required_replicas));
+      const uint32_t protected_target =
+          std::min(recommendation.desired_replicas,
+                   std::max(profile.min_replicas,
+                            recommendation.safe_required_replicas));
       const uint32_t protected_delta =
           protected_target > baseline_replicas
               ? protected_target - baseline_replicas

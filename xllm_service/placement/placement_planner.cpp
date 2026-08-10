@@ -22,9 +22,8 @@ limitations under the License.
 namespace xllm_service::placement {
 namespace {
 
-PlacementRecommendation invalid_recommendation(
-    const PlacementPoolState& state,
-    PlacementReason reason) {
+PlacementRecommendation invalid_recommendation(const PlacementPoolState& state,
+                                               PlacementReason reason) {
   return PlacementRecommendation{
       .status = PlacementPlanStatus::INVALID_INPUT,
       .action = PlacementAction::NONE,
@@ -107,8 +106,8 @@ bool required_replicas(const PlacementCapacityProfile& profile,
   }
   const uint32_t with_headroom =
       base + profile.failure_headroom_replicas + warm_spare;
-  *required = std::clamp(
-      with_headroom, profile.min_replicas, profile.max_replicas);
+  *required =
+      std::clamp(with_headroom, profile.min_replicas, profile.max_replicas);
   return true;
 }
 
@@ -193,8 +192,7 @@ PlacementRecommendation plan_placement_pool(
   const uint32_t warm_spare =
       observation.forecast_horizon_ms < profile.load_warmup_p99_ms ? 1 : 0;
   uint32_t safe_required = 0;
-  if (!required_replicas(
-          profile, observation, warm_spare, &safe_required)) {
+  if (!required_replicas(profile, observation, warm_spare, &safe_required)) {
     return invalid_recommendation(state, PlacementReason::INVALID_OBSERVATION);
   }
 
@@ -212,9 +210,8 @@ PlacementRecommendation plan_placement_pool(
                                  safe_required,
                                  warm_spare);
     }
-    if (!elapsed_at_least(now_ms,
-                          next_state.high_signal_since_ms,
-                          config.scale_up_hold_ms)) {
+    if (!elapsed_at_least(
+            now_ms, next_state.high_signal_since_ms, config.scale_up_hold_ms)) {
       return hold_recommendation(state,
                                  next_state,
                                  PlacementReason::SCALE_UP_HOLD,
@@ -232,12 +229,11 @@ PlacementRecommendation plan_placement_pool(
     const uint32_t requested_target = std::max(safe_required, reactive_target);
     const uint32_t step_target =
         state.desired_replicas >
-                std::numeric_limits<uint32_t>::max() -
-                    config.max_scale_up_step
+                std::numeric_limits<uint32_t>::max() - config.max_scale_up_step
             ? std::numeric_limits<uint32_t>::max()
             : state.desired_replicas + config.max_scale_up_step;
-    const uint32_t desired = std::min(
-        {requested_target, step_target, profile.max_replicas});
+    const uint32_t desired =
+        std::min({requested_target, step_target, profile.max_replicas});
     next_state.desired_replicas = desired;
     next_state.high_signal_since_ms = 0;
     next_state.last_scale_at_ms = now_ms;
@@ -289,11 +285,8 @@ PlacementRecommendation plan_placement_pool(
   }
   if (!low_load(config, profile, observation)) {
     next_state.low_signal_since_ms = 0;
-    return hold_recommendation(state,
-                               next_state,
-                               PlacementReason::STABLE,
-                               safe_required,
-                               warm_spare);
+    return hold_recommendation(
+        state, next_state, PlacementReason::STABLE, safe_required, warm_spare);
   }
   if (next_state.low_signal_since_ms == 0) {
     next_state.low_signal_since_ms = now_ms;
@@ -308,8 +301,7 @@ PlacementRecommendation plan_placement_pool(
                                warm_spare);
   }
   if (state.last_scale_at_ms != 0 &&
-      !elapsed_at_least(
-          now_ms, state.last_scale_at_ms, config.cooldown_ms)) {
+      !elapsed_at_least(now_ms, state.last_scale_at_ms, config.cooldown_ms)) {
     return hold_recommendation(state,
                                next_state,
                                PlacementReason::COOLDOWN,
@@ -318,9 +310,9 @@ PlacementRecommendation plan_placement_pool(
   }
 
   constexpr double kMillisecondsPerHour = 3600000.0;
-  const double instance_saving = profile.instance_cost_per_hour *
-                                 static_cast<double>(config.economic_horizon_ms) /
-                                 kMillisecondsPerHour;
+  const double instance_saving =
+      profile.instance_cost_per_hour *
+      static_cast<double>(config.economic_horizon_ms) / kMillisecondsPerHour;
   const double warmup_cost = profile.instance_cost_per_hour *
                              static_cast<double>(profile.load_warmup_p99_ms) /
                              kMillisecondsPerHour;
@@ -342,8 +334,8 @@ PlacementRecommendation plan_placement_pool(
       state.desired_replicas > config.max_scale_down_step
           ? state.desired_replicas - config.max_scale_down_step
           : 0;
-  const uint32_t desired = std::max(
-      {safe_required, step_target, profile.min_replicas});
+  const uint32_t desired =
+      std::max({safe_required, step_target, profile.min_replicas});
   next_state.desired_replicas = desired;
   next_state.low_signal_since_ms = 0;
   next_state.last_scale_at_ms = now_ms;

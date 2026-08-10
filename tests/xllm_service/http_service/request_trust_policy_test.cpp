@@ -25,10 +25,9 @@ namespace {
 constexpr char kRequestUid[] = "018f47b2-c198-7cc8-98d7-503f58e2a612";
 
 KVSessionTokenCodec codec() {
-  return *KVSessionTokenCodec::from_secrets(
-      std::string(32, 's'),
-      /*previous_secret=*/"",
-      /*token_ttl_seconds=*/3600);
+  return *KVSessionTokenCodec::from_secrets(std::string(32, 's'),
+                                            /*previous_secret=*/"",
+                                            /*token_ttl_seconds=*/3600);
 }
 
 TEST(RequestTrustPolicyTest, AnonymousSessionIsSignedAndReusable) {
@@ -111,20 +110,17 @@ TEST(RequestTrustPolicyTest, PriorityRequiresTrustedTenantIdentity) {
 }
 
 TEST(RequestTrustPolicyTest, SecretAndTokenBoundariesFailClosed) {
-  EXPECT_FALSE(KVSessionTokenCodec::from_secrets(
-                   std::string(31, 's'),
-                   "",
-                   /*token_ttl_seconds=*/3600)
+  EXPECT_FALSE(KVSessionTokenCodec::from_secrets(std::string(31, 's'),
+                                                 "",
+                                                 /*token_ttl_seconds=*/3600)
                    .has_value());
-  EXPECT_FALSE(KVSessionTokenCodec::from_secrets(
-                   std::string(257, 's'),
-                   "",
-                   /*token_ttl_seconds=*/3600)
+  EXPECT_FALSE(KVSessionTokenCodec::from_secrets(std::string(257, 's'),
+                                                 "",
+                                                 /*token_ttl_seconds=*/3600)
                    .has_value());
-  EXPECT_FALSE(KVSessionTokenCodec::from_secrets(
-                   std::string(32, 's'),
-                   "",
-                   /*token_ttl_seconds=*/0)
+  EXPECT_FALSE(KVSessionTokenCodec::from_secrets(std::string(32, 's'),
+                                                 "",
+                                                 /*token_ttl_seconds=*/0)
                    .has_value());
   EXPECT_FALSE(KVSessionTokenCodec::from_secrets(
                    std::string(32, 's'),
@@ -139,10 +135,9 @@ TEST(RequestTrustPolicyTest, SecretAndTokenBoundariesFailClosed) {
 TEST(RequestTrustPolicyTest, SessionTokenExpiresAndSupportsKeyRotation) {
   constexpr uint64_t kIssuedAt = 1000;
   const KVSessionTokenCodec old_signer =
-      *KVSessionTokenCodec::from_secrets(
-          std::string(32, 'o'),
-          "",
-          /*token_ttl_seconds=*/3600);
+      *KVSessionTokenCodec::from_secrets(std::string(32, 'o'),
+                                         "",
+                                         /*token_ttl_seconds=*/3600);
   const std::string token = old_signer.issue_at(kRequestUid, kIssuedAt);
   ASSERT_FALSE(token.empty());
 
@@ -152,11 +147,11 @@ TEST(RequestTrustPolicyTest, SessionTokenExpiresAndSupportsKeyRotation) {
                                          /*token_ttl_seconds=*/3600);
   EXPECT_EQ(rotated.verify_at(token, kIssuedAt + 3599), kRequestUid);
   EXPECT_FALSE(rotated.verify_at(token, kIssuedAt + 3601).has_value());
-  EXPECT_FALSE(rotated.verify_at(token,
-                                 kIssuedAt -
-                                     KVSessionTokenCodec::kMaxClockSkewSeconds -
-                                     1)
-                   .has_value());
+  EXPECT_FALSE(
+      rotated
+          .verify_at(token,
+                     kIssuedAt - KVSessionTokenCodec::kMaxClockSkewSeconds - 1)
+          .has_value());
 }
 
 TEST(RequestTrustPolicyTest, StandardSdkUserIsBoundToAuthenticatedClient) {

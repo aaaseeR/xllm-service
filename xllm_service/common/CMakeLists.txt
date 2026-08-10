@@ -33,6 +33,8 @@ cc_library(
     timer.cpp
     metrics.cpp
     xllm/uuid.cpp
+  INCLUDES
+    ${CMAKE_SOURCE_DIR}/third_party/xllm/xllm
   DEPS
     absl::random_random
     absl::strings

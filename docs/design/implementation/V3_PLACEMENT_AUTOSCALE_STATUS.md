@@ -58,6 +58,10 @@ limitations under the License.
 - `placement_mode_override` 支持在一个 loop interval 内切回 SHADOW；Router 不等待慢环。
 - 日志使用稳定 stage/reason/code，指标 label 保持低基数；pool/operation 细节进入 VLOG。
 
+## Placement 容器选型决策
+
+`xllm_service/placement/` 有意统一使用 `std::map/std::set`，包括当前只做查找或去重的位置。Placement 是秒到分钟级有界慢环，`max_pools`、`max_models`、`max_operations_per_pool` 和 operation ledger 都有硬上界；这里优先保证相同 observation/desired/ledger 输入在不同进程、编译器和重启恢复后产生稳定的 pool、victim、intent 与副作用遍历顺序。统一使用有序容器还防止纯查找代码后续增加迭代时无意引入 `unordered_*` 非确定性。该策略是对通用“键序无关时优先 unordered”规则的模块级有意例外；若未来 profiling 证明 O(log n) 成为慢环瓶颈，替换必须同时提供显式排序、确定性重放与故障恢复回归测试，不能直接依赖 unordered iteration。
+
 ## CPU 验证门
 
 | 验证项 | 命令/测试 | 结果 |
@@ -72,8 +76,8 @@ limitations under the License.
 | 离线多进程集群 | `online_cluster_stress.py --scenario v3 --mode smoke/stress` | PASS；1→3→1、响应丢失、Drain race、Leader SIGKILL、Torch HBM 清零 |
 | V2 HBM/KV 与 flow 回归 | KV Shadow、flow control 既有 CPU suite | PASS |
 | Serving 链接门 | master、RPC、HTTP 三个 serving binary | PASS |
-| 全仓 Service CPU | 沙箱 `ctest --test-dir build/local-arm64-Debug-xllm-override` | 511/511 PASS |
-| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | 140/140 PASS |
+| 全仓 Service CPU | 沙箱 `xllm-dev service-test ... native Debug` | 512/512 PASS |
+| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | 141/141 PASS |
 | xLLM simulated HBM/allocator | `simulated_hbm_test` | 15/15 PASS |
 
 ## 线上前不可误报的边界

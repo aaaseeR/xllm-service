@@ -43,8 +43,7 @@ bool valid_placement_identity(const std::string& value) {
 bool valid_placement_pool_key(const PlacementPoolKey& key) {
   return xllm::proto::ProviderId_IsValid(key.provider_id) &&
          key.provider_id != xllm::proto::PROVIDER_ID_UNSPECIFIED &&
-         valid_role(key.role) &&
-         valid_placement_identity(key.model_revision) &&
+         valid_role(key.role) && valid_placement_identity(key.model_revision) &&
          valid_placement_identity(key.profile_digest);
 }
 
@@ -52,19 +51,17 @@ bool placement_pool_keys_equal(const PlacementPoolKey& left,
                                const PlacementPoolKey& right) {
   return left.provider_id == right.provider_id &&
          left.model_revision == right.model_revision &&
-         left.role == right.role &&
-         left.profile_digest == right.profile_digest;
+         left.role == right.role && left.profile_digest == right.profile_digest;
 }
 
-bool valid_placement_capacity_profile(
-    const PlacementCapacityProfile& profile) {
+bool valid_placement_capacity_profile(const PlacementCapacityProfile& profile) {
   if (!valid_placement_pool_key(profile.pool) ||
       profile.devices_per_replica == 0 ||
       !finite_nonnegative(profile.instance_cost_per_hour) ||
       profile.load_warmup_p99_ms == 0 ||
       !std::isfinite(profile.target_utilization) ||
-      profile.target_utilization <= 0.0 ||
-      profile.target_utilization > 1.0 || profile.min_replicas == 0 ||
+      profile.target_utilization <= 0.0 || profile.target_utilization > 1.0 ||
+      profile.min_replicas == 0 ||
       profile.max_replicas < profile.min_replicas ||
       profile.failure_headroom_replicas > profile.max_replicas ||
       !finite_nonnegative(profile.ttft_slo_ms) ||
@@ -88,9 +85,8 @@ bool valid_placement_capacity_profile(
 
 bool valid_placement_planner_config(const PlacementPlannerConfig& config) {
   return config.scale_down_stabilization_ms > 0 && config.cooldown_ms > 0 &&
-         config.economic_horizon_ms > 0 &&
-         config.min_scale_down_samples > 0 && config.max_scale_up_step > 0 &&
-         config.max_scale_down_step > 0 &&
+         config.economic_horizon_ms > 0 && config.min_scale_down_samples > 0 &&
+         config.max_scale_up_step > 0 && config.max_scale_down_step > 0 &&
          finite_nonnegative(config.queue_low_watermark) &&
          finite_nonnegative(config.queue_high_watermark) &&
          config.queue_low_watermark < config.queue_high_watermark &&

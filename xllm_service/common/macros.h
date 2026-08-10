@@ -19,25 +19,25 @@ limitations under the License.
 #include <utility>
 
 namespace xllm_service {
-#define XLLM_SERVICE_PROPERTY(T, property)                                   \
- public:                                                                     \
-  [[nodiscard]] const T& property() const& noexcept { return property##_; }  \
-  [[nodiscard]] T& property()& noexcept { return property##_; }              \
-  [[nodiscard]] T&& property()&& noexcept { return std::move(property##_); } \
-                                                                             \
-  auto property(const T& value)& -> decltype(*this) {                        \
-    property##_ = value;                                                     \
-    return *this;                                                            \
-  }                                                                          \
-                                                                             \
-  auto property(T&& value)& -> decltype(*this) {                             \
-    property##_ = std::move(value);                                          \
-    return *this;                                                            \
-  }                                                                          \
-                                                                             \
-  void property(const T& value)&& = delete;                                  \
-  void property(T&& value)&& = delete;                                       \
-                                                                             \
+#define XLLM_SERVICE_PROPERTY(T, property)                                    \
+ public:                                                                      \
+  [[nodiscard]] const T& property() const& noexcept { return property##_; }   \
+  [[nodiscard]] T& property() & noexcept { return property##_; }              \
+  [[nodiscard]] T&& property() && noexcept { return std::move(property##_); } \
+                                                                              \
+  auto property(const T& value) & -> decltype(*this) {                        \
+    property##_ = value;                                                      \
+    return *this;                                                             \
+  }                                                                           \
+                                                                              \
+  auto property(T&& value) & -> decltype(*this) {                             \
+    property##_ = std::move(value);                                           \
+    return *this;                                                             \
+  }                                                                           \
+                                                                              \
+  void property(const T& value) && = delete;                                  \
+  void property(T&& value) && = delete;                                       \
+                                                                              \
   T property##_
 
 #define XLLM_SERVICE_UNUSED_PARAMETER(x) ((void)(x))

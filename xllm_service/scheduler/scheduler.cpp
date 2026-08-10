@@ -38,6 +38,7 @@ limitations under the License.
 #include "loadbalance_policy/cache_aware_routing.h"
 #include "loadbalance_policy/round_robin.h"
 #include "loadbalance_policy/slo_aware_policy.h"
+#include "proto/log_value.h"
 #include "provider/attempt_control_client.h"
 #include "provider/execution_plan_builder.h"
 #include "provider/native_execution_mode_selector.h"
@@ -67,28 +68,6 @@ bool valid_log_token(const std::string& value) {
                   character == '_' || character == '.' || character == ':' ||
                   character == '/' || character == '@' || character == '+';
          });
-}
-
-std::string escape_log_value(const std::string& value) {
-  constexpr char kHex[] = "0123456789ABCDEF";
-  std::string escaped;
-  escaped.reserve(value.size());
-  for (const unsigned char character : value) {
-    const bool unreserved = (character >= 'a' && character <= 'z') ||
-                            (character >= 'A' && character <= 'Z') ||
-                            (character >= '0' && character <= '9') ||
-                            character == '-' || character == '_' ||
-                            character == '.' || character == '~' ||
-                            character == ':' || character == '/';
-    if (unreserved) {
-      escaped.push_back(static_cast<char>(character));
-      continue;
-    }
-    escaped.push_back('%');
-    escaped.push_back(kHex[character >> 4]);
-    escaped.push_back(kHex[character & 0x0f]);
-  }
-  return escaped;
 }
 
 uint64_t monotonic_time_ms() {
@@ -2013,10 +1992,13 @@ void Scheduler::run_placement_controller() {
                 xllm_service_v3_placement_recommendations_total,
                 placement_action_name(pool.recommendation.action));
             VLOG(1) << "xllm_service_v3_placement_pool_cycle provider="
-                    << static_cast<int32_t>(pool.pool.provider_id)
-                    << " model=" << escape_log_value(pool.pool.model_revision)
+                    << static_cast<int32_t>(pool.pool.provider_id) << " model="
+                    << xllm::observability::escape_log_value(
+                           pool.pool.model_revision)
                     << " role=" << static_cast<int32_t>(pool.pool.role)
-                    << " profile=" << escape_log_value(pool.pool.profile_digest)
+                    << " profile="
+                    << xllm::observability::escape_log_value(
+                           pool.pool.profile_digest)
                     << " action="
                     << placement_action_name(pool.recommendation.action)
                     << " reason="
@@ -2082,21 +2064,26 @@ void Scheduler::run_placement_controller() {
                   static_cast<int64_t>(event.duration_ms));
             }
             VLOG(1) << "xllm_service_v3_placement_operation operation_id="
-                    << escape_log_value(event.operation_id) << " action="
+                    << xllm::observability::escape_log_value(event.operation_id)
+                    << " action="
                     << placement::placement_operation_action_name(event.action)
-                    << " engine_uid=" << escape_log_value(event.engine_uid)
+                    << " engine_uid="
+                    << xllm::observability::escape_log_value(event.engine_uid)
                     << " expected_incarnation="
-                    << escape_log_value(event.expected_incarnation)
+                    << xllm::observability::escape_log_value(
+                           event.expected_incarnation)
                     << " observed_incarnation="
-                    << escape_log_value(event.engine_incarnation) << " status="
+                    << xllm::observability::escape_log_value(
+                           event.engine_incarnation)
+                    << " status="
                     << placement::placement_operation_status_name(event.status)
                     << " code="
                     << placement::placement_actuator_code_name(event.code)
                     << " execute_attempts=" << event.execute_attempts
                     << " query_attempts=" << event.query_attempts
                     << " duration_ms=" << event.duration_ms
-                    << " timed_out=" << event.timed_out
-                    << " message=" << escape_log_value(event.message);
+                    << " timed_out=" << event.timed_out << " message="
+                    << xllm::observability::escape_log_value(event.message);
           }
           if (result.actuator.timed_out > 0) {
             LOG_EVERY_N(ERROR, 10)

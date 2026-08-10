@@ -23,7 +23,7 @@ namespace xllm_service {
 class RoundRobin final : public LoadBalancePolicy {
  public:
   RoundRobin(std::shared_ptr<InstanceMgr> instance_mgr)
-      : LoadBalancePolicy(instance_mgr){};
+      : LoadBalancePolicy(instance_mgr) {};
 
   virtual ~RoundRobin() = default;
 

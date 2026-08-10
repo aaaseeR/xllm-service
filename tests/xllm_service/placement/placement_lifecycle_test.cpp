@@ -56,29 +56,24 @@ PlacementTransitionResult apply(const PlacementLifecycleRecord& record,
                                 uint64_t desired_generation,
                                 uint64_t observed_at_ms,
                                 const std::string& incarnation = "inc-1") {
-  return apply_placement_lifecycle_event(
-      record,
-      command(event,
-              operation_id,
-              desired_generation,
-              observed_at_ms,
-              incarnation));
+  return apply_placement_lifecycle_event(record,
+                                         command(event,
+                                                 operation_id,
+                                                 desired_generation,
+                                                 observed_at_ms,
+                                                 incarnation));
 }
 
 PlacementLifecycleRecord ready_record() {
   PlacementLifecycleRecord record = absent_record();
-  record = apply(record,
-                 PlacementLifecycleEvent::CREATE_ACCEPTED,
-                 "create-1",
-                 1,
-                 1000)
-               .record;
-  record = apply(record,
-                 PlacementLifecycleEvent::LOAD_COMPLETED,
-                 "create-1",
-                 1,
-                 2000)
-               .record;
+  record =
+      apply(
+          record, PlacementLifecycleEvent::CREATE_ACCEPTED, "create-1", 1, 1000)
+          .record;
+  record =
+      apply(
+          record, PlacementLifecycleEvent::LOAD_COMPLETED, "create-1", 1, 2000)
+          .record;
   return apply(record,
                PlacementLifecycleEvent::WARMUP_COMPLETED,
                "create-1",
@@ -92,12 +87,12 @@ TEST(PlacementLifecycleTest, AppliesFullCreateAndDrainLifecycle) {
   ASSERT_EQ(record.state, PlacementLifecycleState::READY);
   EXPECT_EQ(record.state_generation, 3u);
 
-  PlacementTransitionResult result = apply(
-      record,
-      PlacementLifecycleEvent::BEGIN_DRAIN_ACCEPTED,
-      "drain-2",
-      2,
-      4000);
+  PlacementTransitionResult result =
+      apply(record,
+            PlacementLifecycleEvent::BEGIN_DRAIN_ACCEPTED,
+            "drain-2",
+            2,
+            4000);
   ASSERT_EQ(result.status, PlacementTransitionStatus::APPLIED);
   EXPECT_EQ(result.record.state, PlacementLifecycleState::DRAINING);
   EXPECT_FALSE(result.record.drain_committed);
@@ -123,22 +118,18 @@ TEST(PlacementLifecycleTest, AppliesFullCreateAndDrainLifecycle) {
 TEST(PlacementLifecycleTest, ReplaysAnyAppliedPhaseWithoutRegression) {
   PlacementLifecycleRecord record = ready_record();
   const PlacementTransitionResult replay = apply(
-      record,
-      PlacementLifecycleEvent::CREATE_ACCEPTED,
-      "create-1",
-      1,
-      1000);
+      record, PlacementLifecycleEvent::CREATE_ACCEPTED, "create-1", 1, 1000);
   EXPECT_EQ(replay.status, PlacementTransitionStatus::REPLAYED);
   EXPECT_EQ(replay.record.state, PlacementLifecycleState::READY);
   EXPECT_EQ(replay.record.state_generation, 3u);
 
-  const PlacementTransitionResult stale_incarnation = apply(
-      record,
-      PlacementLifecycleEvent::CREATE_ACCEPTED,
-      "create-1",
-      1,
-      1000,
-      "stale-inc");
+  const PlacementTransitionResult stale_incarnation =
+      apply(record,
+            PlacementLifecycleEvent::CREATE_ACCEPTED,
+            "create-1",
+            1,
+            1000,
+            "stale-inc");
   EXPECT_EQ(stale_incarnation.status, PlacementTransitionStatus::FENCED);
 }
 
@@ -150,12 +141,12 @@ TEST(PlacementLifecycleTest, CancelDrainRequiresNewGenerationBeforeCommit) {
                  2,
                  4000)
                .record;
-  const PlacementTransitionResult cancel = apply(
-      record,
-      PlacementLifecycleEvent::CANCEL_DRAIN_ACCEPTED,
-      "cancel-3",
-      3,
-      5000);
+  const PlacementTransitionResult cancel =
+      apply(record,
+            PlacementLifecycleEvent::CANCEL_DRAIN_ACCEPTED,
+            "cancel-3",
+            3,
+            5000);
   EXPECT_EQ(cancel.status, PlacementTransitionStatus::APPLIED);
   EXPECT_EQ(cancel.record.state, PlacementLifecycleState::READY);
   EXPECT_FALSE(cancel.record.drain_committed);
@@ -169,18 +160,16 @@ TEST(PlacementLifecycleTest, DrainCommitCannotReturnToReady) {
                  2,
                  4000)
                .record;
-  record = apply(record,
-                 PlacementLifecycleEvent::DRAIN_COMPLETED,
-                 "drain-2",
-                 2,
-                 5000)
-               .record;
-  const PlacementTransitionResult cancel = apply(
-      record,
-      PlacementLifecycleEvent::CANCEL_DRAIN_ACCEPTED,
-      "cancel-3",
-      3,
-      6000);
+  record =
+      apply(
+          record, PlacementLifecycleEvent::DRAIN_COMPLETED, "drain-2", 2, 5000)
+          .record;
+  const PlacementTransitionResult cancel =
+      apply(record,
+            PlacementLifecycleEvent::CANCEL_DRAIN_ACCEPTED,
+            "cancel-3",
+            3,
+            6000);
   EXPECT_EQ(cancel.status, PlacementTransitionStatus::INVALID_TRANSITION);
   EXPECT_EQ(cancel.record.state, PlacementLifecycleState::UNLOADING);
 }
@@ -193,12 +182,10 @@ TEST(PlacementLifecycleTest, NewCreateRequiresNewIncarnation) {
                  2,
                  4000)
                .record;
-  record = apply(record,
-                 PlacementLifecycleEvent::DRAIN_COMPLETED,
-                 "drain-2",
-                 2,
-                 5000)
-               .record;
+  record =
+      apply(
+          record, PlacementLifecycleEvent::DRAIN_COMPLETED, "drain-2", 2, 5000)
+          .record;
   record = apply(record,
                  PlacementLifecycleEvent::TERMINATE_COMPLETED,
                  "drain-2",
@@ -206,20 +193,18 @@ TEST(PlacementLifecycleTest, NewCreateRequiresNewIncarnation) {
                  6000)
                .record;
 
-  EXPECT_EQ(apply(record,
-                  PlacementLifecycleEvent::CREATE_ACCEPTED,
-                  "create-3",
-                  3,
-                  7000)
-                .status,
-            PlacementTransitionStatus::FENCED);
-  const PlacementTransitionResult recreated = apply(
-      record,
-      PlacementLifecycleEvent::CREATE_ACCEPTED,
-      "create-3",
-      3,
-      7000,
-      "inc-2");
+  EXPECT_EQ(
+      apply(
+          record, PlacementLifecycleEvent::CREATE_ACCEPTED, "create-3", 3, 7000)
+          .status,
+      PlacementTransitionStatus::FENCED);
+  const PlacementTransitionResult recreated =
+      apply(record,
+            PlacementLifecycleEvent::CREATE_ACCEPTED,
+            "create-3",
+            3,
+            7000,
+            "inc-2");
   EXPECT_EQ(recreated.status, PlacementTransitionStatus::APPLIED);
   EXPECT_EQ(recreated.record.state, PlacementLifecycleState::LOADING);
   EXPECT_EQ(recreated.record.engine_incarnation, "inc-2");
@@ -227,27 +212,21 @@ TEST(PlacementLifecycleTest, NewCreateRequiresNewIncarnation) {
 
 TEST(PlacementLifecycleTest, FailureRequiresExplicitCleanupProof) {
   PlacementLifecycleRecord record = absent_record();
-  record = apply(record,
-                 PlacementLifecycleEvent::CREATE_ACCEPTED,
-                 "create-1",
-                 1,
-                 1000)
-               .record;
+  record =
+      apply(
+          record, PlacementLifecycleEvent::CREATE_ACCEPTED, "create-1", 1, 1000)
+          .record;
   const PlacementTransitionResult failed = apply(
-      record,
-      PlacementLifecycleEvent::OPERATION_FAILED,
-      "create-1",
-      1,
-      2000);
+      record, PlacementLifecycleEvent::OPERATION_FAILED, "create-1", 1, 2000);
   ASSERT_EQ(failed.status, PlacementTransitionStatus::APPLIED);
   EXPECT_EQ(failed.record.state, PlacementLifecycleState::FAILED);
 
-  const PlacementTransitionResult cleaned = apply(
-      failed.record,
-      PlacementLifecycleEvent::CLEANUP_COMPLETED,
-      "cleanup-2",
-      2,
-      3000);
+  const PlacementTransitionResult cleaned =
+      apply(failed.record,
+            PlacementLifecycleEvent::CLEANUP_COMPLETED,
+            "cleanup-2",
+            2,
+            3000);
   EXPECT_EQ(cleaned.status, PlacementTransitionStatus::APPLIED);
   EXPECT_EQ(cleaned.record.state, PlacementLifecycleState::ABSENT);
 }

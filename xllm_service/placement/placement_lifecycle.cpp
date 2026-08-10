@@ -171,17 +171,15 @@ bool valid_placement_lifecycle_state(PlacementLifecycleState state) {
   return valid_state(state);
 }
 
-bool valid_placement_lifecycle_record(
-    const PlacementLifecycleRecord& record) {
+bool valid_placement_lifecycle_record(const PlacementLifecycleRecord& record) {
   if (!valid_placement_pool_key(record.pool) || !valid_state(record.state) ||
       record.state_generation == std::numeric_limits<uint64_t>::max()) {
     return false;
   }
-  const bool has_engine = !record.engine_uid.empty() ||
-                          !record.engine_incarnation.empty();
-  if (has_engine &&
-      (!valid_placement_identity(record.engine_uid) ||
-       !valid_placement_identity(record.engine_incarnation))) {
+  const bool has_engine =
+      !record.engine_uid.empty() || !record.engine_incarnation.empty();
+  if (has_engine && (!valid_placement_identity(record.engine_uid) ||
+                     !valid_placement_identity(record.engine_incarnation))) {
     return false;
   }
   const bool has_operation = !record.operation_id.empty();
@@ -257,8 +255,7 @@ PlacementTransitionResult apply_placement_lifecycle_event(
           record.state, command.event, record.drain_committed, &next_state)) {
     return result(PlacementTransitionStatus::INVALID_TRANSITION, record);
   }
-  if (record.state_generation ==
-      std::numeric_limits<uint64_t>::max() - 1) {
+  if (record.state_generation == std::numeric_limits<uint64_t>::max() - 1) {
     return result(PlacementTransitionStatus::GENERATION_EXHAUSTED, record);
   }
 
@@ -274,8 +271,7 @@ PlacementTransitionResult apply_placement_lifecycle_event(
     next.drain_committed = false;
   } else if (command.event == PlacementLifecycleEvent::DRAIN_COMPLETED) {
     next.drain_committed = true;
-  } else if (command.event ==
-             PlacementLifecycleEvent::CANCEL_DRAIN_ACCEPTED) {
+  } else if (command.event == PlacementLifecycleEvent::CANCEL_DRAIN_ACCEPTED) {
     next.drain_committed = false;
   }
   next.state = next_state;
@@ -305,8 +301,7 @@ const char* placement_lifecycle_state_name(PlacementLifecycleState state) {
   return "UNKNOWN";
 }
 
-const char* placement_transition_status_name(
-    PlacementTransitionStatus status) {
+const char* placement_transition_status_name(PlacementTransitionStatus status) {
   switch (status) {
     case PlacementTransitionStatus::APPLIED:
       return "APPLIED";

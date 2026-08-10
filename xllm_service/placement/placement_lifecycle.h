@@ -69,8 +69,7 @@ struct PlacementLifecycleRecord {
 };
 
 struct PlacementLifecycleCommand {
-  PlacementLifecycleEvent event =
-      PlacementLifecycleEvent::CREATE_ACCEPTED;
+  PlacementLifecycleEvent event = PlacementLifecycleEvent::CREATE_ACCEPTED;
   std::string engine_uid;
   std::string engine_incarnation;
   std::string operation_id;
@@ -79,13 +78,11 @@ struct PlacementLifecycleCommand {
 };
 
 struct PlacementTransitionResult {
-  PlacementTransitionStatus status =
-      PlacementTransitionStatus::INVALID_INPUT;
+  PlacementTransitionStatus status = PlacementTransitionStatus::INVALID_INPUT;
   PlacementLifecycleRecord record;
 };
 
-bool valid_placement_lifecycle_record(
-    const PlacementLifecycleRecord& record);
+bool valid_placement_lifecycle_record(const PlacementLifecycleRecord& record);
 
 bool valid_placement_lifecycle_state(PlacementLifecycleState state);
 
@@ -95,7 +92,6 @@ PlacementTransitionResult apply_placement_lifecycle_event(
 
 const char* placement_lifecycle_state_name(PlacementLifecycleState state);
 
-const char* placement_transition_status_name(
-    PlacementTransitionStatus status);
+const char* placement_transition_status_name(PlacementTransitionStatus status);
 
 }  // namespace xllm_service::placement

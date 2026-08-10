@@ -44,8 +44,7 @@ struct PlacementBudgetCandidate {
 
 struct PlacementBudgetAllocation {
   PlacementPoolKey pool;
-  PlacementBudgetDecision decision =
-      PlacementBudgetDecision::BUDGET_BLOCKED;
+  PlacementBudgetDecision decision = PlacementBudgetDecision::BUDGET_BLOCKED;
   uint32_t previous_desired_replicas = 0;
   uint32_t requested_desired_replicas = 0;
   uint32_t approved_desired_replicas = 0;

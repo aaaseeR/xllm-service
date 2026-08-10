@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "http_service/request_trust_policy.h"
 
+#include <glog/logging.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -27,8 +28,6 @@ limitations under the License.
 #include <exception>
 #include <limits>
 #include <string_view>
-
-#include <glog/logging.h>
 
 namespace xllm_service {
 namespace {
@@ -109,9 +108,8 @@ std::optional<KVSessionTokenCodec> KVSessionTokenCodec::from_secrets(
       (!previous_secret.empty() && !valid_secret(previous_secret))) {
     return std::nullopt;
   }
-  return KVSessionTokenCodec(std::move(active_secret),
-                             std::move(previous_secret),
-                             token_ttl_seconds);
+  return KVSessionTokenCodec(
+      std::move(active_secret), std::move(previous_secret), token_ttl_seconds);
 }
 
 KVSessionTokenCodec KVSessionTokenCodec::random(uint64_t token_ttl_seconds) {
@@ -126,9 +124,8 @@ KVSessionTokenCodec KVSessionTokenCodec::random(uint64_t token_ttl_seconds) {
       token_ttl_seconds);
 }
 
-std::string KVSessionTokenCodec::signature(
-    const std::string& secret,
-    const std::string& payload) const {
+std::string KVSessionTokenCodec::signature(const std::string& secret,
+                                           const std::string& payload) const {
   if (!valid_secret(secret) ||
       secret.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
     return "";
@@ -157,9 +154,9 @@ std::string KVSessionTokenCodec::issue_at(const std::string& session_id,
   if (!valid_session_id(session_id) || issued_at_seconds == 0) {
     return "";
   }
-  const std::string signed_payload =
-      std::string(kTokenPrefix) + std::to_string(issued_at_seconds) + "." +
-      session_id;
+  const std::string signed_payload = std::string(kTokenPrefix) +
+                                     std::to_string(issued_at_seconds) + "." +
+                                     session_id;
   const std::string mac = signature(active_secret_, signed_payload);
   if (mac.empty()) {
     return "";
@@ -176,10 +173,9 @@ std::optional<std::string> KVSessionTokenCodec::verify_at(
     const std::string& token,
     uint64_t now_seconds) const {
   if (token.size() < kTokenPrefix.size() ||
-      token.compare(0,
-                    kTokenPrefix.size(),
-                    kTokenPrefix.data(),
-                    kTokenPrefix.size()) != 0) {
+      token.compare(
+          0, kTokenPrefix.size(), kTokenPrefix.data(), kTokenPrefix.size()) !=
+          0) {
     return std::nullopt;
   }
   const size_t issued_at_separator = token.find('.', kTokenPrefix.size());
@@ -192,9 +188,8 @@ std::optional<std::string> KVSessionTokenCodec::verify_at(
   }
   const std::string issued_at_value = token.substr(
       kTokenPrefix.size(), issued_at_separator - kTokenPrefix.size());
-  const std::string session_id =
-      token.substr(issued_at_separator + 1,
-                   session_separator - issued_at_separator - 1);
+  const std::string session_id = token.substr(
+      issued_at_separator + 1, session_separator - issued_at_separator - 1);
   const std::string provided = token.substr(session_separator + 1);
   uint64_t issued_at_seconds = 0;
   if (!parse_uint64(issued_at_value, &issued_at_seconds) ||
@@ -207,16 +202,14 @@ std::optional<std::string> KVSessionTokenCodec::verify_at(
   }
   const std::string signed_payload = token.substr(0, session_separator);
   const std::string expected = signature(active_secret_, signed_payload);
-  bool matches = expected.size() == provided.size() &&
-                 CRYPTO_memcmp(expected.data(),
-                               provided.data(),
-                               expected.size()) == 0;
+  bool matches =
+      expected.size() == provided.size() &&
+      CRYPTO_memcmp(expected.data(), provided.data(), expected.size()) == 0;
   if (!matches && !previous_secret_.empty()) {
     const std::string previous = signature(previous_secret_, signed_payload);
-    matches = previous.size() == provided.size() &&
-              CRYPTO_memcmp(previous.data(),
-                            provided.data(),
-                            previous.size()) == 0;
+    matches =
+        previous.size() == provided.size() &&
+        CRYPTO_memcmp(previous.data(), provided.data(), previous.size()) == 0;
   }
   if (!matches) {
     return std::nullopt;
@@ -234,13 +227,11 @@ std::optional<std::string> KVSessionTokenCodec::derive_client_session(
     return std::nullopt;
   }
   const std::string payload =
-      "sdk-session-v1\n" + std::to_string(authenticated_client.size()) +
-      "\n" + authenticated_client + "\n" +
-      std::to_string(client_session_hint.size()) + "\n" +
-      client_session_hint;
+      "sdk-session-v1\n" + std::to_string(authenticated_client.size()) + "\n" +
+      authenticated_client + "\n" + std::to_string(client_session_hint.size()) +
+      "\n" + client_session_hint;
   const std::string session = signature(active_secret_, payload);
-  return session.empty() ? std::nullopt
-                         : std::optional<std::string>(session);
+  return session.empty() ? std::nullopt : std::optional<std::string>(session);
 }
 
 std::optional<RequestTrustDecision> decide_request_trust(
@@ -251,8 +242,8 @@ std::optional<RequestTrustDecision> decide_request_trust(
   }
 
   RequestTrustDecision decision;
-  const bool trusted_tenant = input.trusted_tenant_headers_enabled &&
-                              !input.tenant_header.empty();
+  const bool trusted_tenant =
+      input.trusted_tenant_headers_enabled && !input.tenant_header.empty();
   if (trusted_tenant) {
     decision.tenant_id = input.tenant_header;
     decision.flow_id =
@@ -279,7 +270,7 @@ std::optional<RequestTrustDecision> decide_request_trust(
   const std::optional<std::string> client_session =
       input.trusted_client_identity_headers_enabled
           ? session_codec.derive_client_session(input.authenticated_client,
-                                                 input.client_session_hint)
+                                                input.client_session_hint)
           : std::nullopt;
   if (client_session.has_value()) {
     decision.kv_isolation_domain = *client_session;
