@@ -135,3 +135,8 @@ cc_test(
     :placement_config
     GTest::gtest_main
 )
+
+target_compile_definitions(
+  placement_config_test
+  PRIVATE XLLM_SERVICE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)

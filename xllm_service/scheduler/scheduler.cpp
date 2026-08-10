@@ -1973,6 +1973,21 @@ void Scheduler::run_placement_controller() {
           }
           GAUGE_SET(xllm_service_v3_placement_operations,
                     placement_operation_executor_->size());
+          if (result.intents_added > 0) {
+            MULTI_COUNTER_ADD(xllm_service_v3_placement_operations_total,
+                              "ADDED",
+                              result.intents_added);
+          }
+          if (result.actuator.driven > 0) {
+            MULTI_COUNTER_ADD(xllm_service_v3_placement_operations_total,
+                              "DRIVEN",
+                              result.actuator.driven);
+          }
+          if (result.actuator.compacted > 0) {
+            MULTI_COUNTER_ADD(xllm_service_v3_placement_operations_total,
+                              "COMPACTED",
+                              result.actuator.compacted);
+          }
           VLOG(1) << "placement_cycle status="
                   << placement::placement_controller_status_name(result.status)
                   << " mode=" << placement::placement_mode_name(result.mode)
@@ -1981,7 +1996,8 @@ void Scheduler::run_placement_controller() {
                   << " intents_added=" << result.intents_added
                   << " actuator_driven=" << result.actuator.driven
                   << " actuator_terminal=" << result.actuator.terminal
-                  << " actuator_unknown=" << result.actuator.unknown;
+                  << " actuator_unknown=" << result.actuator.unknown
+                  << " actuator_compacted=" << result.actuator.compacted;
         }
       }
     }

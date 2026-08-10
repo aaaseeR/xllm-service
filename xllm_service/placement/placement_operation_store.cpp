@@ -92,7 +92,7 @@ nlohmann::json intent_json(const PlacementOperationIntent& intent) {
 bool parse_intent_json(const nlohmann::json& json,
                        PlacementOperationIntent* intent) {
   uint32_t schema_version = 0;
-  uint32_t ordinal = 0;
+  uint64_t ordinal = 0;
   uint64_t leader_epoch = 0;
   uint64_t desired_generation = 0;
   int32_t action = 0;
@@ -118,7 +118,7 @@ bool parse_intent_json(const nlohmann::json& json,
       !json_string(json, "leader_incarnation", &leader_incarnation) ||
       !json_uint64(json, "leader_epoch", &leader_epoch) ||
       !json_uint64(json, "desired_generation", &desired_generation) ||
-      !json_uint32(json, "ordinal", &ordinal)) {
+      !json_uint64(json, "ordinal", &ordinal)) {
     return false;
   }
   PlacementOperationIntent parsed{
@@ -153,7 +153,12 @@ bool valid_record(const PlacementOperationRecord& record) {
       record.status == PlacementOperationStatus::UNKNOWN ||
       record.status == PlacementOperationStatus::SUCCEEDED ||
       record.status == PlacementOperationStatus::FAILED ||
-      record.status == PlacementOperationStatus::FENCED;
+      record.status == PlacementOperationStatus::FENCED ||
+      record.status == PlacementOperationStatus::CANCELED;
+  const bool valid_cancellation =
+      record.status != PlacementOperationStatus::CANCELED ||
+      (record.intent.action == PlacementOperationAction::BEGIN_DRAIN &&
+       record.last_code == PlacementActuatorCode::SUCCEEDED);
   const bool valid_code =
       record.last_code == PlacementActuatorCode::NOT_FOUND ||
       record.last_code == PlacementActuatorCode::ACCEPTED ||
@@ -179,8 +184,9 @@ bool valid_record(const PlacementOperationRecord& record) {
                            character != '\n';
                   });
   return valid_placement_operation_intent(record.intent) && valid_status &&
-         valid_code && valid_observed_identity && valid_message &&
-         record.created_at_ms > 0 && record.updated_at_ms > 0 &&
+         valid_cancellation && valid_code && valid_observed_identity &&
+         valid_message && record.created_at_ms > 0 &&
+         record.updated_at_ms > 0 &&
          record.updated_at_ms >= record.created_at_ms;
 }
 
@@ -272,6 +278,23 @@ PlacementStoreStatus PlacementOperationStore::compare_and_set_status(
   }
   std::string stored;
   return backend_->read(key, &stored, mod_revision);
+}
+
+PlacementStoreStatus PlacementOperationStore::delete_terminal(
+    const PlacementOperationRecord& record,
+    const PlacementLeaderIdentity& leader) {
+  if (backend_ == nullptr || !valid_record(record) ||
+      !placement_operation_terminal(record.status) ||
+      record.command_revision <= 0 || record.status_revision <= 0 ||
+      !valid_placement_leader_identity(leader)) {
+    return PlacementStoreStatus::INVALID_INPUT;
+  }
+  return backend_->compare_and_delete_pair(
+      std::string(kPlacementStatusPrefix) + record.intent.operation_id,
+      record.status_revision,
+      std::string(kPlacementCommandPrefix) + record.intent.operation_id,
+      record.command_revision,
+      leader);
 }
 
 PlacementStoreStatus PlacementOperationStore::load_snapshot(

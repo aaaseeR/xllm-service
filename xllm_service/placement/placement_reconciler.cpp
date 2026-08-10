@@ -19,7 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cmath>
-#include <iterator>
+#include <limits>
 #include <map>
 #include <set>
 #include <string_view>
@@ -29,6 +29,10 @@ namespace xllm_service::placement {
 namespace {
 
 using EngineIdentity = std::pair<std::string, std::string>;
+
+inline constexpr uint32_t kPlacementCycleOrdinalBits = 16;
+inline constexpr uint32_t kMaxPlacementCycleOperations =
+    (1U << kPlacementCycleOrdinalBits) - 1;
 
 bool valid_action(PlacementOperationAction action) {
   switch (action) {
@@ -50,6 +54,7 @@ bool valid_operation_status(PlacementOperationStatus status) {
     case PlacementOperationStatus::SUCCEEDED:
     case PlacementOperationStatus::FAILED:
     case PlacementOperationStatus::FENCED:
+    case PlacementOperationStatus::CANCELED:
       return true;
   }
   return false;
@@ -59,6 +64,10 @@ bool managed_state(PlacementLifecycleState state) {
   return state == PlacementLifecycleState::LOADING ||
          state == PlacementLifecycleState::WARMING ||
          state == PlacementLifecycleState::READY;
+}
+
+uint64_t cycle_ordinal(uint64_t now_ms, uint32_t ordinal) {
+  return (now_ms << kPlacementCycleOrdinalBits) | ordinal;
 }
 
 PlacementReconcileResult result(PlacementReconcileStatus status,
@@ -109,6 +118,8 @@ bool valid_placement_reconcile_config(const PlacementReconcileConfig& config) {
   return config.max_operations_per_cycle > 0 &&
          config.max_operations_per_pool > 0 &&
          config.max_create_per_cycle > 0 && config.max_drain_per_cycle > 0 &&
+         config.terminal_visibility_grace_ms > 0 &&
+         config.max_operations_per_cycle <= kMaxPlacementCycleOperations &&
          config.max_create_per_cycle <= config.max_operations_per_cycle &&
          config.max_drain_per_cycle <= config.max_operations_per_cycle;
 }
@@ -131,7 +142,9 @@ PlacementReconcileResult reconcile_placement_pool(
       !valid_placement_leader_identity(leader) ||
       desired.leader.address != leader.address ||
       desired.leader.incarnation != leader.incarnation ||
-      desired.leader.epoch != leader.epoch || now_ms == 0) {
+      desired.leader.epoch != leader.epoch || now_ms == 0 ||
+      now_ms > (std::numeric_limits<uint64_t>::max() >>
+                kPlacementCycleOrdinalBits)) {
     return result(PlacementReconcileStatus::INVALID_INPUT,
                   PlacementReconcileReason::INVALID_DESIRED,
                   desired.desired_replicas,
@@ -148,6 +161,8 @@ PlacementReconcileResult reconcile_placement_pool(
 
   uint32_t managed_replicas = 0;
   std::set<EngineIdentity> engine_identities;
+  std::set<EngineIdentity> managed_identities;
+  std::map<EngineIdentity, PlacementLifecycleState> actual_states;
   for (const PlacementReplicaFact& replica : replicas) {
     if (!placement_pool_keys_equal(replica.pool, desired.pool) ||
         !valid_placement_identity(replica.engine_uid) ||
@@ -168,7 +183,12 @@ PlacementReconcileResult reconcile_placement_pool(
     }
     if (managed_state(replica.state)) {
       ++managed_replicas;
+      managed_identities.emplace(replica.engine_uid,
+                                 replica.engine_incarnation);
     }
+    actual_states.emplace(
+        EngineIdentity{replica.engine_uid, replica.engine_incarnation},
+        replica.state);
   }
 
   uint32_t pending_operations = 0;
@@ -176,8 +196,11 @@ PlacementReconcileResult reconcile_placement_pool(
   std::map<EngineIdentity, std::set<PlacementOperationAction>>
       engine_operations;
   std::vector<const PlacementOperationView*> pending_drains;
-  std::set<EngineIdentity> succeeded_drains;
-  std::set<EngineIdentity> terminated_drains;
+  std::map<EngineIdentity, uint64_t> active_drain_generations;
+  std::map<EngineIdentity, uint64_t> succeeded_drain_generations;
+  std::map<EngineIdentity, std::pair<uint64_t, uint64_t>>
+      succeeded_cancel_proofs;
+  std::map<EngineIdentity, uint64_t> terminated_drain_generations;
   bool current_generation_terminal_failure = false;
   for (const PlacementOperationView& operation : operations) {
     const bool has_engine_uid = !operation.engine_uid.empty();
@@ -188,7 +211,10 @@ PlacementReconcileResult reconcile_placement_pool(
         !placement_pool_keys_equal(operation.pool, desired.pool) ||
         !valid_placement_identity(operation.leader_incarnation) ||
         operation.leader_epoch == 0 || operation.desired_generation == 0 ||
+        operation.updated_at_ms == 0 || operation.updated_at_ms > now_ms ||
         !operation_ids.insert(operation.operation_id).second ||
+        (operation.status == PlacementOperationStatus::CANCELED &&
+         operation.action != PlacementOperationAction::BEGIN_DRAIN) ||
         has_engine_uid != has_engine_incarnation ||
         (has_engine_uid &&
          (!valid_placement_identity(operation.engine_uid) ||
@@ -205,20 +231,40 @@ PlacementReconcileResult reconcile_placement_pool(
       const EngineIdentity identity{operation.engine_uid,
                                     operation.engine_incarnation};
       if (operation.status != PlacementOperationStatus::SUCCEEDED &&
+          operation.status != PlacementOperationStatus::CANCELED &&
           operation.desired_generation == desired.generation) {
         current_generation_terminal_failure = true;
       }
       if (operation.status == PlacementOperationStatus::SUCCEEDED &&
           operation.action == PlacementOperationAction::CREATE) {
-        if (engine_identities.find(identity) == engine_identities.end()) {
+        if (actual_states.find(identity) == actual_states.end() &&
+            now_ms - operation.updated_at_ms <=
+                config.terminal_visibility_grace_ms) {
           ++managed_replicas;
         }
       } else if (operation.status == PlacementOperationStatus::SUCCEEDED &&
                  operation.action == PlacementOperationAction::BEGIN_DRAIN) {
-        succeeded_drains.insert(identity);
+        succeeded_drain_generations[identity] =
+            std::max(succeeded_drain_generations[identity],
+                     operation.desired_generation);
+      } else if (operation.status == PlacementOperationStatus::SUCCEEDED &&
+                 operation.action == PlacementOperationAction::CANCEL_DRAIN) {
+        auto& proof = succeeded_cancel_proofs[identity];
+        if (operation.desired_generation > proof.first ||
+            (operation.desired_generation == proof.first &&
+             operation.updated_at_ms > proof.second)) {
+          proof = {operation.desired_generation, operation.updated_at_ms};
+        }
       } else if (operation.status == PlacementOperationStatus::SUCCEEDED &&
                  operation.action == PlacementOperationAction::TERMINATE) {
-        terminated_drains.insert(identity);
+        terminated_drain_generations[identity] =
+            std::max(terminated_drain_generations[identity],
+                     operation.desired_generation);
+      }
+      if (operation.action == PlacementOperationAction::BEGIN_DRAIN &&
+          operation.status != PlacementOperationStatus::CANCELED) {
+        active_drain_generations[identity] = std::max(
+            active_drain_generations[identity], operation.desired_generation);
       }
       continue;
     }
@@ -242,6 +288,10 @@ PlacementReconcileResult reconcile_placement_pool(
       }
     } else if (operation.action == PlacementOperationAction::BEGIN_DRAIN) {
       pending_drains.push_back(&operation);
+      const EngineIdentity identity{operation.engine_uid,
+                                    operation.engine_incarnation};
+      active_drain_generations[identity] = std::max(
+          active_drain_generations[identity], operation.desired_generation);
     }
   }
   for (const auto& [identity, actions] : engine_operations) {
@@ -257,6 +307,29 @@ PlacementReconcileResult reconcile_placement_pool(
                     desired.desired_replicas,
                     managed_replicas,
                     pending_operations);
+    }
+  }
+  for (const auto& [identity, proof] : succeeded_cancel_proofs) {
+    const auto active_drain = active_drain_generations.find(identity);
+    const bool superseded_by_new_drain =
+        active_drain != active_drain_generations.end() &&
+        active_drain->second > proof.first;
+    const auto committed_drain = succeeded_drain_generations.find(identity);
+    const auto terminated = terminated_drain_generations.find(identity);
+    const bool has_unterminated_committed_drain =
+        committed_drain != succeeded_drain_generations.end() &&
+        (terminated == terminated_drain_generations.end() ||
+         terminated->second < committed_drain->second);
+    const auto actual = actual_states.find(identity);
+    const bool registry_can_lag =
+        actual == actual_states.end() ||
+        actual->second == PlacementLifecycleState::DRAINING;
+    if (!superseded_by_new_drain && !has_unterminated_committed_drain &&
+        managed_identities.find(identity) == managed_identities.end() &&
+        registry_can_lag &&
+        now_ms - proof.second <= config.terminal_visibility_grace_ms) {
+      ++managed_replicas;
+      managed_identities.insert(identity);
     }
   }
   const uint32_t remaining_operation_capacity =
@@ -293,13 +366,14 @@ PlacementReconcileResult reconcile_placement_pool(
       if (desired.generation <= drain.desired_generation) {
         continue;
       }
+      const uint64_t operation_ordinal = cycle_ordinal(now_ms, ordinal);
       cancellation.intents.emplace_back(PlacementOperationIntent{
           .operation_id = make_placement_operation_id(
               leader,
               desired.generation,
               desired.pool,
               PlacementOperationAction::CANCEL_DRAIN,
-              ordinal,
+              operation_ordinal,
               drain.engine_uid,
               drain.engine_incarnation),
           .action = PlacementOperationAction::CANCEL_DRAIN,
@@ -309,7 +383,7 @@ PlacementReconcileResult reconcile_placement_pool(
           .leader_incarnation = leader.incarnation,
           .leader_epoch = leader.epoch,
           .desired_generation = desired.generation,
-          .ordinal = ordinal,
+          .ordinal = operation_ordinal,
       });
     }
     if (!cancellation.intents.empty()) {
@@ -324,13 +398,16 @@ PlacementReconcileResult reconcile_placement_pool(
                   pending_operations);
   }
 
-  std::vector<EngineIdentity> drained_not_terminated;
-  std::set_difference(succeeded_drains.begin(),
-                      succeeded_drains.end(),
-                      terminated_drains.begin(),
-                      terminated_drains.end(),
-                      std::back_inserter(drained_not_terminated));
-  if (!drained_not_terminated.empty()) {
+  std::vector<EngineIdentity> drained_not_completed;
+  for (const auto& [identity, drain_generation] : succeeded_drain_generations) {
+    const auto terminated = terminated_drain_generations.find(identity);
+    if (terminated == terminated_drain_generations.end() ||
+        terminated->second < drain_generation) {
+      drained_not_completed.push_back(identity);
+    }
+  }
+  if (!drained_not_completed.empty() &&
+      desired.desired_replicas <= managed_replicas) {
     PlacementReconcileResult termination =
         result(PlacementReconcileStatus::OK,
                PlacementReconcileReason::TERMINATE_DRAINED,
@@ -341,7 +418,7 @@ PlacementReconcileResult reconcile_placement_pool(
         std::min({config.max_operations_per_cycle,
                   config.max_drain_per_cycle,
                   remaining_operation_capacity,
-                  static_cast<uint32_t>(drained_not_terminated.size())});
+                  static_cast<uint32_t>(drained_not_completed.size())});
     if (terminate_count == 0) {
       termination.status = PlacementReconcileStatus::HOLD;
       termination.reason = PlacementReconcileReason::OPERATION_CAPACITY;
@@ -349,14 +426,15 @@ PlacementReconcileResult reconcile_placement_pool(
     }
     termination.intents.reserve(terminate_count);
     for (uint32_t ordinal = 0; ordinal < terminate_count; ++ordinal) {
-      const EngineIdentity& identity = drained_not_terminated[ordinal];
+      const EngineIdentity& identity = drained_not_completed[ordinal];
+      const uint64_t operation_ordinal = cycle_ordinal(now_ms, ordinal);
       termination.intents.emplace_back(PlacementOperationIntent{
           .operation_id =
               make_placement_operation_id(leader,
                                           desired.generation,
                                           desired.pool,
                                           PlacementOperationAction::TERMINATE,
-                                          ordinal,
+                                          operation_ordinal,
                                           identity.first,
                                           identity.second),
           .action = PlacementOperationAction::TERMINATE,
@@ -366,7 +444,7 @@ PlacementReconcileResult reconcile_placement_pool(
           .leader_incarnation = leader.incarnation,
           .leader_epoch = leader.epoch,
           .desired_generation = desired.generation,
-          .ordinal = ordinal,
+          .ordinal = operation_ordinal,
       });
     }
     return termination;
@@ -391,13 +469,14 @@ PlacementReconcileResult reconcile_placement_pool(
     output.reason = PlacementReconcileReason::SCALE_UP;
     output.intents.reserve(create_count);
     for (uint32_t ordinal = 0; ordinal < create_count; ++ordinal) {
+      const uint64_t operation_ordinal = cycle_ordinal(now_ms, ordinal);
       output.intents.emplace_back(PlacementOperationIntent{
           .operation_id =
               make_placement_operation_id(leader,
                                           desired.generation,
                                           desired.pool,
                                           PlacementOperationAction::CREATE,
-                                          ordinal,
+                                          operation_ordinal,
                                           "",
                                           ""),
           .action = PlacementOperationAction::CREATE,
@@ -405,7 +484,7 @@ PlacementReconcileResult reconcile_placement_pool(
           .leader_incarnation = leader.incarnation,
           .leader_epoch = leader.epoch,
           .desired_generation = desired.generation,
-          .ordinal = ordinal,
+          .ordinal = operation_ordinal,
       });
     }
     return output;
@@ -453,13 +532,14 @@ PlacementReconcileResult reconcile_placement_pool(
   output.intents.reserve(drain_count);
   for (uint32_t ordinal = 0; ordinal < drain_count; ++ordinal) {
     const PlacementReplicaFact& victim = *victims[ordinal];
+    const uint64_t operation_ordinal = cycle_ordinal(now_ms, ordinal);
     output.intents.emplace_back(PlacementOperationIntent{
         .operation_id =
             make_placement_operation_id(leader,
                                         desired.generation,
                                         desired.pool,
                                         PlacementOperationAction::BEGIN_DRAIN,
-                                        ordinal,
+                                        operation_ordinal,
                                         victim.engine_uid,
                                         victim.engine_incarnation),
         .action = PlacementOperationAction::BEGIN_DRAIN,
@@ -469,7 +549,7 @@ PlacementReconcileResult reconcile_placement_pool(
         .leader_incarnation = leader.incarnation,
         .leader_epoch = leader.epoch,
         .desired_generation = desired.generation,
-        .ordinal = ordinal,
+        .ordinal = operation_ordinal,
     });
   }
   return output;
@@ -479,7 +559,7 @@ std::string make_placement_operation_id(const PlacementLeaderIdentity& leader,
                                         uint64_t desired_generation,
                                         const PlacementPoolKey& pool,
                                         PlacementOperationAction action,
-                                        uint32_t ordinal,
+                                        uint64_t ordinal,
                                         const std::string& engine_uid,
                                         const std::string& engine_incarnation) {
   if (!valid_placement_leader_identity(leader) || desired_generation == 0 ||
@@ -507,7 +587,8 @@ std::string make_placement_operation_id(const PlacementLeaderIdentity& leader,
 bool placement_operation_terminal(PlacementOperationStatus status) {
   return status == PlacementOperationStatus::SUCCEEDED ||
          status == PlacementOperationStatus::FAILED ||
-         status == PlacementOperationStatus::FENCED;
+         status == PlacementOperationStatus::FENCED ||
+         status == PlacementOperationStatus::CANCELED;
 }
 
 const char* placement_operation_action_name(PlacementOperationAction action) {

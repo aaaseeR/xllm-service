@@ -18,68 +18,70 @@ limitations under the License.
 ## 基本信息
 
 - Owner：xLLM Service
-- 状态：IN_PROGRESS；V3-P0/P1 已 `CPU_VERIFIED`，P2 desired store 与 P3
-  reconcile/fake actuator 核心已通过 CPU 测试但完整 operation 持久化和集成仍为
-  `PARTIAL`，P4-P5 尚在开发，P6 为 `NPU_AND_CLUSTER_PENDING`
+- 状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
+- 范围：V3-P0 至 P5 可移植代码、CPU/fake/loopback 验证已完成；P6 真实 NPU、HBM、
+  etcd、部署系统和生产流量验证待执行
 - 关联设计：[V3 Placement 与 Autoscale](../14_XLLM_SERVICE_V3_PLACEMENT_AUTOSCALE_DESIGN.md)
-- 最近验证：`service_dev` 开发分支，ARM64 Linux Debug 沙箱，2026-08-10
+- 当前能力入口：[V3 当前能力与远端代码索引](../15_XLLM_SERVICE_V3_CURRENT_CAPABILITIES.md)
+- 线上入口：[V3 线上验证手册](./V3_ONLINE_VALIDATION_RUNBOOK.md)
+- 最近验证：`service_dev`，ARM64 Linux Debug 沙箱，2026-08-10
 
-## 当前支持范围
+## P0-P6 状态
 
-| 能力 | 状态 | 代码与证据 |
+| Gate | 状态 | 已完成能力与 CPU 证据 |
 | --- | --- | --- |
-| `model_revision × provider × role × profile` 领域模型 | CPU_VERIFIED | `xllm_service/placement/placement_types.{h,cpp}` |
-| Prefill/Decode/Aggregated 独立容量计算 | CPU_VERIFIED | `xllm_service/placement/placement_planner.{h,cpp}` |
-| failure headroom、warm spare、扩缩最大步长 | CPU_VERIFIED | `tests/xllm_service/placement/placement_planner_test.cpp` |
-| 快扩、慢缩、hysteresis、cooldown、样本/OOD 门禁 | CPU_VERIFIED | `tests/xllm_service/placement/placement_planner_test.cpp` |
-| 模拟 HBM cache-loss 与已确认 Store coverage 经济门禁 | CPU_VERIFIED | `PlacementPlannerTest.ConfirmedStoreCoverageCanUnlockScaleDown` |
-| 全局 device budget、保护容量与稳定优先级 | CPU_VERIFIED | `xllm_service/placement/placement_budget_allocator.{h,cpp}` 与对应测试 |
-| 生命周期与三重 fencing | CPU_VERIFIED | `xllm_service/placement/placement_lifecycle.{h,cpp}`；覆盖 replay、旧 generation/incarnation、drain commit 与新 incarnation |
-| leader-fenced desired store | PARTIAL / CPU_VERIFIED CORE | `placement_desired_store.{h,cpp}` 与 `scheduler/etcd_client`；双 master identity + mod revision CAS、严格 codec、全量快照容量门 |
-| 确定性 reconcile 与 operation executor | PARTIAL / CPU_VERIFIED CORE | `placement_reconciler.{h,cpp}`、`placement_actuator.{h,cpp}`；unknown 只 Query、drain/terminate proof、fake actuator |
-| command/status 持久化与 Service 集成 | IN_PROGRESS | V3-P2/P3 剩余项及 P5 |
-| 真实 NPU/HBM、部署系统与线上闭环 | NPU_AND_CLUSTER_PENDING | V3-P6 线上矩阵 |
+| V3-P0 | CPU_VERIFIED | 严格配置、pool/profile/observation 领域模型、非法输入和 lifecycle 状态机 |
+| V3-P1 | CPU_VERIFIED | P/D/A 独立规划、forecast、快扩慢缩、failure headroom、HBM cache-loss、全局预算 |
+| V3-P2 | CPU_VERIFIED | desired/command/status codec、快照容量门、master 三元组 fencing、CAS、leader 恢复 |
+| V3-P3 | CPU_VERIFIED | 确定性 reconcile、create/drain/cancel/terminate、unknown-only-query、proof、operation GC |
+| V3-P4 | CPU_VERIFIED | xLLM Native BRPC 与 vLLM-Ascend HTTP lifecycle conformance、loopback 和严格 token |
+| V3-P5 | CPU_VERIFIED | Scheduler 慢环、SHADOW/create-only/ENFORCED、动态回滚、部署 gateway、日志/指标、三 serving binary |
+| V3-P6 | NPU_AND_CLUSTER_PENDING | 真实 load/warmup/HBM/drain/设备释放、etcd/leader/部署故障、阶梯流量和 24h+ soak |
 
-当前 CPU Planner 不按 NPU/GPU/MLU 分支。硬件差异只通过不可变 capacity profile 和
-Provider lifecycle conformance 输入；CPU 验证控制逻辑，不能替代真实 HBM、CANN、网络、
-模型加载和设备释放验证。
+## 已验证的关键语义
 
-## 已验证语义
+- CPU 只验证控制链路；HBM 价值通过 KV Shadow 的精确 READY 位置和 simulated cache-loss
+  建模验证，不能替代真实 NPU/HBM 证明。
+- Planner 不按 NPU/GPU/MLU 分支。硬件、Runtime、TP/DP/PP/EP 和 KV layout 由不可变
+  capacity profile 与 Provider lifecycle/deployment actuator 提供。
+- desired、command、status 写删均比较 master address、incarnation、epoch 和 etcd mod
+  revision；新 leader 全量恢复，未知副作用只 Query。
+- operation id 在 leader/generation/pool/action 基础上带 leader-local 唯一 cycle ordinal；
+  终态 CREATE 证明过期后生成新的修复 operation，不会重放旧成功记录。
+- CANCEL 只作用于未 commit drain，并把旧 BEGIN_DRAIN 收敛为 `CANCELED`；commit 后需求
+  反弹采用 replacement-first，容量恢复后才终止旧 incarnation；完成证明按 incarnation
+  和 generation 匹配，旧 CANCEL 不能遮蔽后续 drain。
+- 终态 command/status 原子、有界回收；BEGIN_DRAIN 先于对应 CANCEL/TERMINATE 证明删除，
+  `FAILED/FENCED` 保留并 fail closed。
+- 只有 fresh READY、支持 drain、无 reservation/transfer 且 cache value 已知的实例可成为
+  victim；已有 DRAINING 只由持久 ledger 驱动。
+- `placement_mode_override` 支持在一个 loop interval 内切回 SHADOW；Router 不等待慢环。
+- 日志使用稳定 stage/reason/code，指标 label 保持低基数；pool/operation 细节进入 VLOG。
 
-- 输入中的 NaN、Infinity、非法范围、非法 identity、clock regression 和 observation
-  replay 均 fail closed；
-- P、D、Aggregated 使用各自工作量和 capacity，不采用固定 P:D 比例；
-- forecast 短于 load/warmup p99 时保留 warm spare；
-- 扩容由 forecast、queue、reject、TTFT、TPOT 或 KV pressure 触发，已有 operation 时不
-  重复动作；
-- 缩容必须同时满足样本、稳定窗口、cooldown、低负载和 cache-loss 收益门；
-- Store coverage 只作为已确认持久化覆盖的输入；默认模拟完整 HBM cache loss；
-- 全局预算先分配 safe-required 保护增量，再按 `priority → SLO risk → pool key` 稳定分配；
-- 已有容量超预算时只标记 `OVERCOMMITTED`，不绕过 Planner 强制缩容。
-- lifecycle command 同时绑定 operation id、desired generation 与 Engine incarnation；任意已应用
-  phase 重放不回退状态，drain commit 后不能取消，重新创建必须使用新 incarnation；
-- desired 写入同时比较 Service master address、master incarnation 和 etcd mod revision；损坏、
-  超记录/字节预算的 leader 恢复快照 fail closed；
-- reconcile 不在存在非终态/未知 operation 时叠加副作用；执行结果不明后只 Query；BEGIN_DRAIN
-  成功必须证明 admission closed 且 P/transfer/reservation/D/output/cleanup 全部归零。
+## CPU 验证门
 
-## 测试与门禁
-
-| Gate | CPU test | 当前结果 |
+| 验证项 | 命令/测试 | 结果 |
 | --- | --- | --- |
-| V3-P0 领域输入、稳定错误与 lifecycle | types/planner/lifecycle 边界和迁移测试 | CPU_VERIFIED |
-| V3-P1 P/D/A、稳定性、cache loss、预算 | planner 与 budget allocator 单测 | CPU_VERIFIED |
-| V3-P2 desired store | codec、快照容量、并发 CAS、旧 leader/revision | PARTIAL；核心 CPU_VERIFIED，operation store 待完成 |
-| V3-P3 reconcile/actuator | deterministic victim、unknown、proof、容量 | PARTIAL；核心 CPU_VERIFIED，持久恢复/集成待完成 |
-| 全仓回归 | `xllm-dev service-test ... native Debug` | 440/440 PASS |
-| V3-P4/P5 | Provider lifecycle loopback / Service 集成 | IN_PROGRESS |
-| V3-P6 | NPU、真实 HBM、etcd/actuator、阶梯流量、24h+ soak | PENDING |
+| Placement 全部组件 | `tests/xllm_service/placement/*_test` 13 个二进制 | PASS |
+| Reconcile | `placement_reconciler_test` 16 tests | PASS |
+| Executor/GC | `placement_actuator_test` 9 tests | PASS |
+| Durable ledger | `placement_operation_store_test` 5 tests | PASS |
+| Runtime config | `placement_config_test` 8 tests（含文档样例） | PASS |
+| Controller | `placement_controller_test` 5 tests | PASS |
+| Deployment/Provider loopback | `placement_deployment_actuator_test`、`provider_lifecycle_actuator_test` | PASS |
+| V2 HBM/KV 与 flow 回归 | KV Shadow、flow control 既有 CPU suite | PASS |
+| Serving 链接门 | master、RPC、HTTP 三个 serving binary | PASS |
+| 全仓 Service CPU | 沙箱 `ctest --test-dir build/local-arm64-Debug` | 501/501 PASS |
+| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | 122/122 PASS |
+| xLLM simulated HBM/allocator | `simulated_hbm_test` | 15/15 PASS |
 
-## 达到 V3 代码完成仍需
+## 线上前不可误报的边界
 
-1. 在已完成 desired fencing/快照基础上补齐 command/status 持久化和 leader 恢复；
-2. 在已完成 reconcile/fake actuator 基础上补齐有界 operation ledger 的持久恢复与终态回收；
-3. 完成 xLLM Native 与 vLLM-Ascend drain/query/new-incarnation conformance；
-4. 接入 Service SHADOW/create-only/ENFORCED、结构化日志和低基数指标；
-5. 通过 P0-P5 全量 CPU/loopback/并发/故障回归并发布线上操作手册；
-6. 最终在 P6 真实集群验证后，才可从 `NPU_AND_CLUSTER_PENDING` 升级为 `VERIFIED`。
+- 未验证真实 NPU 模型加载与 warmup p99、CANN/通信故障、真实 HBM 释放与 cache-loss；
+- 未验证真实 deployment gateway 的 operation 幂等保留、Registry lease 延迟与终止证明；
+- 未验证多 Service leader kill、etcd stall/compact、部署超时和网络分区组合；
+- 未用生产短/长 prompt、长 output、多模型与 KV pressure 跑阶梯流量和 24h+ soak；
+- 未完成线上 capacity profile、阈值、SLO residual 和低基数 dashboard 校准。
+
+上述 P6 全部通过前，V3 只能标记
+`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`，不能标记生产 `VERIFIED`。

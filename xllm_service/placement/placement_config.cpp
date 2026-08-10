@@ -224,7 +224,8 @@ bool parse_reconcile(const Json& json, PlacementReconcileConfig* config) {
                       {"max_operations_per_cycle",
                        "max_operations_per_pool",
                        "max_create_per_cycle",
-                       "max_drain_per_cycle"}) &&
+                       "max_drain_per_cycle",
+                       "terminal_visibility_grace_ms"}) &&
          uint32_field(json,
                       "max_operations_per_cycle",
                       &config->max_operations_per_cycle) &&
@@ -234,7 +235,10 @@ bool parse_reconcile(const Json& json, PlacementReconcileConfig* config) {
          uint32_field(
              json, "max_create_per_cycle", &config->max_create_per_cycle) &&
          uint32_field(
-             json, "max_drain_per_cycle", &config->max_drain_per_cycle);
+             json, "max_drain_per_cycle", &config->max_drain_per_cycle) &&
+         uint64_field(json,
+                      "terminal_visibility_grace_ms",
+                      &config->terminal_visibility_grace_ms);
 }
 
 bool parse_controller(const Json& json, PlacementControllerConfig* config) {
@@ -271,13 +275,21 @@ bool parse_controller(const Json& json, PlacementControllerConfig* config) {
 
 bool parse_executor(const Json& json,
                     PlacementOperationExecutorConfig* config) {
-  return exact_fields(
-             json,
-             {"max_records", "max_message_bytes", "operation_timeout_ms"}) &&
+  return exact_fields(json,
+                      {"max_records",
+                       "max_message_bytes",
+                       "operation_timeout_ms",
+                       "terminal_retention_ms",
+                       "max_terminal_compactions_per_cycle"}) &&
          size_field(json, "max_records", &config->max_records) &&
          size_field(json, "max_message_bytes", &config->max_message_bytes) &&
          uint64_field(
-             json, "operation_timeout_ms", &config->operation_timeout_ms);
+             json, "operation_timeout_ms", &config->operation_timeout_ms) &&
+         uint64_field(
+             json, "terminal_retention_ms", &config->terminal_retention_ms) &&
+         uint32_field(json,
+                      "max_terminal_compactions_per_cycle",
+                      &config->max_terminal_compactions_per_cycle);
 }
 
 bool parse_observation(const Json& json,
@@ -556,6 +568,10 @@ bool valid_placement_runtime_config(const PlacementRuntimeConfig& config) {
       config.executor.max_message_bytes == 0 ||
       config.executor.max_message_bytes > kMaxPlacementActuatorMessageBytes ||
       config.executor.operation_timeout_ms == 0 ||
+      config.executor.terminal_retention_ms == 0 ||
+      config.executor.terminal_retention_ms <
+          config.controller.reconcile.terminal_visibility_grace_ms ||
+      config.executor.max_terminal_compactions_per_cycle == 0 ||
       !valid_placement_observation_collector_config(config.observation) ||
       !valid_placement_input_builder_config(config.input_builder) ||
       config.controller.max_pools != config.input_builder.max_pools ||

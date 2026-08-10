@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <deque>
 #include <map>
 #include <string>
@@ -105,6 +106,8 @@ PlacementOperationExecutorConfig config(size_t max_records = 8) {
       .max_records = max_records,
       .max_message_bytes = 64,
       .operation_timeout_ms = 1000,
+      .terminal_retention_ms = 1000,
+      .max_terminal_compactions_per_cycle = 2,
   };
 }
 
@@ -130,6 +133,15 @@ PlacementActuatorResponse drain_response(PlacementActuatorCode code,
               .admission_closed = true,
               .pending_output = pending_output,
           },
+  };
+}
+
+PlacementActuatorResponse cancel_success() {
+  return PlacementActuatorResponse{
+      .code = PlacementActuatorCode::SUCCEEDED,
+      .engine_uid = "engine-1",
+      .engine_incarnation = "inc-1",
+      .lifecycle_state = PlacementLifecycleState::READY,
   };
 }
 
@@ -159,6 +171,101 @@ TEST(PlacementOperationExecutorTest, UnknownExecuteIsOnlyQueriedAfterward) {
   ASSERT_EQ(snapshot.size(), 1u);
   EXPECT_EQ(snapshot[0].status, PlacementOperationStatus::SUCCEEDED);
   EXPECT_EQ(snapshot[0].engine_uid, "engine-new");
+}
+
+TEST(PlacementOperationExecutorTest, CompactsSuccessfulCreateAfterRetention) {
+  FakePlacementActuator actuator;
+  PlacementOperationExecutor executor(config(), &actuator);
+  const PlacementOperationIntent create = intent();
+  actuator.execute_responses[create.operation_id].push_back(create_success());
+  ASSERT_EQ(executor.add_intents({create}, 1000).added, 1u);
+  ASSERT_EQ(executor.drive(1100, 1).terminal, 1u);
+  EXPECT_EQ(executor.size(), 1u);
+
+  const PlacementExecutorResult compacted = executor.drive(2100, 1);
+  EXPECT_EQ(compacted.status, PlacementExecutorStatus::OK);
+  EXPECT_EQ(compacted.compacted, 1u);
+  EXPECT_EQ(executor.size(), 0u);
+}
+
+TEST(PlacementOperationExecutorTest, DrainCompactionPreservesProofOrder) {
+  FakePlacementActuator actuator;
+  PlacementOperationExecutorConfig executor_config = config();
+  executor_config.max_terminal_compactions_per_cycle = 1;
+  PlacementOperationExecutor executor(executor_config, &actuator);
+  const PlacementOperationIntent drain =
+      intent(PlacementOperationAction::BEGIN_DRAIN);
+  const PlacementOperationIntent cancel =
+      intent(PlacementOperationAction::CANCEL_DRAIN);
+  actuator.execute_responses[drain.operation_id].push_back(
+      drain_response(PlacementActuatorCode::IN_PROGRESS));
+  actuator.execute_responses[cancel.operation_id].push_back(cancel_success());
+
+  ASSERT_EQ(executor.add_intents({drain, cancel}, 1000).added, 2u);
+  ASSERT_EQ(executor.drive(1100, 2).terminal, 2u);
+  ASSERT_EQ(executor.size(), 2u);
+  const std::vector<PlacementOperationRecord> completed = executor.snapshot();
+  EXPECT_TRUE(std::any_of(
+      completed.begin(),
+      completed.end(),
+      [](const PlacementOperationRecord& record) {
+        return record.intent.action == PlacementOperationAction::BEGIN_DRAIN &&
+               record.status == PlacementOperationStatus::CANCELED;
+      }));
+
+  const PlacementExecutorResult first = executor.drive(2100, 1);
+  EXPECT_EQ(first.status, PlacementExecutorStatus::OK);
+  EXPECT_EQ(first.compacted, 1u);
+  ASSERT_EQ(executor.size(), 1u);
+  EXPECT_EQ(executor.snapshot()[0].intent.action,
+            PlacementOperationAction::CANCEL_DRAIN);
+
+  const PlacementExecutorResult second = executor.drive(2200, 1);
+  EXPECT_EQ(second.status, PlacementExecutorStatus::OK);
+  EXPECT_EQ(second.compacted, 1u);
+  EXPECT_EQ(executor.size(), 0u);
+}
+
+TEST(PlacementOperationExecutorTest, OldCancelCannotCompactCommittedDrain) {
+  FakePlacementActuator actuator;
+  PlacementOperationExecutor executor(config(), &actuator);
+  PlacementOperationIntent drain =
+      intent(PlacementOperationAction::BEGIN_DRAIN);
+  drain.desired_generation = 2;
+  drain.operation_id = make_placement_operation_id(leader(),
+                                                   drain.desired_generation,
+                                                   pool(),
+                                                   drain.action,
+                                                   drain.ordinal,
+                                                   drain.engine_uid,
+                                                   drain.engine_incarnation);
+  PlacementOperationIntent cancel =
+      intent(PlacementOperationAction::CANCEL_DRAIN);
+  cancel.desired_generation = 3;
+  cancel.operation_id = make_placement_operation_id(leader(),
+                                                    cancel.desired_generation,
+                                                    pool(),
+                                                    cancel.action,
+                                                    cancel.ordinal,
+                                                    cancel.engine_uid,
+                                                    cancel.engine_incarnation);
+  actuator.execute_responses[drain.operation_id].push_back(
+      drain_response(PlacementActuatorCode::SUCCEEDED));
+  actuator.execute_responses[cancel.operation_id].push_back(cancel_success());
+
+  ASSERT_EQ(executor.add_intents({drain}, 1000).added, 1u);
+  ASSERT_EQ(executor.drive(1100, 1).terminal, 1u);
+  ASSERT_EQ(executor.add_intents({cancel}, 1200).added, 1u);
+  ASSERT_GE(executor.drive(1300, 1).terminal, 1u);
+  ASSERT_EQ(executor.size(), 2u);
+
+  const PlacementExecutorResult compacted = executor.drive(2300, 1);
+  EXPECT_EQ(compacted.status, PlacementExecutorStatus::OK);
+  EXPECT_EQ(compacted.compacted, 1u);
+  ASSERT_EQ(executor.size(), 1u);
+  EXPECT_EQ(executor.snapshot()[0].intent.action,
+            PlacementOperationAction::BEGIN_DRAIN);
+  EXPECT_EQ(executor.snapshot()[0].status, PlacementOperationStatus::SUCCEEDED);
 }
 
 TEST(PlacementOperationExecutorTest, DrainRequiresCompleteTerminalProof) {

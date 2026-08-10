@@ -101,6 +101,8 @@ struct PlacementOperationExecutorConfig {
   size_t max_records = 0;
   size_t max_message_bytes = 0;
   uint64_t operation_timeout_ms = 0;
+  uint64_t terminal_retention_ms = 0;
+  uint32_t max_terminal_compactions_per_cycle = 0;
 };
 
 struct PlacementExecutorResult {
@@ -110,6 +112,7 @@ struct PlacementExecutorResult {
   uint32_t driven = 0;
   uint32_t terminal = 0;
   uint32_t unknown = 0;
+  uint32_t compacted = 0;
 };
 
 class PlacementOperationExecutor final {
@@ -142,6 +145,10 @@ class PlacementOperationExecutor final {
 
  private:
   PlacementExecutorStatus persist(PlacementOperationRecord* record);
+  PlacementExecutorStatus cancel_superseded_drains(uint64_t now_ms,
+                                                   uint32_t* canceled);
+  PlacementExecutorStatus compact_terminal(uint64_t now_ms,
+                                           uint32_t* compacted);
 
   PlacementOperationExecutorConfig config_;
   PlacementActuator* actuator_ = nullptr;

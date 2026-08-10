@@ -88,6 +88,15 @@ class PlacementFencedKv {
       const std::string& value,
       int64_t expected_mod_revision,
       const PlacementLeaderIdentity& leader) = 0;
+
+  virtual PlacementStoreStatus compare_and_delete_pair(
+      const std::string& first_logical_key,
+      int64_t first_expected_mod_revision,
+      const std::string& second_logical_key,
+      int64_t second_expected_mod_revision,
+      const PlacementLeaderIdentity& leader) {
+    return PlacementStoreStatus::INVALID_INPUT;
+  }
 };
 
 class EtcdPlacementFencedKv final : public PlacementFencedKv {
@@ -105,6 +114,13 @@ class EtcdPlacementFencedKv final : public PlacementFencedKv {
       const std::string& logical_key,
       const std::string& value,
       int64_t expected_mod_revision,
+      const PlacementLeaderIdentity& leader) override;
+
+  PlacementStoreStatus compare_and_delete_pair(
+      const std::string& first_logical_key,
+      int64_t first_expected_mod_revision,
+      const std::string& second_logical_key,
+      int64_t second_expected_mod_revision,
       const PlacementLeaderIdentity& leader) override;
 
  private:

@@ -53,11 +53,14 @@ nlohmann::json valid_json() {
          {{"max_operations_per_cycle", 4},
           {"max_operations_per_pool", 8},
           {"max_create_per_cycle", 2},
-          {"max_drain_per_cycle", 1}}}}},
+          {"max_drain_per_cycle", 1},
+          {"terminal_visibility_grace_ms", 30000}}}}},
       {"executor",
        {{"max_records", 64},
         {"max_message_bytes", 512},
-        {"operation_timeout_ms", 300000}}},
+        {"operation_timeout_ms", 300000},
+        {"terminal_retention_ms", 3600000},
+        {"max_terminal_compactions_per_cycle", 16}}},
       {"observation",
        {{"max_models", 4},
         {"bucket_count", 60},
@@ -122,6 +125,21 @@ TEST(PlacementConfigTest, ParsesCompleteStrictV3Configuration) {
   EXPECT_EQ(config.observation.forecast_horizon_ms, 120000u);
 }
 
+TEST(PlacementConfigTest, ParsesDocumentedV3Example) {
+  PlacementRuntimeConfig config;
+  std::string error;
+  ASSERT_EQ(
+      load_placement_runtime_config(std::string(XLLM_SERVICE_SOURCE_DIR) +
+                                        "/docs/design/examples/"
+                                        "xllm_service_v3_placement_config.json",
+                                    &config,
+                                    &error),
+      PlacementConfigStatus::OK)
+      << error;
+  EXPECT_EQ(config.controller.mode, PlacementMode::SHADOW);
+  EXPECT_EQ(config.pools.size(), 2u);
+}
+
 TEST(PlacementConfigTest, RejectsUnknownAndMissingFields) {
   PlacementRuntimeConfig config;
   nlohmann::json json = valid_json();
@@ -154,6 +172,15 @@ TEST(PlacementConfigTest, RejectsUnsafeForecastAndBudget) {
             PlacementConfigStatus::INVALID_SCHEMA);
   json = valid_json();
   json["controller"]["max_devices"] = 1;
+  EXPECT_EQ(parse_placement_runtime_config(json.dump(), &config),
+            PlacementConfigStatus::INVALID_SCHEMA);
+  json = valid_json();
+  json["controller"]["reconcile"]["max_operations_per_cycle"] = 65536;
+  json["controller"]["reconcile"]["max_create_per_cycle"] = 65536;
+  EXPECT_EQ(parse_placement_runtime_config(json.dump(), &config),
+            PlacementConfigStatus::INVALID_SCHEMA);
+  json = valid_json();
+  json["executor"]["terminal_retention_ms"] = 29999;
   EXPECT_EQ(parse_placement_runtime_config(json.dump(), &config),
             PlacementConfigStatus::INVALID_SCHEMA);
 }

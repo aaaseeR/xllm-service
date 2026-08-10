@@ -104,6 +104,14 @@ class AutoCounter final {
     }                                                                       \
   } while (false)
 
+#define MULTI_COUNTER_ADD(name, key, value)                                 \
+  do {                                                                      \
+    bvar::Adder<double>* counter = MULTI_COUNTER_##name.get_stats({(key)}); \
+    if (counter != nullptr) {                                               \
+      *counter << (value);                                                  \
+    }                                                                       \
+  } while (false)
+
 // declare gauge
 #define DECLARE_GAUGE(name) extern bvar::Status<double> GAUGE_##name;
 
@@ -153,6 +161,7 @@ DECLARE_MULTI_COUNTER(xllm_service_v2_output_sequence_total);
 DECLARE_MULTI_COUNTER(xllm_service_v3_placement_cycles_total);
 DECLARE_MULTI_COUNTER(xllm_service_v3_placement_observations_total);
 DECLARE_MULTI_COUNTER(xllm_service_v3_placement_recommendations_total);
+DECLARE_MULTI_COUNTER(xllm_service_v3_placement_operations_total);
 
 DECLARE_HISTOGRAM(time_to_first_token_latency_milliseconds);
 DECLARE_HISTOGRAM(inter_token_latency_milliseconds);

@@ -343,8 +343,7 @@ TEST(RegistryVerifiedDeploymentActuatorTest, CreateRequiresFreshReadyProof) {
   EXPECT_EQ(response.lifecycle_state, PlacementLifecycleState::READY);
 }
 
-TEST(RegistryVerifiedDeploymentActuatorTest,
-     TerminateRequiresAbsenceOrExactProcessProof) {
+TEST(RegistryVerifiedDeploymentActuatorTest, TerminateNeedsAbsenceOrProof) {
   provider::EngineRegistry registry(registry_config());
   publish_ready(&registry);
   FakeDeploymentBackend backend;
@@ -366,8 +365,7 @@ TEST(RegistryVerifiedDeploymentActuatorTest,
   EXPECT_EQ(response.lifecycle_state, PlacementLifecycleState::ABSENT);
 }
 
-TEST(RegistryVerifiedDeploymentActuatorTest,
-     AcceptsExplicitDeploymentTerminationProof) {
+TEST(RegistryVerifiedDeploymentActuatorTest, AcceptsTerminationProof) {
   provider::EngineRegistry registry(registry_config());
   publish_ready(&registry);
   FakeDeploymentBackend backend;

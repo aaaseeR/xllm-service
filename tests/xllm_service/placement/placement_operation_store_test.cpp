@@ -75,10 +75,40 @@ class FakeFencedKv final : public PlacementFencedKv {
     const int64_t revision =
         iterator == values_.end() ? 0 : iterator->second.revision;
     if (revision != expected_revision) {
+      if (iterator != values_.end() && iterator->second.value == value) {
+        return PlacementStoreStatus::OK;
+      }
       return PlacementStoreStatus::REVISION_CONFLICT;
     }
     values_.insert_or_assign(
         key, Stored{.value = value, .revision = next_revision_++});
+    return PlacementStoreStatus::OK;
+  }
+
+  PlacementStoreStatus compare_and_delete_pair(
+      const std::string& first_key,
+      int64_t first_expected_revision,
+      const std::string& second_key,
+      int64_t second_expected_revision,
+      const PlacementLeaderIdentity& leader) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (leader.address != leader_.address ||
+        leader.incarnation != leader_.incarnation ||
+        leader.epoch != leader_.epoch) {
+      return PlacementStoreStatus::FENCED;
+    }
+    const auto first = values_.find(first_key);
+    const auto second = values_.find(second_key);
+    if (first == values_.end() && second == values_.end()) {
+      return PlacementStoreStatus::OK;
+    }
+    if (first == values_.end() || second == values_.end() ||
+        first->second.revision != first_expected_revision ||
+        second->second.revision != second_expected_revision) {
+      return PlacementStoreStatus::REVISION_CONFLICT;
+    }
+    values_.erase(first);
+    values_.erase(second);
     return PlacementStoreStatus::OK;
   }
 
@@ -173,6 +203,8 @@ PlacementOperationExecutorConfig executor_config() {
       .max_records = 8,
       .max_message_bytes = 128,
       .operation_timeout_ms = 10000,
+      .terminal_retention_ms = 1000,
+      .max_terminal_compactions_per_cycle = 4,
   };
 }
 
@@ -198,6 +230,16 @@ TEST(PlacementOperationStoreTest, StrictIntentAndStatusRoundtrip) {
   ASSERT_TRUE(parse_placement_operation_record(value, &parsed_record));
   EXPECT_EQ(parsed_record.status, PlacementOperationStatus::UNKNOWN);
   EXPECT_EQ(parsed_record.execute_attempts, 1u);
+
+  record.status = PlacementOperationStatus::CANCELED;
+  record.last_code = PlacementActuatorCode::SUCCEEDED;
+  record.message = "superseded by successful cancel drain";
+  ASSERT_TRUE(serialize_placement_operation_record(record, &value));
+  ASSERT_TRUE(parse_placement_operation_record(value, &parsed_record));
+  EXPECT_EQ(parsed_record.status, PlacementOperationStatus::CANCELED);
+
+  record.last_code = PlacementActuatorCode::UNKNOWN;
+  EXPECT_FALSE(serialize_placement_operation_record(record, &value));
 }
 
 TEST(PlacementOperationStoreTest, MissingStatusRecoversAsUnknown) {
@@ -207,6 +249,10 @@ TEST(PlacementOperationStoreTest, MissingStatusRecoversAsUnknown) {
   ASSERT_EQ(store.create_command(drain_intent(), leader(), &revision),
             PlacementStoreStatus::OK);
   ASSERT_GT(revision, 0);
+  int64_t replayed_revision = 0;
+  ASSERT_EQ(store.create_command(drain_intent(), leader(), &replayed_revision),
+            PlacementStoreStatus::OK);
+  EXPECT_EQ(replayed_revision, revision);
 
   std::vector<PlacementPersistedOperation> snapshot;
   ASSERT_EQ(store.load_snapshot(8, 65536, &snapshot), PlacementStoreStatus::OK);
@@ -214,6 +260,35 @@ TEST(PlacementOperationStoreTest, MissingStatusRecoversAsUnknown) {
   EXPECT_EQ(snapshot[0].record.status, PlacementOperationStatus::UNKNOWN);
   EXPECT_EQ(snapshot[0].record.execute_attempts, 1u);
   EXPECT_EQ(snapshot[0].status_revision, 0);
+}
+
+TEST(PlacementOperationStoreTest, DeletesTerminalPairAtomicallyAndFenced) {
+  FakeFencedKv backend(leader());
+  PlacementOperationStore store(&backend);
+  PlacementOperationRecord record{
+      .intent = drain_intent(),
+      .status = PlacementOperationStatus::SUCCEEDED,
+      .last_code = PlacementActuatorCode::SUCCEEDED,
+      .engine_uid = "engine-1",
+      .engine_incarnation = "inc-1",
+      .created_at_ms = 1000,
+      .updated_at_ms = 1100,
+  };
+  ASSERT_EQ(
+      store.create_command(record.intent, leader(), &record.command_revision),
+      PlacementStoreStatus::OK);
+  ASSERT_EQ(store.compare_and_set_status(
+                record, 0, leader(), &record.status_revision),
+            PlacementStoreStatus::OK);
+
+  PlacementLeaderIdentity stale = leader();
+  --stale.epoch;
+  EXPECT_EQ(store.delete_terminal(record, stale), PlacementStoreStatus::FENCED);
+  ASSERT_EQ(store.delete_terminal(record, leader()), PlacementStoreStatus::OK);
+  EXPECT_EQ(store.delete_terminal(record, leader()), PlacementStoreStatus::OK);
+  std::vector<PlacementPersistedOperation> snapshot;
+  ASSERT_EQ(store.load_snapshot(8, 65536, &snapshot), PlacementStoreStatus::OK);
+  EXPECT_TRUE(snapshot.empty());
 }
 
 TEST(PlacementOperationStoreTest, DurableRecoveryQueriesWithoutReexecute) {

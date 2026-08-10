@@ -56,6 +56,9 @@ class PlacementOperationStore final {
       const PlacementLeaderIdentity& leader,
       int64_t* mod_revision);
 
+  PlacementStoreStatus delete_terminal(const PlacementOperationRecord& record,
+                                       const PlacementLeaderIdentity& leader);
+
   PlacementStoreStatus load_snapshot(
       size_t max_records,
       size_t max_total_bytes,

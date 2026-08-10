@@ -43,7 +43,8 @@ bool valid_actuator_code(PlacementActuatorCode code) {
 bool valid_config(const PlacementOperationExecutorConfig& config) {
   return config.max_records > 0 && config.max_message_bytes > 0 &&
          config.max_message_bytes <= kMaxPlacementActuatorMessageBytes &&
-         config.operation_timeout_ms > 0;
+         config.operation_timeout_ms > 0 && config.terminal_retention_ms > 0 &&
+         config.max_terminal_compactions_per_cycle > 0;
 }
 
 bool response_identity_matches(const PlacementOperationRecord& record,
@@ -189,7 +190,11 @@ PlacementExecutorStatus PlacementOperationExecutor::recover(
   }
   for (PlacementPersistedOperation& persisted : snapshot) {
     PlacementOperationRecord& record = persisted.record;
-    if (!placement_operation_terminal(record.status)) {
+    if (placement_operation_terminal(record.status)) {
+      // Persisted monotonic timestamps are process-local. Start a fresh,
+      // conservative retention window after leadership recovery.
+      record.updated_at_ms = now_ms;
+    } else {
       record.created_at_ms = now_ms;
       record.updated_at_ms = now_ms;
       record.timed_out = false;
@@ -378,7 +383,213 @@ PlacementExecutorResult PlacementOperationExecutor::drive(
       ++result.unknown;
     }
   }
+  uint32_t canceled = 0;
+  if (result.status == PlacementExecutorStatus::OK) {
+    result.status = cancel_superseded_drains(now_ms, &canceled);
+    result.terminal += canceled;
+  }
+  if (result.status == PlacementExecutorStatus::OK) {
+    result.status = compact_terminal(now_ms, &result.compacted);
+  }
   return result;
+}
+
+PlacementExecutorStatus PlacementOperationExecutor::cancel_superseded_drains(
+    uint64_t now_ms,
+    uint32_t* canceled) {
+  if (canceled == nullptr) {
+    return PlacementExecutorStatus::INVALID_INPUT;
+  }
+  *canceled = 0;
+  std::map<std::pair<std::string, std::string>, uint64_t>
+      canceled_drain_generations;
+  for (const auto& [operation_id, record] : records_) {
+    static_cast<void>(operation_id);
+    if (record.status == PlacementOperationStatus::SUCCEEDED &&
+        record.intent.action == PlacementOperationAction::CANCEL_DRAIN) {
+      const std::pair<std::string, std::string> identity{
+          record.intent.engine_uid, record.intent.engine_incarnation};
+      canceled_drain_generations[identity] =
+          std::max(canceled_drain_generations[identity],
+                   record.intent.desired_generation);
+    }
+  }
+  for (auto& [operation_id, record] : records_) {
+    static_cast<void>(operation_id);
+    if (record.intent.action != PlacementOperationAction::BEGIN_DRAIN ||
+        record.status == PlacementOperationStatus::SUCCEEDED ||
+        record.status == PlacementOperationStatus::FENCED ||
+        record.status == PlacementOperationStatus::CANCELED) {
+      continue;
+    }
+    const auto cancellation = canceled_drain_generations.find(
+        {record.intent.engine_uid, record.intent.engine_incarnation});
+    if (cancellation == canceled_drain_generations.end() ||
+        cancellation->second < record.intent.desired_generation) {
+      continue;
+    }
+    const bool was_terminal = placement_operation_terminal(record.status);
+    const PlacementOperationRecord previous = record;
+    record.status = PlacementOperationStatus::CANCELED;
+    record.last_code = PlacementActuatorCode::SUCCEEDED;
+    record.updated_at_ms = now_ms;
+    record.timed_out = false;
+    record.message = "superseded by successful cancel drain";
+    const PlacementExecutorStatus status = persist(&record);
+    if (status != PlacementExecutorStatus::OK) {
+      record = previous;
+      return status;
+    }
+    if (!was_terminal) {
+      ++*canceled;
+    }
+  }
+  return PlacementExecutorStatus::OK;
+}
+
+PlacementExecutorStatus PlacementOperationExecutor::compact_terminal(
+    uint64_t now_ms,
+    uint32_t* compacted) {
+  if (compacted == nullptr) {
+    return PlacementExecutorStatus::INVALID_INPUT;
+  }
+  *compacted = 0;
+  std::map<std::pair<std::string, std::string>, uint64_t>
+      canceled_drain_generations;
+  std::map<std::pair<std::string, std::string>, uint64_t>
+      terminated_drain_generations;
+  for (const auto& [operation_id, record] : records_) {
+    static_cast<void>(operation_id);
+    if (record.status == PlacementOperationStatus::SUCCEEDED &&
+        record.intent.action == PlacementOperationAction::CANCEL_DRAIN) {
+      const std::pair<std::string, std::string> identity{
+          record.intent.engine_uid, record.intent.engine_incarnation};
+      canceled_drain_generations[identity] =
+          std::max(canceled_drain_generations[identity],
+                   record.intent.desired_generation);
+    } else if (record.status == PlacementOperationStatus::SUCCEEDED &&
+               record.intent.action == PlacementOperationAction::TERMINATE) {
+      const std::pair<std::string, std::string> identity{
+          record.intent.engine_uid, record.intent.engine_incarnation};
+      terminated_drain_generations[identity] =
+          std::max(terminated_drain_generations[identity],
+                   record.intent.desired_generation);
+    }
+  }
+
+  auto retained = [&](const PlacementOperationRecord& record) {
+    const bool compactable =
+        record.status == PlacementOperationStatus::SUCCEEDED ||
+        (record.status == PlacementOperationStatus::CANCELED &&
+         record.intent.action == PlacementOperationAction::BEGIN_DRAIN);
+    return !compactable || now_ms < record.updated_at_ms ||
+           now_ms - record.updated_at_ms < config_.terminal_retention_ms;
+  };
+  auto erase_record = [&](const std::string& operation_id) {
+    const auto iterator = records_.find(operation_id);
+    if (iterator == records_.end()) {
+      return PlacementExecutorStatus::OK;
+    }
+    if (store_ != nullptr) {
+      const PlacementStoreStatus status =
+          store_->delete_terminal(iterator->second, leader_);
+      if (status == PlacementStoreStatus::CAPACITY_EXCEEDED) {
+        return PlacementExecutorStatus::CAPACITY_EXCEEDED;
+      }
+      if (status != PlacementStoreStatus::OK) {
+        return PlacementExecutorStatus::PERSISTENCE_ERROR;
+      }
+    }
+    records_.erase(iterator);
+    ++*compacted;
+    return PlacementExecutorStatus::OK;
+  };
+
+  // Drain completion records are the durable proof that makes BEGIN_DRAIN
+  // deletion safe. Compact dependency records first and completion proofs
+  // last, otherwise a small per-cycle budget can strand BEGIN_DRAIN forever.
+  std::vector<std::string> completed_drains;
+  std::vector<std::string> independent;
+  std::vector<std::string> completion_proofs;
+  for (const auto& [operation_id, record] : records_) {
+    if (retained(record)) {
+      continue;
+    }
+    if (record.intent.action == PlacementOperationAction::BEGIN_DRAIN) {
+      const auto& completion_generations =
+          record.status == PlacementOperationStatus::CANCELED
+              ? canceled_drain_generations
+              : terminated_drain_generations;
+      const auto completed = completion_generations.find(
+          {record.intent.engine_uid, record.intent.engine_incarnation});
+      if (completed != completion_generations.end() &&
+          completed->second >= record.intent.desired_generation) {
+        completed_drains.push_back(operation_id);
+      }
+    } else if (record.intent.action == PlacementOperationAction::CANCEL_DRAIN ||
+               record.intent.action == PlacementOperationAction::TERMINATE) {
+      completion_proofs.push_back(operation_id);
+    } else {
+      independent.push_back(operation_id);
+    }
+  }
+
+  const auto compact_candidates = [&](const std::vector<std::string>& ids) {
+    for (const std::string& operation_id : ids) {
+      if (*compacted == config_.max_terminal_compactions_per_cycle) {
+        break;
+      }
+      const PlacementExecutorStatus status = erase_record(operation_id);
+      if (status != PlacementExecutorStatus::OK) {
+        return status;
+      }
+    }
+    return PlacementExecutorStatus::OK;
+  };
+  PlacementExecutorStatus status = compact_candidates(completed_drains);
+  if (status != PlacementExecutorStatus::OK) {
+    return status;
+  }
+  status = compact_candidates(independent);
+  if (status != PlacementExecutorStatus::OK) {
+    return status;
+  }
+  for (const std::string& operation_id : completion_proofs) {
+    if (*compacted == config_.max_terminal_compactions_per_cycle) {
+      break;
+    }
+    const auto completion = records_.find(operation_id);
+    if (completion == records_.end()) {
+      continue;
+    }
+    const PlacementOperationRecord& completion_record = completion->second;
+    const PlacementOperationStatus dependency_status =
+        completion_record.intent.action ==
+                PlacementOperationAction::CANCEL_DRAIN
+            ? PlacementOperationStatus::CANCELED
+            : PlacementOperationStatus::SUCCEEDED;
+    bool has_dependent_drain = false;
+    for (const auto& [candidate_id, candidate] : records_) {
+      static_cast<void>(candidate_id);
+      if (candidate.status == dependency_status &&
+          candidate.intent.action == PlacementOperationAction::BEGIN_DRAIN &&
+          candidate.intent.engine_uid == completion_record.intent.engine_uid &&
+          candidate.intent.engine_incarnation ==
+              completion_record.intent.engine_incarnation &&
+          candidate.intent.desired_generation <=
+              completion_record.intent.desired_generation) {
+        has_dependent_drain = true;
+        break;
+      }
+    }
+    if (!has_dependent_drain) {
+      status = erase_record(operation_id);
+      if (status != PlacementExecutorStatus::OK) {
+        return status;
+      }
+    }
+  }
+  return PlacementExecutorStatus::OK;
 }
 
 std::vector<PlacementOperationRecord> PlacementOperationExecutor::snapshot()
@@ -411,6 +622,7 @@ PlacementOperationExecutor::operation_views() const {
         .leader_incarnation = record.intent.leader_incarnation,
         .leader_epoch = record.intent.leader_epoch,
         .desired_generation = record.intent.desired_generation,
+        .updated_at_ms = record.updated_at_ms,
     });
   }
   return views;

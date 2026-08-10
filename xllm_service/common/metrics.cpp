@@ -83,6 +83,9 @@ DEFINE_MULTI_COUNTER(xllm_service_v3_placement_observations_total,
 DEFINE_MULTI_COUNTER(xllm_service_v3_placement_recommendations_total,
                      "action",
                      "V3 Placement recommendations by bounded action");
+DEFINE_MULTI_COUNTER(xllm_service_v3_placement_operations_total,
+                     "outcome",
+                     "V3 Placement operation outcomes and compactions");
 
 // ttft latency histogram
 DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,

@@ -2,7 +2,7 @@
 
 本目录是 xLLM Service 设计的唯一入口。xLLM Service 本身就是推理控制面，不是“上层 LLM Service”之外的另一个控制面，也不是无状态 HTTP Proxy。
 
-**当前实现状态：** V2-B0 至 B10 的双仓代码与 CPU/simulated HBM 门已完成：xLLM Native 与 vLLM-Ascend 通过统一 Provider Contract、Registry、State/KV Stream、逐请求计划、有界流控和故障框架运行；多模型、HBM KV-aware、执行模式与端到端观测已有 CPU 证据。真实 NPU、CANN/Link、真实多 Service/P/D/etcd 集群、长时 soak 和线上阈值校准仍待验证，因此当前状态是 `CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`，不是生产硬件 `VERIFIED`。
+**当前实现状态：** V2-B0 至 B10 和 V3-P0 至 P5 的双仓代码与 CPU/simulated HBM 门已完成：xLLM Native 与 vLLM-Ascend 通过统一 Provider Contract、Registry、State/KV Stream、逐请求计划、有界流控和故障框架运行；V3 已具备 leader-fenced Placement 慢环、P/D/A 独立扩缩、持久 operation ledger、Provider/deployment actuator 和运行时回滚。真实 NPU、CANN/Link、真实多 Service/P/D/etcd/部署集群、长时 soak 和线上阈值校准仍待验证，因此当前状态是 `CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`，不是生产硬件 `VERIFIED`。
 
 **首个交付版本：V2。** 不设置独立 V1 产品版本。原 V1 规格中的 Provider SPI、State Stream、原子准入、deadline、fencing、资源回收和观测闭环全部并入 V2 基础能力；首发还必须同时完成 V2 的多模型、精确 HBM KV-aware、有界流控、优先级/租户公平和逐请求执行模式。xLLM Native 与 vLLM-Ascend 进入同一 Registry、State Stream、调度和故障框架，能力不足的执行模式 fail closed。
 
@@ -62,13 +62,15 @@
 | 12 | [V2 当前能力与远端代码索引](./12_XLLM_SERVICE_V2_CURRENT_CAPABILITIES.md) | 简洁但完整地说明已经具备的能力、远端 `service_dev` 代码/测试位置、证据边界和未完成门禁 |
 | 13 | [V2 现状、业界对标与演进蓝图汇报](./13_XLLM_SERVICE_V2_STATUS_AND_ROADMAP_REPORT.md) | 数据现状、业界架构、当前实现、P/D 选择、容错错误、Debug/性能分析及 V2–V5 规划 |
 | 14 | [V3 Placement 与 Autoscale](./14_XLLM_SERVICE_V3_PLACEMENT_AUTOSCALE_DESIGN.md) | V3 慢环、P/D/A 独立扩缩、leader fencing、desired state、生命周期 actuator、CPU 与线上门禁 |
+| 15 | [V3 当前能力与远端代码索引](./15_XLLM_SERVICE_V3_CURRENT_CAPABILITIES.md) | V3-P0 至 P5 已具备能力、远端 `service_dev` 代码/测试位置、运行模式和 P6 边界 |
 | 状态 | [V2 功能开发状态](./implementation/README.md) | 每项功能的支持矩阵、需求到测试追踪、CPU/NPU 验证和剩余缺口 |
+| 线上 | [V3 线上验证与反馈手册](./implementation/V3_ONLINE_VALIDATION_RUNBOOK.md) | SHADOW → create-only → 单 pool 缩容 → P/D 阶梯 → 故障 → 24h+ soak 与回滚证据 |
 | 评估 | [外部架构评估](./opus5_xllm_review.md) | 对照业界现状与未来方向；结论需吸收到权威文档后才生效 |
 | 背景 | [推理系统优化技术全景](./90_VLLM_INFERENCE_SYSTEM_OPTIMIZATION_GUIDE.md) | 业界方案和底层优化参考，不作为实现约束 |
 
 ## 文档效力
 
-发生冲突时，版本、代码、测试和完成度门禁以 00 为准，系统边界以 01 为准，V2 基础协议以 02 为准，V2 路由、流控和执行模式分别以 08/09 为准，多 Provider 以 11 为准，V3 Placement/Autoscale 以 14 为准。03 是建模专项设计，04 是其标注 commit 的 xLLM 能力快照，05 是 V2.5 KV 内存层专项设计，06 记录取舍，07 记录评审进展，10 提供线上证据、问题优先级和后续优化约束，12 是实现事实与远端代码索引，13 是基于权威设计和实现事实生成的汇报视图，外部评估和 90 只提供证据与建议。评估结论没有同步到对应权威设计前，不构成实现要求。
+发生冲突时，版本、代码、测试和完成度门禁以 00 为准，系统边界以 01 为准，V2 基础协议以 02 为准，V2 路由、流控和执行模式分别以 08/09 为准，多 Provider 以 11 为准，V3 Placement/Autoscale 以 14 为准。03 是建模专项设计，04 是其标注 commit 的 xLLM 能力快照，05 是 V2.5 KV 内存层专项设计，06 记录取舍，07 记录评审进展，10 提供线上证据、问题优先级和后续优化约束，12/15 是 V2/V3 实现事实与远端代码索引，13 是基于权威设计和实现事实生成的汇报视图，外部评估和 90 只提供证据与建议。评估结论没有同步到对应权威设计前，不构成实现要求。
 
 首个生产版本直接交付 V2：必须完成 02 中 G-2、G-1、G0–G4/M0 的全部基础能力，并同时通过 08、09、11 的 V2 门禁。只完成 Provider SPI、协议底座、State Stream、`IsSchedulable` 或 Engine 原子准入，均只能标记为 V2 内部开发进度，不能作为 V1 或 V2 对外交付。M1/M2 在相同公共状态和 Provider Contract 上迭代，但不能削弱 V2 首发的正确性和功能范围。
 

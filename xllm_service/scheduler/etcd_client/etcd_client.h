@@ -156,6 +156,15 @@ class EtcdClient {
       const std::string& expected_master_incarnation,
       uint64_t expected_master_epoch);
 
+  EtcdFencedWriteStatus compare_and_delete_pair_fenced(
+      const std::string& first_key,
+      int64_t first_expected_mod_revision,
+      const std::string& second_key,
+      int64_t second_expected_mod_revision,
+      const std::string& expected_master_address,
+      const std::string& expected_master_incarnation,
+      uint64_t expected_master_epoch);
+
   template <typename T>
   bool get_prefix(const std::string& key_prefix,
                   std::unordered_map<std::string, T>* values) {

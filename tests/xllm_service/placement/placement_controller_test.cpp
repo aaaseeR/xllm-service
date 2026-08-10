@@ -270,6 +270,7 @@ PlacementControllerConfig controller_config(PlacementMode mode) {
               .max_operations_per_pool = 16,
               .max_create_per_cycle = 4,
               .max_drain_per_cycle = 4,
+              .terminal_visibility_grace_ms = 1000,
           },
   };
 }
@@ -279,6 +280,8 @@ PlacementOperationExecutorConfig executor_config() {
       .max_records = 32,
       .max_message_bytes = 256,
       .operation_timeout_ms = 10000,
+      .terminal_retention_ms = 1000,
+      .max_terminal_compactions_per_cycle = 4,
   };
 }
 

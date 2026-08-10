@@ -219,13 +219,29 @@ CAS 比较上一 generation/revision，并同时比较当前 Service master 地�
 
 command/status 是有界的幂等 operation ledger。operation id 由
 `leader_incarnation + desired_generation + pool + ordinal + action` 确定生成；重试不创建
-新 operation。status 的 free-form message 有界，控制流只依赖稳定 code/state。
+新 operation。`ordinal` 是 `(leader-local monotonic_ms << 16) | cycle_ordinal`，因此同一
+leader/generation 后续修复动作不会重用已终态 operation id；leader epoch 对进程重启后的
+monotonic clock 重置做 fencing。status 的 free-form message 有界，控制流只依赖稳定
+code/state。
+
+终态账本按 retention 和每轮固定配额回收。Service 只回收 `SUCCEEDED` 及有成功
+CANCEL_DRAIN 证明的 `CANCELED BEGIN_DRAIN`；普通 `FAILED/FENCED` 保留用于告警和人工
+处置。command/status 必须在同一 etcd transaction 中比较 master 地址、master incarnation、
+master epoch 和两条记录各自 mod revision 后原子删除。drain 链按 BEGIN_DRAIN →
+CANCEL_DRAIN/TERMINATE 顺序回收，完成证明不得先于仍依赖它的 BEGIN_DRAIN 删除。依赖按
+engine incarnation 和 generation 匹配：`CANCELED BEGIN_DRAIN` 只由不早于它的 CANCEL
+证明回收，`SUCCEEDED BEGIN_DRAIN` 只由不早于它的 TERMINATE 证明回收；旧 generation
+的 CANCEL 不能遮蔽后续重新发起的 drain。
 
 ### 5.2 leader 切换
 
 新 leader 先读取 desired/command/status 全量快照，再开始 reconcile；不得从本地空状态
 覆盖集群 desired state。旧 leader 写入因 incarnation compare 失败。新 leader可以重试
 非终态 operation，但不能假定 RPC/写入失败等于部署动作未执行。
+
+etcd transaction 响应丢失同样不能直接判失败：CAS 在 master tuple 仍匹配且目标 value 已
+精确等于待写 value 时按幂等成功处理；终态 pair delete 在 master tuple 匹配且 command/
+status 均不存在时按幂等成功处理。不同 value、单边缺失或 revision 冲突继续 fail closed。
 
 ## 6. 生命周期与 actuator
 
@@ -261,9 +277,12 @@ transfer、D reservation/Decode/output 和 cleanup 全部归零。只有 Engine/
 terminal proof 后才可提交 UNLOADING。TERMINATE 之后必须观察旧 Registry lease 消失或
 部署系统提供精确进程终止证明；同一角色/新模型恢复使用新 incarnation。
 
-取消缩容只允许在 drain commit 之前。撤 lease、卸载权重或释放静态设备资源之后，禁止
-用旧 incarnation 回到 READY。超时保持 DRAINING/FAILED 并告警，不能强杀仍可能持有
-DMA、KV 或输出的进程。
+取消缩容只允许在 drain commit 之前。成功 CANCEL_DRAIN 会把对应未提交 BEGIN_DRAIN
+收敛为 `CANCELED` 终态；已经 `SUCCEEDED` 的 BEGIN_DRAIN 表示 commit，绝不能被改回
+CANCELED。需求在 commit 后反弹时必须先 CREATE replacement，Registry 证明可用容量恢复
+后再 TERMINATE 旧 incarnation。撤 lease、卸载权重或释放静态设备资源之后，禁止用旧
+incarnation 回到 READY。超时保持 DRAINING/FAILED 并告警，不能强杀仍可能持有 DMA、KV
+或输出的进程。
 
 ## 7. Reconcile
 
@@ -271,9 +290,10 @@ DMA、KV 或输出的进程。
 
 1. 验证 leader fencing、配置和输入 snapshot；
 2. 恢复所有非终态 operation，先 Query status，禁止盲目重发副作用；
-3. 对 `actual_usable < desired` 生成有界 CREATE；
-4. 对 `actual_usable > desired` 选择安全 victim：非 READY 优先、低 cache value、无活跃
-   reservation/transfer、最长稳定窗口；不得按地址随机选择；
+3. 对 `actual_usable < desired` 生成有界 CREATE；commit 后需求反弹时先补 replacement；
+4. 对 `actual_usable > desired` 只从 fresh READY 中选择具有 drain 能力、精确 cache value、
+   无活跃 reservation/transfer 的安全 victim，再按低 cache value、稳定时间和 identity
+   排序；已有 DRAINING 只由持久 operation ledger 驱动，不得按地址随机选择；
 5. 驱动 drain → unload → absent，任何结果不明保持 operation；
 6. 更新指标、结构化日志和周期 snapshot；
 7. 超出时间/操作/字节预算时停止本轮，不影响 Router。
@@ -337,6 +357,8 @@ V3 代码完成口径是 P0-P5 的全部可移植逻辑、跨仓协议和 CPU/lo
 5. 故障：leader kill、etcd stall、actuator timeout、Engine kill、drain timeout、状态陈旧；
 6. 多模型长稳：24h+，验证预算、公平、路由和 placement 无正反馈振荡。
 
-立即回滚方式是把 Placement mode 切为 SHADOW：停止生成新副作用，继续 Query/收敛已有
-operation；必要时将 desired count 固定为人工值。回滚不能删除未知 operation 或强制把
-DRAINING 改回 READY。
+立即回滚方式是把可动态重载的 `placement_mode_override` 切为 `1`（SHADOW；`-1` 表示
+采用配置，`0/2/3` 分别为 DISABLED/create-only/ENFORCED）。模式最多在一个 placement
+loop interval 内生效：停止生成新副作用，继续 Query/收敛已有 operation；必要时将 desired
+count 固定为人工值。回滚不能删除未知 operation、取消 committed drain 或强制把 DRAINING
+改回 READY。

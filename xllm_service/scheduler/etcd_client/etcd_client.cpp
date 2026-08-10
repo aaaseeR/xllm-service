@@ -310,17 +310,17 @@ EtcdFencedWriteStatus EtcdClient::compare_and_set_fenced(
   transaction.add_compare_value(
       namespaced_key(ETCD_MASTER_SERVICE_INCARNATION_KEY),
       expected_master_incarnation);
+  transaction.add_compare_mod(
+      namespaced_key(ETCD_MASTER_SERVICE_INCARNATION_KEY),
+      static_cast<int64_t>(expected_master_epoch));
   transaction.add_compare_mod(namespaced_key(key), expected_mod_revision);
   transaction.add_success_put(namespaced_key(key), value);
   const etcd::Response response = client_.txn(transaction);
   if (response.is_ok()) {
     return EtcdFencedWriteStatus::OK;
   }
-  if (response.error_code() != etcd::ERROR_COMPARE_FAILED) {
-    LOG(ERROR) << "etcd fenced compare-and-set " << key
-               << " failed: " << response.error_message();
-    return EtcdFencedWriteStatus::UNAVAILABLE;
-  }
+  const bool compare_failed =
+      response.error_code() == etcd::ERROR_COMPARE_FAILED;
 
   std::string master_address;
   std::string master_incarnation;
@@ -339,6 +339,103 @@ EtcdFencedWriteStatus EtcdClient::compare_and_set_fenced(
       master_address_revision != static_cast<int64_t>(expected_master_epoch) ||
       master_incarnation_revision != master_address_revision) {
     return EtcdFencedWriteStatus::FENCED;
+  }
+  std::string stored_value;
+  int64_t stored_revision = 0;
+  const EtcdReadStatus stored_status =
+      get_with_revision(key, &stored_value, &stored_revision);
+  if (stored_status == EtcdReadStatus::OK && stored_value == value) {
+    // The transaction may have committed while its response was lost. The
+    // caller reads the authoritative revision after this idempotent success.
+    return EtcdFencedWriteStatus::OK;
+  }
+  if (!compare_failed || stored_status == EtcdReadStatus::UNAVAILABLE ||
+      stored_status == EtcdReadStatus::INVALID_INPUT) {
+    LOG(ERROR) << "etcd fenced compare-and-set " << key
+               << " failed: " << response.error_message();
+    return EtcdFencedWriteStatus::UNAVAILABLE;
+  }
+  return EtcdFencedWriteStatus::REVISION_CONFLICT;
+}
+
+EtcdFencedWriteStatus EtcdClient::compare_and_delete_pair_fenced(
+    const std::string& first_key,
+    int64_t first_expected_mod_revision,
+    const std::string& second_key,
+    int64_t second_expected_mod_revision,
+    const std::string& expected_master_address,
+    const std::string& expected_master_incarnation,
+    uint64_t expected_master_epoch) {
+  if (first_key.empty() || second_key.empty() || first_key == second_key ||
+      first_expected_mod_revision <= 0 || second_expected_mod_revision <= 0 ||
+      expected_master_address.empty() || expected_master_incarnation.empty() ||
+      expected_master_epoch == 0 ||
+      expected_master_epoch >
+          static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return EtcdFencedWriteStatus::INVALID_INPUT;
+  }
+
+  etcdv3::Transaction transaction;
+  transaction.add_compare_value(namespaced_key(ETCD_MASTER_SERVICE_KEY),
+                                expected_master_address);
+  transaction.add_compare_mod(namespaced_key(ETCD_MASTER_SERVICE_KEY),
+                              static_cast<int64_t>(expected_master_epoch));
+  transaction.add_compare_value(
+      namespaced_key(ETCD_MASTER_SERVICE_INCARNATION_KEY),
+      expected_master_incarnation);
+  transaction.add_compare_mod(
+      namespaced_key(ETCD_MASTER_SERVICE_INCARNATION_KEY),
+      static_cast<int64_t>(expected_master_epoch));
+  transaction.add_compare_mod(namespaced_key(first_key),
+                              first_expected_mod_revision);
+  transaction.add_compare_mod(namespaced_key(second_key),
+                              second_expected_mod_revision);
+  transaction.add_success_delete(namespaced_key(first_key));
+  transaction.add_success_delete(namespaced_key(second_key));
+  const etcd::Response response = client_.txn(transaction);
+  if (response.is_ok()) {
+    return EtcdFencedWriteStatus::OK;
+  }
+  const bool compare_failed =
+      response.error_code() == etcd::ERROR_COMPARE_FAILED;
+
+  std::string master_address;
+  std::string master_incarnation;
+  int64_t master_address_revision = 0;
+  int64_t master_incarnation_revision = 0;
+  const EtcdReadStatus address_status = get_with_revision(
+      ETCD_MASTER_SERVICE_KEY, &master_address, &master_address_revision);
+  const EtcdReadStatus incarnation_status =
+      get_with_revision(ETCD_MASTER_SERVICE_INCARNATION_KEY,
+                        &master_incarnation,
+                        &master_incarnation_revision);
+  if (address_status != EtcdReadStatus::OK ||
+      incarnation_status != EtcdReadStatus::OK ||
+      master_address != expected_master_address ||
+      master_incarnation != expected_master_incarnation ||
+      master_address_revision != static_cast<int64_t>(expected_master_epoch) ||
+      master_incarnation_revision != master_address_revision) {
+    return EtcdFencedWriteStatus::FENCED;
+  }
+  std::string stored_value;
+  int64_t stored_revision = 0;
+  const EtcdReadStatus first_status =
+      get_with_revision(first_key, &stored_value, &stored_revision);
+  const EtcdReadStatus second_status =
+      get_with_revision(second_key, &stored_value, &stored_revision);
+  if (first_status == EtcdReadStatus::NOT_FOUND &&
+      second_status == EtcdReadStatus::NOT_FOUND) {
+    // Both keys disappearing is the exact postcondition of the atomic delete.
+    return EtcdFencedWriteStatus::OK;
+  }
+  if (!compare_failed || first_status == EtcdReadStatus::UNAVAILABLE ||
+      second_status == EtcdReadStatus::UNAVAILABLE ||
+      first_status == EtcdReadStatus::INVALID_INPUT ||
+      second_status == EtcdReadStatus::INVALID_INPUT) {
+    LOG(ERROR) << "etcd fenced compare-and-delete pair failed, first_key="
+               << first_key << ", second_key=" << second_key
+               << ", error=" << response.error_message();
+    return EtcdFencedWriteStatus::UNAVAILABLE;
   }
   return EtcdFencedWriteStatus::REVISION_CONFLICT;
 }

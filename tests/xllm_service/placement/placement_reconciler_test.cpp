@@ -29,6 +29,7 @@ PlacementReconcileConfig config() {
       .max_operations_per_pool = 16,
       .max_create_per_cycle = 2,
       .max_drain_per_cycle = 2,
+      .terminal_visibility_grace_ms = 1000,
   };
 }
 
@@ -93,6 +94,7 @@ PlacementOperationView operation(const std::string& operation_id,
       .leader_incarnation = "leader-1",
       .leader_epoch = 10,
       .desired_generation = 1,
+      .updated_at_ms = 2000,
   };
 }
 
@@ -111,6 +113,11 @@ TEST(PlacementReconcilerTest, CreatesBoundedDeterministicDeficit) {
   EXPECT_EQ(first.intents[0].action, PlacementOperationAction::CREATE);
   EXPECT_EQ(first.intents[0].operation_id, second.intents[0].operation_id);
   EXPECT_NE(first.intents[0].operation_id, first.intents[1].operation_id);
+
+  const PlacementReconcileResult next_cycle = reconcile_placement_pool(
+      config(), desired(4), leader(), replicas, {}, /*now_ms=*/3001);
+  ASSERT_EQ(next_cycle.intents.size(), 2u);
+  EXPECT_NE(first.intents[0].operation_id, next_cycle.intents[0].operation_id);
 }
 
 TEST(PlacementReconcilerTest, UnknownCacheValueCannotBecomeDrainVictim) {
@@ -125,6 +132,53 @@ TEST(PlacementReconcilerTest, UnknownCacheValueCannotBecomeDrainVictim) {
   ASSERT_EQ(result.reason, PlacementReconcileReason::SCALE_DOWN);
   ASSERT_EQ(result.intents.size(), 1u);
   EXPECT_EQ(result.intents[0].engine_uid, "engine-known");
+}
+
+TEST(PlacementReconcilerTest, CreateProofGraceCannotMaskPermanentAbsence) {
+  PlacementOperationView created =
+      operation("create-succeeded",
+                PlacementOperationAction::CREATE,
+                PlacementOperationStatus::SUCCEEDED);
+  created.engine_uid = "engine-created";
+  created.engine_incarnation = "inc-created";
+
+  const PlacementReconcileResult within_grace = reconcile_placement_pool(
+      config(), desired(1), leader(), {}, {created}, /*now_ms=*/2500);
+  EXPECT_EQ(within_grace.reason, PlacementReconcileReason::CONVERGED);
+  EXPECT_TRUE(within_grace.intents.empty());
+
+  const PlacementReconcileResult expired = reconcile_placement_pool(
+      config(), desired(1), leader(), {}, {created}, /*now_ms=*/3001);
+  EXPECT_EQ(expired.reason, PlacementReconcileReason::SCALE_UP);
+  ASSERT_EQ(expired.intents.size(), 1u);
+  EXPECT_EQ(expired.intents[0].action, PlacementOperationAction::CREATE);
+}
+
+TEST(PlacementReconcilerTest, ExplicitFailureOverridesTerminalProofGrace) {
+  PlacementOperationView created =
+      operation("create-succeeded",
+                PlacementOperationAction::CREATE,
+                PlacementOperationStatus::SUCCEEDED);
+  created.engine_uid = "engine-created";
+  created.engine_incarnation = "engine-created-inc";
+  PlacementReplicaFact failed =
+      replica("engine-created", PlacementLifecycleState::FAILED);
+
+  const PlacementReconcileResult create_result = reconcile_placement_pool(
+      config(), desired(1), leader(), {failed}, {created}, /*now_ms=*/2500);
+  ASSERT_EQ(create_result.reason, PlacementReconcileReason::SCALE_UP);
+  ASSERT_EQ(create_result.intents.size(), 1u);
+
+  PlacementOperationView cancel =
+      operation("cancel-succeeded",
+                PlacementOperationAction::CANCEL_DRAIN,
+                PlacementOperationStatus::SUCCEEDED);
+  const PlacementReplicaFact canceled_failed =
+      replica("engine-1", PlacementLifecycleState::FAILED);
+  const PlacementReconcileResult cancel_result = reconcile_placement_pool(
+      config(), desired(1), leader(), {canceled_failed}, {cancel}, 2500);
+  EXPECT_EQ(cancel_result.reason, PlacementReconcileReason::SCALE_UP);
+  EXPECT_EQ(cancel_result.managed_replicas, 0u);
 }
 
 TEST(PlacementReconcilerTest, LoadingAndWarmingCountTowardDesired) {
@@ -223,6 +277,76 @@ TEST(PlacementReconcilerTest, NewGenerationCanCancelUncommittedDrain) {
   EXPECT_EQ(result.intents[0].desired_generation, 2u);
 }
 
+TEST(PlacementReconcilerTest, DemandRecoveryReplacesCommittedDrainFirst) {
+  const PlacementOperationView committed =
+      operation("committed-drain",
+                PlacementOperationAction::BEGIN_DRAIN,
+                PlacementOperationStatus::SUCCEEDED);
+  const PlacementReplicaFact draining =
+      replica("engine-1", PlacementLifecycleState::DRAINING);
+  const PlacementReconcileResult result = reconcile_placement_pool(
+      config(), desired(1, 2), leader(), {draining}, {committed}, 3000);
+  ASSERT_EQ(result.status, PlacementReconcileStatus::OK);
+  ASSERT_EQ(result.reason, PlacementReconcileReason::SCALE_UP);
+  ASSERT_EQ(result.intents.size(), 1u);
+  EXPECT_EQ(result.intents[0].action, PlacementOperationAction::CREATE);
+  EXPECT_EQ(result.intents[0].desired_generation, 2u);
+}
+
+TEST(PlacementReconcilerTest, SuccessfulCancelHasVisibilityGrace) {
+  PlacementOperationView cancel =
+      operation("committed-cancel",
+                PlacementOperationAction::CANCEL_DRAIN,
+                PlacementOperationStatus::SUCCEEDED);
+  cancel.desired_generation = 2;
+  const PlacementReplicaFact draining =
+      replica("engine-1", PlacementLifecycleState::DRAINING);
+  const PlacementReconcileResult result = reconcile_placement_pool(
+      config(), desired(1, 2), leader(), {draining}, {cancel}, 2500);
+  EXPECT_EQ(result.status, PlacementReconcileStatus::OK);
+  EXPECT_TRUE(result.intents.empty());
+  EXPECT_EQ(result.managed_replicas, 1u);
+}
+
+TEST(PlacementReconcilerTest, OldCancelCannotMaskNewDrainGeneration) {
+  PlacementOperationView old_cancel =
+      operation("old-cancel",
+                PlacementOperationAction::CANCEL_DRAIN,
+                PlacementOperationStatus::SUCCEEDED);
+  old_cancel.desired_generation = 2;
+  PlacementOperationView committed =
+      operation("new-committed-drain",
+                PlacementOperationAction::BEGIN_DRAIN,
+                PlacementOperationStatus::SUCCEEDED);
+  committed.desired_generation = 3;
+  const PlacementReplicaFact draining =
+      replica("engine-1", PlacementLifecycleState::DRAINING);
+  const PlacementReconcileResult termination = reconcile_placement_pool(
+      config(),
+      desired(1, 4),
+      leader(),
+      {draining, replica("engine-2", PlacementLifecycleState::READY)},
+      {old_cancel, committed},
+      2500);
+  ASSERT_EQ(termination.reason, PlacementReconcileReason::TERMINATE_DRAINED);
+  ASSERT_EQ(termination.intents.size(), 1u);
+  EXPECT_EQ(termination.intents[0].engine_uid, "engine-1");
+
+  PlacementOperationView pending = committed;
+  pending.operation_id = "new-pending-drain";
+  pending.status = PlacementOperationStatus::IN_PROGRESS;
+  const PlacementReconcileResult cancellation = reconcile_placement_pool(
+      config(),
+      desired(2, 4),
+      leader(),
+      {draining, replica("engine-2", PlacementLifecycleState::READY)},
+      {old_cancel, pending},
+      2500);
+  ASSERT_EQ(cancellation.reason, PlacementReconcileReason::CANCEL_DRAIN);
+  ASSERT_EQ(cancellation.intents.size(), 1u);
+  EXPECT_EQ(cancellation.intents[0].engine_uid, "engine-1");
+}
+
 TEST(PlacementReconcilerTest, CurrentGenerationTerminalFailureHolds) {
   const PlacementOperationView failed =
       operation("create-failed",
@@ -277,6 +401,19 @@ TEST(PlacementReconcilerTest, FailsClosedOnInvalidActualAndOperation) {
   };
   EXPECT_EQ(reconcile_placement_pool(
                 config(), desired(1), leader(), {}, duplicate, /*now_ms=*/3000)
+                .reason,
+            PlacementReconcileReason::INVALID_OPERATION);
+
+  PlacementOperationView invalid_canceled =
+      operation("invalid-canceled",
+                PlacementOperationAction::CREATE,
+                PlacementOperationStatus::CANCELED);
+  EXPECT_EQ(reconcile_placement_pool(config(),
+                                     desired(1),
+                                     leader(),
+                                     {},
+                                     {invalid_canceled},
+                                     /*now_ms=*/3000)
                 .reason,
             PlacementReconcileReason::INVALID_OPERATION);
 }

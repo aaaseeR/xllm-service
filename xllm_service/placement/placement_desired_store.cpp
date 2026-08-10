@@ -178,6 +178,28 @@ PlacementStoreStatus EtcdPlacementFencedKv::compare_and_set(
                                                           leader.epoch));
 }
 
+PlacementStoreStatus EtcdPlacementFencedKv::compare_and_delete_pair(
+    const std::string& first_logical_key,
+    int64_t first_expected_mod_revision,
+    const std::string& second_logical_key,
+    int64_t second_expected_mod_revision,
+    const PlacementLeaderIdentity& leader) {
+  if (client_ == nullptr || first_logical_key.empty() ||
+      second_logical_key.empty() || first_logical_key == second_logical_key ||
+      first_expected_mod_revision <= 0 || second_expected_mod_revision <= 0 ||
+      !valid_placement_leader_identity(leader)) {
+    return PlacementStoreStatus::INVALID_INPUT;
+  }
+  return map_write_status(
+      client_->compare_and_delete_pair_fenced(first_logical_key,
+                                              first_expected_mod_revision,
+                                              second_logical_key,
+                                              second_expected_mod_revision,
+                                              leader.address,
+                                              leader.incarnation,
+                                              leader.epoch));
+}
+
 PlacementDesiredStore::PlacementDesiredStore(PlacementFencedKv* backend)
     : backend_(backend) {}
 

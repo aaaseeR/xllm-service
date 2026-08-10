@@ -39,6 +39,7 @@ enum class PlacementOperationStatus : int8_t {
   SUCCEEDED = 4,
   FAILED = 5,
   FENCED = 6,
+  CANCELED = 7,
 };
 
 enum class PlacementReconcileStatus : int8_t {
@@ -69,6 +70,7 @@ struct PlacementReconcileConfig {
   uint32_t max_operations_per_pool = 0;
   uint32_t max_create_per_cycle = 0;
   uint32_t max_drain_per_cycle = 0;
+  uint64_t terminal_visibility_grace_ms = 0;
 };
 
 struct PlacementReplicaFact {
@@ -96,6 +98,7 @@ struct PlacementOperationView {
   std::string leader_incarnation;
   uint64_t leader_epoch = 0;
   uint64_t desired_generation = 0;
+  uint64_t updated_at_ms = 0;
 };
 
 struct PlacementOperationIntent {
@@ -107,7 +110,7 @@ struct PlacementOperationIntent {
   std::string leader_incarnation;
   uint64_t leader_epoch = 0;
   uint64_t desired_generation = 0;
-  uint32_t ordinal = 0;
+  uint64_t ordinal = 0;
 };
 
 struct PlacementReconcileResult {
@@ -133,7 +136,7 @@ std::string make_placement_operation_id(const PlacementLeaderIdentity& leader,
                                         uint64_t desired_generation,
                                         const PlacementPoolKey& pool,
                                         PlacementOperationAction action,
-                                        uint32_t ordinal,
+                                        uint64_t ordinal,
                                         const std::string& engine_uid,
                                         const std::string& engine_incarnation);
 

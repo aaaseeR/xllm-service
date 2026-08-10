@@ -1,0 +1,126 @@
+{
+  "schema_version": 3,
+  "loop_interval_ms": 5000,
+  "controller": {
+    "mode": "SHADOW",
+    "max_pools": 16,
+    "max_desired_snapshot_bytes": 262144,
+    "max_operation_snapshot_bytes": 1048576,
+    "max_devices": 64,
+    "max_new_operations_per_cycle": 4,
+    "max_actuator_actions_per_cycle": 8,
+    "planner": {
+      "scale_up_hold_ms": 10000,
+      "scale_down_stabilization_ms": 600000,
+      "cooldown_ms": 300000,
+      "economic_horizon_ms": 3600000,
+      "min_scale_down_samples": 1000,
+      "max_scale_up_step": 2,
+      "max_scale_down_step": 1,
+      "queue_high_watermark": 32.0,
+      "queue_low_watermark": 2.0,
+      "admission_reject_high_watermark": 0.02,
+      "admission_reject_low_watermark": 0.001,
+      "kv_high_watermark": 0.9,
+      "kv_low_watermark": 0.5
+    },
+    "reconcile": {
+      "max_operations_per_cycle": 8,
+      "max_operations_per_pool": 256,
+      "max_create_per_cycle": 2,
+      "max_drain_per_cycle": 1,
+      "terminal_visibility_grace_ms": 30000
+    }
+  },
+  "executor": {
+    "max_records": 4096,
+    "max_message_bytes": 512,
+    "operation_timeout_ms": 900000,
+    "terminal_retention_ms": 3600000,
+    "max_terminal_compactions_per_cycle": 64
+  },
+  "observation": {
+    "max_models": 16,
+    "bucket_count": 120,
+    "bucket_width_ms": 5000,
+    "max_latency_samples_per_bucket": 1024,
+    "forecast_horizon_ms": 300000,
+    "forecast_headroom": 1.2
+  },
+  "input_builder": {
+    "max_pools": 16,
+    "max_members": 8192
+  },
+  "transports": {
+    "native_timeout_ms": 3000,
+    "native_max_channels": 4096,
+    "vllm_timeout_ms": 3000,
+    "vllm_max_channels": 4096,
+    "vllm_max_response_bytes": 65536,
+    "vllm_internal_api_token": "REPLACE_WITH_INTERNAL_TOKEN"
+  },
+  "deployment": {
+    "address": "deployment-gateway.service:8080",
+    "timeout_ms": 10000,
+    "max_response_bytes": 65536,
+    "internal_api_token": "REPLACE_WITH_DEPLOYMENT_TOKEN"
+  },
+  "pools": [
+    {
+      "provider": "XLLM_NATIVE",
+      "model_revision": "REPLACE_WITH_MODEL_REVISION",
+      "role": "PREFILL",
+      "profile_digest": "REPLACE_WITH_PREFILL_PROFILE_DIGEST",
+      "devices_per_replica": 1,
+      "instance_cost_per_hour": 1.0,
+      "load_warmup_p99_ms": 180000,
+      "prefill_tokens_per_second_under_slo": 1000.0,
+      "decode_tokens_per_second_under_slo": 0.0,
+      "requests_per_second_under_slo": 0.0,
+      "target_utilization": 0.7,
+      "min_replicas": 1,
+      "max_replicas": 16,
+      "failure_headroom_replicas": 1,
+      "ttft_slo_ms": 1000.0,
+      "tpot_slo_ms": 100.0,
+      "priority": 100,
+      "slo_risk_score": 1.0,
+      "config_digest": "REPLACE_WITH_CONFIG_DIGEST",
+      "external": {
+        "queue_depth": 0.0,
+        "kv_used_ratio": 0.0,
+        "full_cache_loss_cost": 0.0,
+        "confirmed_store_coverage": 0.0,
+        "out_of_distribution": false
+      }
+    },
+    {
+      "provider": "XLLM_NATIVE",
+      "model_revision": "REPLACE_WITH_MODEL_REVISION",
+      "role": "DECODE",
+      "profile_digest": "REPLACE_WITH_DECODE_PROFILE_DIGEST",
+      "devices_per_replica": 1,
+      "instance_cost_per_hour": 1.0,
+      "load_warmup_p99_ms": 180000,
+      "prefill_tokens_per_second_under_slo": 0.0,
+      "decode_tokens_per_second_under_slo": 2000.0,
+      "requests_per_second_under_slo": 0.0,
+      "target_utilization": 0.7,
+      "min_replicas": 1,
+      "max_replicas": 32,
+      "failure_headroom_replicas": 1,
+      "ttft_slo_ms": 1000.0,
+      "tpot_slo_ms": 100.0,
+      "priority": 100,
+      "slo_risk_score": 1.0,
+      "config_digest": "REPLACE_WITH_CONFIG_DIGEST",
+      "external": {
+        "queue_depth": 0.0,
+        "kv_used_ratio": 0.0,
+        "full_cache_loss_cost": 0.0,
+        "confirmed_store_coverage": 0.0,
+        "out_of_distribution": false
+      }
+    }
+  ]
+}
