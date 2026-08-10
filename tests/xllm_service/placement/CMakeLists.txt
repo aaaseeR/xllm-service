@@ -12,6 +12,26 @@ cc_test(
 
 cc_test(
   NAME
+    placement_observation_collector_test
+  SRCS
+    placement_observation_collector_test.cpp
+  DEPS
+    :placement_observation_collector
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    placement_input_builder_test
+  SRCS
+    placement_input_builder_test.cpp
+  DEPS
+    :placement_input_builder
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     placement_budget_allocator_test
   SRCS
     placement_budget_allocator_test.cpp
@@ -90,5 +110,15 @@ cc_test(
     placement_controller_test.cpp
   DEPS
     :placement_controller
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    placement_config_test
+  SRCS
+    placement_config_test.cpp
+  DEPS
+    :placement_config
     GTest::gtest_main
 )

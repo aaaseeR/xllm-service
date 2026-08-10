@@ -21,6 +21,7 @@ limitations under the License.
 #include <optional>
 #include <shared_mutex>
 #include <string>
+#include <vector>
 
 #include "provider.pb.h"
 #include "provider/observation_controller.h"
@@ -54,6 +55,15 @@ struct EngineKVCapacitySnapshot {
   uint64_t total_free_blocks = 0;
   bool has_used_ratio = false;
   bool has_free_blocks = false;
+};
+
+struct EngineRegistryMemberSnapshot {
+  xllm::proto::ProviderDescriptor descriptor;
+  std::optional<xllm::proto::EngineState> state;
+  EngineStateFreshness state_freshness = EngineStateFreshness::MISSING;
+  bool heartbeat_fresh = false;
+  bool schedulable = false;
+  uint64_t lifecycle_since_monotonic_ms = 0;
 };
 
 xllm::proto::ProviderEngineKey make_provider_engine_key(
@@ -110,6 +120,13 @@ class EngineRegistry final {
       uint64_t receiver_monotonic_ms) const;
   EngineKVCapacitySnapshot kv_capacity_snapshot(
       uint64_t receiver_monotonic_ms) const;
+  // Stable, bounded membership/state view for the V3 slow loop. The Registry
+  // lock is held only while copying protobuf values; callers never retain
+  // pointers into routing state.
+  ContractResult snapshot_members(
+      uint64_t receiver_monotonic_ms,
+      size_t max_members,
+      std::vector<EngineRegistryMemberSnapshot>* snapshot) const;
 
   bool registry_known() const;
   bool has_accepted_full_snapshot() const;
@@ -137,6 +154,7 @@ class EngineRegistry final {
   struct CachedEngineState {
     xllm::proto::EngineState state;
     uint64_t received_monotonic_ms = 0;
+    uint64_t lifecycle_since_monotonic_ms = 0;
   };
 
   struct CachedLinkState {

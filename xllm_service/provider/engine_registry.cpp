@@ -261,10 +261,16 @@ ContractResult EngineRegistry::record_engine_state(
       state.state_seq() <= existing->second.state.state_seq()) {
     return ContractResult::success();
   }
+  const uint64_t lifecycle_since =
+      existing != states_.end() &&
+              existing->second.state.lifecycle() == state.lifecycle()
+          ? existing->second.lifecycle_since_monotonic_ms
+          : receiver_monotonic_ms;
   states_.insert_or_assign(key.value(),
                            CachedEngineState{
                                .state = state,
                                .received_monotonic_ms = receiver_monotonic_ms,
+                               .lifecycle_since_monotonic_ms = lifecycle_since,
                            });
   *applied = true;
   return ContractResult::success();
@@ -504,11 +510,18 @@ ContractResult EngineRegistry::apply_state_batch(
     if (!validation.ok()) {
       return validation;
     }
+    const auto existing = states_.find(key.value());
+    const uint64_t lifecycle_since =
+        existing != states_.end() &&
+                existing->second.state.lifecycle() == state.lifecycle()
+            ? existing->second.lifecycle_since_monotonic_ms
+            : receiver_monotonic_ms;
     if (!incoming_states
              .emplace(key.value(),
                       CachedEngineState{
                           .state = state,
                           .received_monotonic_ms = receiver_monotonic_ms,
+                          .lifecycle_since_monotonic_ms = lifecycle_since,
                       })
              .second) {
       return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_DUPLICATE_ENTRY,
@@ -951,6 +964,69 @@ EngineKVCapacitySnapshot EngineRegistry::kv_capacity_snapshot(
     snapshot.min_free_blocks = min_free_blocks;
   }
   return snapshot;
+}
+
+ContractResult EngineRegistry::snapshot_members(
+    uint64_t receiver_monotonic_ms,
+    size_t max_members,
+    std::vector<EngineRegistryMemberSnapshot>* snapshot) const {
+  if (!config_valid_ || receiver_monotonic_ms == 0 || max_members == 0 ||
+      snapshot == nullptr) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "Engine Registry snapshot input is invalid");
+  }
+  std::unique_lock lock(mutex_);
+  if (members_.size() > max_members) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "Engine Registry snapshot capacity is exhausted");
+  }
+  const std::optional<ObservationSnapshot> observation =
+      update_observation_locked(receiver_monotonic_ms);
+  if (!observation.has_value()) {
+    return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
+                "Engine Registry observation clock regressed");
+  }
+  std::vector<EngineRegistryMemberSnapshot> copied;
+  copied.reserve(members_.size());
+  for (const auto& [key, descriptor] : members_) {
+    EngineRegistryMemberSnapshot member{
+        .descriptor = descriptor,
+    };
+    const auto state = states_.find(key);
+    if (state != states_.end() && state->second.state.engine_uid() ==
+                                      descriptor.identity().engine_uid()) {
+      member.state = state->second.state;
+      const xllm::proto::EngineState& engine_state = state->second.state;
+      if (engine_state.has_state_age_ms_at_publish()) {
+        const uint64_t state_age =
+            effective_age_ms(engine_state.state_age_ms_at_publish(),
+                             state->second.received_monotonic_ms,
+                             receiver_monotonic_ms);
+        member.state_freshness = state_age > config_.state_hard_ttl_ms
+                                     ? EngineStateFreshness::HARD_STALE
+                                     : (state_age > config_.state_soft_ttl_ms
+                                            ? EngineStateFreshness::SOFT_STALE
+                                            : EngineStateFreshness::FRESH);
+      }
+      if (engine_state.has_heartbeat_age_ms_at_publish()) {
+        member.heartbeat_fresh =
+            effective_age_ms(engine_state.heartbeat_age_ms_at_publish(),
+                             state->second.received_monotonic_ms,
+                             receiver_monotonic_ms) <=
+            config_.heartbeat_hard_ttl_ms;
+      }
+      member.schedulable =
+          is_schedulable_locked(key,
+                                descriptor.identity().engine_uid(),
+                                receiver_monotonic_ms,
+                                *observation);
+      member.lifecycle_since_monotonic_ms =
+          state->second.lifecycle_since_monotonic_ms;
+    }
+    copied.emplace_back(std::move(member));
+  }
+  *snapshot = std::move(copied);
+  return ContractResult::success();
 }
 
 bool EngineRegistry::registry_known() const {

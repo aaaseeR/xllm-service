@@ -24,6 +24,30 @@ cc_library(
 
 cc_library(
   NAME
+    placement_observation_collector
+  HDRS
+    placement_observation_collector.h
+  SRCS
+    placement_observation_collector.cpp
+  DEPS
+    :placement_types
+)
+
+cc_library(
+  NAME
+    placement_input_builder
+  HDRS
+    placement_input_builder.h
+  SRCS
+    placement_input_builder.cpp
+  DEPS
+    :engine_registry
+    :placement_controller
+    :placement_observation_collector
+)
+
+cc_library(
+  NAME
     placement_budget_allocator
   HDRS
     placement_budget_allocator.h
@@ -103,4 +127,18 @@ cc_library(
     :placement_desired_store
     :placement_planner
     :placement_reconciler
+)
+
+cc_library(
+  NAME
+    placement_config
+  HDRS
+    placement_config.h
+  SRCS
+    placement_config.cpp
+  DEPS
+    :placement_controller
+    :placement_input_builder
+    :placement_observation_collector
+    nlohmann_json::nlohmann_json
 )

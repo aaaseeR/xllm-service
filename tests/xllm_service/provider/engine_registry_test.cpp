@@ -231,6 +231,79 @@ TEST(EngineRegistryTest, KVCapacitySnapshotAggregatesFreshDpState) {
   EXPECT_FALSE(stale.has_free_blocks);
 }
 
+TEST(EngineRegistryTest, MemberSnapshotIsBoundedFreshAndSelfContained) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor descriptor = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p0", "inc-1", "profile-1");
+  ASSERT_TRUE(registry.upsert_member(descriptor).ok());
+  set_registry_view(&registry, "master-1");
+  xllm::proto::StateBatch full =
+      make_batch("master-1", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(descriptor, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  ASSERT_TRUE(applied);
+
+  std::vector<EngineRegistryMemberSnapshot> snapshot;
+  const ContractResult result = registry.snapshot_members(105, 2, &snapshot);
+  ASSERT_TRUE(result.ok()) << result.message();
+  ASSERT_EQ(snapshot.size(), 1u);
+  EXPECT_EQ(snapshot[0].descriptor.identity().engine_uid(), "p0");
+  ASSERT_TRUE(snapshot[0].state.has_value());
+  EXPECT_EQ(snapshot[0].state->state_seq(), 1u);
+  EXPECT_EQ(snapshot[0].state_freshness, EngineStateFreshness::FRESH);
+  EXPECT_TRUE(snapshot[0].heartbeat_fresh);
+  EXPECT_TRUE(snapshot[0].schedulable);
+  EXPECT_EQ(snapshot[0].lifecycle_since_monotonic_ms, 100u);
+
+  xllm::proto::EngineState next_state = make_state(descriptor, 2);
+  ASSERT_TRUE(registry.record_engine_state(next_state, 106, &applied).ok());
+  ASSERT_TRUE(applied);
+  ASSERT_TRUE(registry.snapshot_members(106, 2, &snapshot).ok());
+  EXPECT_EQ(snapshot[0].lifecycle_since_monotonic_ms, 100u);
+
+  next_state.set_state_seq(3);
+  next_state.set_lifecycle(xllm::proto::ENGINE_LIFECYCLE_DRAINING);
+  next_state.mutable_drain()->set_admission_closed(true);
+  ASSERT_TRUE(registry.record_engine_state(next_state, 107, &applied).ok());
+  ASSERT_TRUE(applied);
+  ASSERT_TRUE(registry.snapshot_members(107, 2, &snapshot).ok());
+  EXPECT_EQ(snapshot[0].lifecycle_since_monotonic_ms, 107u);
+
+  snapshot[0].descriptor.mutable_identity()->set_engine_uid("mutated");
+  EXPECT_EQ(registry.find_member(make_provider_engine_key(descriptor))
+                ->identity()
+                .engine_uid(),
+            "p0");
+  EXPECT_FALSE(registry.snapshot_members(105, 0, &snapshot).ok());
+}
+
+TEST(EngineRegistryTest, MemberSnapshotPreservesStaleAndMissingFacts) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor with_state = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p0", "inc-1", "profile-1");
+  const xllm::proto::ProviderDescriptor missing_state = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p1", "inc-2", "profile-2");
+  ASSERT_TRUE(registry.upsert_member(with_state).ok());
+  ASSERT_TRUE(registry.upsert_member(missing_state).ok());
+  bool applied = false;
+  ASSERT_TRUE(
+      registry.record_engine_state(make_state(with_state, 1), 100, &applied)
+          .ok());
+  ASSERT_TRUE(applied);
+
+  std::vector<EngineRegistryMemberSnapshot> snapshot;
+  ASSERT_TRUE(registry.snapshot_members(121, 2, &snapshot).ok());
+  ASSERT_EQ(snapshot.size(), 2u);
+  EXPECT_EQ(snapshot[0].state_freshness, EngineStateFreshness::HARD_STALE);
+  EXPECT_FALSE(snapshot[0].heartbeat_fresh);
+  EXPECT_FALSE(snapshot[0].schedulable);
+  EXPECT_FALSE(snapshot[1].state.has_value());
+  EXPECT_EQ(snapshot[1].state_freshness, EngineStateFreshness::MISSING);
+  EXPECT_FALSE(snapshot[1].schedulable);
+  EXPECT_FALSE(registry.snapshot_members(121, 1, &snapshot).ok());
+}
+
 TEST(EngineRegistryTest, RequiresCurrentMasterFullBeforeScheduling) {
   EngineRegistry registry(test_config());
   const xllm::proto::ProviderDescriptor prefill = make_descriptor(

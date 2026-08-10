@@ -121,6 +121,10 @@ class InstanceMgr final {
       uint64_t receiver_monotonic_ms) const;
   provider::EngineKVCapacitySnapshot engine_kv_capacity_snapshot(
       uint64_t receiver_monotonic_ms) const;
+  provider::ContractResult snapshot_engine_members(
+      uint64_t receiver_monotonic_ms,
+      size_t max_members,
+      std::vector<provider::EngineRegistryMemberSnapshot>* snapshot) const;
   size_t engine_member_count() const;
   size_t engine_state_count() const;
   size_t engine_link_count() const;

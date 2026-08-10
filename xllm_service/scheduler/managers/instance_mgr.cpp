@@ -869,6 +869,14 @@ provider::EngineKVCapacitySnapshot InstanceMgr::engine_kv_capacity_snapshot(
   return engine_registry_.kv_capacity_snapshot(receiver_monotonic_ms);
 }
 
+provider::ContractResult InstanceMgr::snapshot_engine_members(
+    uint64_t receiver_monotonic_ms,
+    size_t max_members,
+    std::vector<provider::EngineRegistryMemberSnapshot>* snapshot) const {
+  return engine_registry_.snapshot_members(
+      receiver_monotonic_ms, max_members, snapshot);
+}
+
 size_t InstanceMgr::engine_member_count() const {
   return engine_registry_.member_count();
 }
