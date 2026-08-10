@@ -81,6 +81,7 @@ struct PlacementReplicaFact {
   uint64_t active_reservations = 0;
   uint64_t active_transfers = 0;
   double cache_value = 0.0;
+  bool cache_value_known = true;
   uint64_t stable_since_ms = 0;
   uint64_t observed_at_ms = 0;
 };

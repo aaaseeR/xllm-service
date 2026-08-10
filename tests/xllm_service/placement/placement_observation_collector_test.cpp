@@ -96,6 +96,20 @@ TEST(PlacementObservationCollectorTest, RotatesOldBucketsDeterministically) {
   EXPECT_EQ(observation.major_bucket_samples, 1u);
 }
 
+TEST(PlacementObservationCollectorTest, RegisteredModelProducesColdStart) {
+  PlacementObservationCollector collector(config());
+  ASSERT_EQ(collector.register_model("model-a", 1000),
+            PlacementObservationStatus::OK);
+  PlacementObservation observation;
+  ASSERT_EQ(
+      collector.snapshot(
+          "model-a", 1000, PlacementObservationExternalInputs{}, &observation),
+      PlacementObservationStatus::OK);
+  EXPECT_TRUE(observation.cold_start);
+  EXPECT_EQ(observation.major_bucket_samples, 0u);
+  EXPECT_DOUBLE_EQ(observation.forecast_request_rate, 0.0);
+}
+
 TEST(PlacementObservationCollectorTest, FailsClosedOnBoundsAndOldClock) {
   PlacementObservationCollector collector(config());
   EXPECT_EQ(collector.record_ingress("model-a", 1, 1, 5000),

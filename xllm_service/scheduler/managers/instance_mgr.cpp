@@ -877,6 +877,10 @@ provider::ContractResult InstanceMgr::snapshot_engine_members(
       receiver_monotonic_ms, max_members, snapshot);
 }
 
+provider::EngineRegistry* InstanceMgr::mutable_engine_registry() {
+  return &engine_registry_;
+}
+
 size_t InstanceMgr::engine_member_count() const {
   return engine_registry_.member_count();
 }

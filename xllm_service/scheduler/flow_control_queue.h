@@ -102,6 +102,13 @@ struct FlowControlSnapshot {
   size_t active_queued_flows = 0;
 };
 
+struct FlowControlModelSnapshot {
+  size_t queued_requests = 0;
+  size_t dispatched_requests = 0;
+  uint64_t queued_prompt_tokens = 0;
+  uint64_t queued_bytes = 0;
+};
+
 struct FlowControlAdmission {
   FlowControlStatus status = FlowControlStatus::INVALID_ARGUMENT;
   uint64_t earliest_dispatch_ms_ub = 0;
@@ -141,6 +148,7 @@ class FlowControlQueue final {
   std::vector<FlowControlWork> retry_undispatched(size_t max_items);
 
   FlowControlSnapshot snapshot() const;
+  FlowControlModelSnapshot model_snapshot(const std::string& model_pool) const;
 
  private:
   struct Entry {

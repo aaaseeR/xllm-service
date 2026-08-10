@@ -154,6 +154,42 @@ TEST(KVShadowIndexTest, AppliesDuplicateStoreAndRemoveIdempotently) {
       identity, block.block_hash(), block.cache_group(), block.tier()));
 }
 
+TEST(KVShadowIndexTest, EngineCacheValueCountsOnlyFullyKnownHbm) {
+  KVShadowIndex index(make_config());
+  const xllm::proto::KVStreamIdentity primary = make_identity();
+  xllm::proto::KVBlockEntry hbm = make_block(1);
+  xllm::proto::KVBlockEntry dram = make_block(2, 1);
+  dram.set_tier(xllm::proto::KV_CACHE_TIER_HOST);
+  ASSERT_EQ(
+      index
+          .apply_event_batch(
+              make_batch(
+                  primary,
+                  {make_event(1, xllm::proto::KV_EVENT_KIND_STORED, hbm),
+                   make_event(2, xllm::proto::KV_EVENT_KIND_STORED, dram)}),
+              1000)
+          .code,
+      KVApplyCode::APPLIED);
+
+  KVEngineCacheValue value =
+      index.engine_cache_value(primary.engine(), primary.model_revision());
+  EXPECT_EQ(value.health, KVShadowHealth::READY);
+  EXPECT_EQ(value.hbm_entries, 1u);
+
+  const xllm::proto::KVStreamIdentity unknown =
+      make_identity("incarnation-a", "model-a", "namespace-b");
+  ASSERT_EQ(index.apply_event_batch(make_batch(unknown, {}, true), 1001).code,
+            KVApplyCode::SNAPSHOT_REQUIRED);
+  value = index.engine_cache_value(primary.engine(), primary.model_revision());
+  EXPECT_EQ(value.health, KVShadowHealth::UNKNOWN);
+  EXPECT_EQ(value.hbm_entries, 0u);
+
+  const KVEngineCacheValue absent =
+      index.engine_cache_value(primary.engine(), "model-absent");
+  EXPECT_EQ(absent.health, KVShadowHealth::UNKNOWN);
+  EXPECT_EQ(absent.hbm_entries, 0u);
+}
+
 TEST(KVShadowIndexTest, MatchesContinuousPrefixAndCountsDuplicateLocations) {
   KVShadowIndex index(make_config());
   const xllm::proto::KVStreamIdentity identity = make_identity();

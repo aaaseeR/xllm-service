@@ -56,6 +56,15 @@ PlacementObservationCollector::PlacementObservationCollector(
     : config_(std::move(config)),
       valid_(valid_placement_observation_collector_config(config_)) {}
 
+PlacementObservationStatus PlacementObservationCollector::register_model(
+    const std::string& model_revision,
+    uint64_t now_monotonic_ms) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ModelWindow* window = nullptr;
+  Bucket* bucket = nullptr;
+  return get_bucket_locked(model_revision, now_monotonic_ms, &window, &bucket);
+}
+
 PlacementObservationStatus PlacementObservationCollector::get_bucket_locked(
     const std::string& model_revision,
     uint64_t now_monotonic_ms,

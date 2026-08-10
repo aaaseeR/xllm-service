@@ -254,6 +254,25 @@ DEFINE_string(observability_build_id,
               "development",
               "Immutable build or artifact identifier in request events.");
 
+DEFINE_string(placement_config_path,
+              "",
+              "Strict V3 Placement JSON config. Empty disables Placement.");
+
+namespace {
+
+bool valid_placement_mode_override(const char*, int32_t value) {
+  return value >= -1 && value <= 3;
+}
+
+}  // namespace
+
+DEFINE_int32(placement_mode_override,
+             -1,
+             "Reloadable V3 Placement mode override: -1 uses config, "
+             "0 DISABLED, 1 SHADOW, 2 ENFORCED_CREATE_ONLY, 3 ENFORCED.");
+
+BRPC_VALIDATE_GFLAG(placement_mode_override, valid_placement_mode_override);
+
 DEFINE_int32(detect_disconnected_instance_interval,
              15,
              "Deprecated V1 compatibility flag; ignored by V2 membership "

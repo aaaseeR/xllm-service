@@ -420,7 +420,7 @@ PlacementReconcileResult reconcile_placement_pool(
                                   replica.engine_incarnation};
     if (replica.state == PlacementLifecycleState::READY && replica.fresh &&
         replica.drain_capable && replica.active_reservations == 0 &&
-        replica.active_transfers == 0 &&
+        replica.active_transfers == 0 && replica.cache_value_known &&
         engine_operations.find(identity) == engine_operations.end()) {
       victims.push_back(&replica);
     }

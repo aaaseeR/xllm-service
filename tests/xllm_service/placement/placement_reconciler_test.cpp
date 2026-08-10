@@ -113,6 +113,20 @@ TEST(PlacementReconcilerTest, CreatesBoundedDeterministicDeficit) {
   EXPECT_NE(first.intents[0].operation_id, first.intents[1].operation_id);
 }
 
+TEST(PlacementReconcilerTest, UnknownCacheValueCannotBecomeDrainVictim) {
+  std::vector<PlacementReplicaFact> replicas = {
+      replica("engine-unknown", PlacementLifecycleState::READY, 0.0),
+      replica("engine-known", PlacementLifecycleState::READY, 10.0),
+  };
+  replicas[0].cache_value_known = false;
+  const PlacementReconcileResult result = reconcile_placement_pool(
+      config(), desired(1), leader(), replicas, {}, /*now_ms=*/3000);
+  ASSERT_EQ(result.status, PlacementReconcileStatus::OK);
+  ASSERT_EQ(result.reason, PlacementReconcileReason::SCALE_DOWN);
+  ASSERT_EQ(result.intents.size(), 1u);
+  EXPECT_EQ(result.intents[0].engine_uid, "engine-known");
+}
+
 TEST(PlacementReconcilerTest, LoadingAndWarmingCountTowardDesired) {
   const std::vector<PlacementReplicaFact> replicas = {
       replica("engine-1", PlacementLifecycleState::READY),

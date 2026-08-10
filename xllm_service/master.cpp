@@ -262,8 +262,7 @@ int main(int argc, char* argv[]) {
       FLAGS_kv_session_token_ttl_seconds >
           xllm_service::KVSessionTokenCodec::kMaxTokenTtlSeconds) {
     LOG(ERROR) << "--kv_session_token_ttl_seconds must be in [1, "
-               << xllm_service::KVSessionTokenCodec::kMaxTokenTtlSeconds
-               << "]";
+               << xllm_service::KVSessionTokenCodec::kMaxTokenTtlSeconds << "]";
     return -1;
   }
   if (FLAGS_kv_route_enforced_gate_open &&
@@ -362,6 +361,7 @@ int main(int argc, char* argv[]) {
       .observability_snapshot_interval_ms(
           FLAGS_observability_snapshot_interval_ms)
       .observability_build_id(FLAGS_observability_build_id)
+      .placement_config_path(FLAGS_placement_config_path)
       .xxh3_128bits_seed(FLAGS_xxh3_128bits_seed)
       .service_name(xllm_service::utils::get_local_ip() + ":" +
                     std::to_string(FLAGS_rpc_server_port))

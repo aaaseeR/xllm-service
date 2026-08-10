@@ -108,6 +108,8 @@ DECLARE_uint64(observability_export_batch_size);
 DECLARE_int32(observability_export_interval_ms);
 DECLARE_int32(observability_snapshot_interval_ms);
 DECLARE_string(observability_build_id);
+DECLARE_string(placement_config_path);
+DECLARE_int32(placement_mode_override);
 
 DECLARE_int32(detect_disconnected_instance_interval);
 

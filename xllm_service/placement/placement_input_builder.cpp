@@ -160,8 +160,11 @@ bool update_kv_pressure(const xllm::proto::EngineState& state,
 
 }  // namespace
 
-PlacementInputBuilder::PlacementInputBuilder(PlacementInputBuilderConfig config)
+PlacementInputBuilder::PlacementInputBuilder(
+    PlacementInputBuilderConfig config,
+    const provider::KVShadowIndex* kv_shadow_index)
     : config_(std::move(config)),
+      kv_shadow_index_(kv_shadow_index),
       valid_(valid_placement_input_builder_config(config_)) {}
 
 PlacementInputBuildStatus PlacementInputBuilder::build(
@@ -231,6 +234,20 @@ PlacementInputBuildStatus PlacementInputBuilder::build(
                                  : member.lifecycle_since_monotonic_ms,
           .observed_at_ms = now_monotonic_ms,
       };
+      if (kv_shadow_index_ != nullptr) {
+        xllm::proto::ProviderEngineKey engine;
+        engine.set_provider_id(member.descriptor.identity().provider_id());
+        engine.set_profile_digest(member.descriptor.profile_digest());
+        engine.set_engine_uid(member.descriptor.identity().engine_uid());
+        engine.set_incarnation_id(
+            member.descriptor.identity().incarnation_id());
+        const provider::KVEngineCacheValue cache =
+            kv_shadow_index_->engine_cache_value(
+                engine, member.descriptor.model().model_revision());
+        replica.cache_value_known =
+            cache.health == provider::KVShadowHealth::READY;
+        replica.cache_value = static_cast<double>(cache.hbm_entries);
+      }
       if (member.state.has_value()) {
         if (!populate_activity(*member.state,
                                &replica.active_reservations,

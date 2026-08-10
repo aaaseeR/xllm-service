@@ -279,6 +279,10 @@ class Options {
   XLLM_SERVICE_PROPERTY(int32_t, observability_snapshot_interval_ms) = 5000;
   XLLM_SERVICE_PROPERTY(std::string, observability_build_id) = "development";
 
+  // Empty keeps V3 Placement completely disabled. A non-empty path must
+  // contain the strict schema-versioned Placement runtime configuration.
+  XLLM_SERVICE_PROPERTY(std::string, placement_config_path);
+
   XLLM_SERVICE_PROPERTY(std::string, service_name);
 
   // V2 execution-hold cleanup capacity. One fixed-size token is reserved

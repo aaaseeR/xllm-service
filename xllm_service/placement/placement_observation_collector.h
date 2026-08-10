@@ -60,6 +60,9 @@ class PlacementObservationCollector final {
   explicit PlacementObservationCollector(
       PlacementObservationCollectorConfig config);
 
+  PlacementObservationStatus register_model(const std::string& model_revision,
+                                            uint64_t now_monotonic_ms);
+
   PlacementObservationStatus record_ingress(
       const std::string& model_revision,
       uint64_t prompt_tokens,

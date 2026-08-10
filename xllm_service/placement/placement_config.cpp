@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "placement/placement_config.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -28,6 +29,7 @@ namespace xllm_service::placement {
 namespace {
 
 using Json = nlohmann::json;
+inline constexpr size_t kMaxPlacementInternalTokenBytes = 4096;
 
 PlacementConfigStatus fail(PlacementConfigStatus status,
                            std::string message,
@@ -114,6 +116,13 @@ bool string_field(const Json& object, const char* name, std::string* value) {
   }
   *value = object.at(name).get<std::string>();
   return true;
+}
+
+bool valid_internal_token(const std::string& value) {
+  return !value.empty() && value.size() <= kMaxPlacementInternalTokenBytes &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return character >= '!' && character <= '~';
+         });
 }
 
 bool parse_mode(const Json& json, PlacementMode* mode) {
@@ -323,6 +332,19 @@ bool parse_transports(const Json& json, PlacementTransportConfig* config) {
                       &config->vllm_ascend.internal_api_token);
 }
 
+bool parse_deployment(const Json& json,
+                      HttpPlacementDeploymentActuatorConfig* config) {
+  return exact_fields(json,
+                      {"address",
+                       "timeout_ms",
+                       "max_response_bytes",
+                       "internal_api_token"}) &&
+         string_field(json, "address", &config->address) &&
+         int32_field(json, "timeout_ms", &config->timeout_ms) &&
+         size_field(json, "max_response_bytes", &config->max_response_bytes) &&
+         string_field(json, "internal_api_token", &config->internal_api_token);
+}
+
 bool parse_external(const Json& json,
                     PlacementObservationExternalInputs* external) {
   return exact_fields(json,
@@ -436,6 +458,7 @@ PlacementConfigStatus parse_placement_runtime_config(
                      "observation",
                      "input_builder",
                      "transports",
+                     "deployment",
                      "pools"})) {
     return fail(PlacementConfigStatus::INVALID_SCHEMA,
                 "top-level fields do not match V3 schema",
@@ -452,6 +475,7 @@ PlacementConfigStatus parse_placement_runtime_config(
         !parse_observation(json.at("observation"), &parsed.observation) ||
         !parse_input_builder(json.at("input_builder"), &parsed.input_builder) ||
         !parse_transports(json.at("transports"), &parsed.transports) ||
+        !parse_deployment(json.at("deployment"), &parsed.deployment) ||
         !json.at("pools").is_array() ||
         json.at("pools").size() > parsed.controller.max_pools) {
       return fail(PlacementConfigStatus::INVALID_SCHEMA,
@@ -544,8 +568,12 @@ bool valid_placement_runtime_config(const PlacementRuntimeConfig& config) {
       config.transports.vllm_ascend.max_response_bytes == 0 ||
       config.transports.vllm_ascend.max_response_bytes >
           kMaxPlacementConfigBytes ||
-      config.transports.vllm_ascend.internal_api_token.size() >
-          kMaxPlacementIdentityBytes) {
+      !valid_internal_token(config.transports.vllm_ascend.internal_api_token) ||
+      !valid_placement_identity(config.deployment.address) ||
+      config.deployment.timeout_ms <= 0 ||
+      config.deployment.max_response_bytes == 0 ||
+      config.deployment.max_response_bytes > kMaxPlacementConfigBytes ||
+      !valid_internal_token(config.deployment.internal_api_token)) {
     return false;
   }
   std::set<std::string> identities;

@@ -34,6 +34,10 @@ limitations under the License.
 #include "managers/global_kvcache_mgr.h"
 #include "managers/instance_mgr.h"
 #include "observability/request_event_recorder.h"
+#include "placement/placement_config.h"
+#include "placement/placement_deployment_actuator.h"
+#include "placement/placement_desired_store.h"
+#include "placement/placement_operation_store.h"
 #include "provider/kv_route_metrics.h"
 #include "provider/kv_shadow_index.h"
 #include "provider/kv_state_outbox.h"
@@ -223,6 +227,8 @@ class Scheduler final {
   void run_request_watchdog();
   void run_flow_dispatch();
   void run_observability_exporter();
+  void initialize_placement();
+  void run_placement_controller();
   SaturationState flow_saturation_state() const;
   void arm_client_disconnect_notification(
       const std::shared_ptr<Request>& request);
@@ -315,6 +321,36 @@ class Scheduler final {
   std::unique_ptr<Tokenizer> tokenizer_;
 
   std::shared_ptr<InstanceMgr> instance_mgr_;
+
+  // V3 is an isolated slow loop. Empty placement_config_path leaves every
+  // object null and creates no thread. Request-path producers only append to
+  // the bounded observation collector and never call etcd or an actuator.
+  std::optional<placement::PlacementRuntimeConfig> placement_config_;
+  std::unique_ptr<placement::PlacementObservationCollector>
+      placement_observation_collector_;
+  std::unique_ptr<placement::PlacementInputBuilder> placement_input_builder_;
+  std::unique_ptr<placement::EtcdPlacementFencedKv> placement_fenced_kv_;
+  std::unique_ptr<placement::PlacementDesiredStore> placement_desired_store_;
+  std::unique_ptr<placement::PlacementOperationStore>
+      placement_operation_store_;
+  std::unique_ptr<placement::BrpcProviderLifecycleTransport>
+      placement_native_transport_;
+  std::unique_ptr<placement::HttpProviderLifecycleTransport>
+      placement_vllm_transport_;
+  std::unique_ptr<placement::ProviderLifecycleTransportRouter>
+      placement_transport_router_;
+  std::unique_ptr<placement::HttpPlacementDeploymentActuator>
+      placement_deployment_http_;
+  std::unique_ptr<placement::RegistryVerifiedPlacementDeploymentActuator>
+      placement_deployment_verified_;
+  std::unique_ptr<placement::ProviderPlacementActuator> placement_actuator_;
+  std::unique_ptr<placement::PlacementOperationExecutor>
+      placement_operation_executor_;
+  std::unique_ptr<placement::PlacementController> placement_controller_;
+  std::mutex placement_wait_mutex_;
+  std::condition_variable placement_cv_;
+  bool placement_stopped_ = false;
+  std::unique_ptr<std::thread> placement_thread_;
 
   std::shared_ptr<GlobalKVCacheMgr> global_kvcache_mgr_;
 

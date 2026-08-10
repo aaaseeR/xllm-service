@@ -125,6 +125,7 @@ class InstanceMgr final {
       uint64_t receiver_monotonic_ms,
       size_t max_members,
       std::vector<provider::EngineRegistryMemberSnapshot>* snapshot) const;
+  provider::EngineRegistry* mutable_engine_registry();
   size_t engine_member_count() const;
   size_t engine_state_count() const;
   size_t engine_link_count() const;

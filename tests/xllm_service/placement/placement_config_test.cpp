@@ -73,6 +73,11 @@ nlohmann::json valid_json() {
         {"vllm_max_channels", 1024},
         {"vllm_max_response_bytes", 65536},
         {"vllm_internal_api_token", "test-token"}}},
+      {"deployment",
+       {{"address", "deployment-gateway:8080"},
+        {"timeout_ms", 5000},
+        {"max_response_bytes", 65536},
+        {"internal_api_token", "deployment-token"}}},
       {"pools",
        {{{"provider", "XLLM_NATIVE"},
          {"model_revision", "model-r1"},
@@ -172,6 +177,19 @@ TEST(PlacementConfigTest, RejectsMalformedAndOversizedInput) {
   EXPECT_EQ(parse_placement_runtime_config(
                 std::string(kMaxPlacementConfigBytes + 1, 'x'), &config),
             PlacementConfigStatus::CAPACITY_EXCEEDED);
+}
+
+TEST(PlacementConfigTest, RejectsUnsafeInternalTransportTokens) {
+  PlacementRuntimeConfig config;
+  nlohmann::json json = valid_json();
+  json["deployment"]["internal_api_token"] = "token with space";
+  EXPECT_EQ(parse_placement_runtime_config(json.dump(), &config),
+            PlacementConfigStatus::INVALID_SCHEMA);
+
+  json = valid_json();
+  json["transports"]["vllm_internal_api_token"] = "";
+  EXPECT_EQ(parse_placement_runtime_config(json.dump(), &config),
+            PlacementConfigStatus::INVALID_SCHEMA);
 }
 
 }  // namespace

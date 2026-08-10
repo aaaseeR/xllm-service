@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "placement/placement_actuator.h"
 #include "placement/placement_controller.h"
+#include "placement/placement_deployment_actuator.h"
 #include "placement/placement_input_builder.h"
 #include "placement/placement_observation_collector.h"
 #include "placement/provider_lifecycle_actuator.h"
@@ -52,6 +53,7 @@ struct PlacementRuntimeConfig {
   PlacementObservationCollectorConfig observation;
   PlacementInputBuilderConfig input_builder;
   PlacementTransportConfig transports;
+  HttpPlacementDeploymentActuatorConfig deployment;
   std::vector<PlacementPoolRuntimeSpec> pools;
 };
 

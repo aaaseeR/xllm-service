@@ -42,6 +42,7 @@ cc_library(
     placement_input_builder.cpp
   DEPS
     :engine_registry
+    :kv_shadow_index
     :placement_controller
     :placement_observation_collector
 )
@@ -116,6 +117,20 @@ target_link_libraries(placement_actuator PRIVATE brpc-static)
 
 cc_library(
   NAME
+    placement_deployment_actuator
+  HDRS
+    placement_deployment_actuator.h
+  SRCS
+    placement_deployment_actuator.cpp
+  DEPS
+    :placement_actuator
+    :engine_registry
+    nlohmann_json::nlohmann_json
+)
+target_link_libraries(placement_deployment_actuator PRIVATE brpc-static)
+
+cc_library(
+  NAME
     placement_controller
   HDRS
     placement_controller.h
@@ -138,6 +153,7 @@ cc_library(
     placement_config.cpp
   DEPS
     :placement_controller
+    :placement_deployment_actuator
     :placement_input_builder
     :placement_observation_collector
     nlohmann_json::nlohmann_json

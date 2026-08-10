@@ -139,6 +139,10 @@ DECLARE_GAUGE(xllm_service_v2_engine_kv_reporting_dp_ranks);
 DECLARE_GAUGE(xllm_service_v2_engine_kv_max_used_ratio);
 DECLARE_GAUGE(xllm_service_v2_engine_kv_min_free_blocks);
 DECLARE_GAUGE(xllm_service_v2_engine_kv_total_free_blocks);
+DECLARE_GAUGE(xllm_service_v3_placement_leader);
+DECLARE_GAUGE(xllm_service_v3_placement_mode);
+DECLARE_GAUGE(xllm_service_v3_placement_pools);
+DECLARE_GAUGE(xllm_service_v3_placement_operations);
 
 DECLARE_MULTI_COUNTER(xllm_service_v2_request_lifecycle_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_request_failure_total);
@@ -146,6 +150,9 @@ DECLARE_MULTI_COUNTER(xllm_service_v2_request_terminal_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_execution_mode_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_observability_events_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_output_sequence_total);
+DECLARE_MULTI_COUNTER(xllm_service_v3_placement_cycles_total);
+DECLARE_MULTI_COUNTER(xllm_service_v3_placement_observations_total);
+DECLARE_MULTI_COUNTER(xllm_service_v3_placement_recommendations_total);
 
 DECLARE_HISTOGRAM(time_to_first_token_latency_milliseconds);
 DECLARE_HISTOGRAM(inter_token_latency_milliseconds);
@@ -153,3 +160,4 @@ DECLARE_MULTI_HISTOGRAM(xllm_service_v2_queue_wait_milliseconds);
 DECLARE_MULTI_HISTOGRAM(xllm_service_v2_ttft_milliseconds);
 DECLARE_MULTI_HISTOGRAM(xllm_service_v2_tpot_milliseconds);
 DECLARE_MULTI_HISTOGRAM(xllm_service_v2_e2e_milliseconds);
+DECLARE_HISTOGRAM(xllm_service_v3_placement_cycle_milliseconds);

@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "chat_template/deepseek_v4_cpp_chat_template.h"
 #include "chat_template/model_type.h"
+#include "common/global_gflags.h"
 #include "common/metrics.h"
 #include "common/utils.h"
 #include "common/xllm/status.h"
@@ -72,6 +73,26 @@ uint64_t monotonic_time_ms() {
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
           .count());
+}
+
+uint64_t unix_time_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
+const char* placement_action_name(
+    xllm_service::placement::PlacementAction action) {
+  switch (action) {
+    case xllm_service::placement::PlacementAction::NONE:
+      return "NONE";
+    case xllm_service::placement::PlacementAction::SCALE_UP:
+      return "SCALE_UP";
+    case xllm_service::placement::PlacementAction::SCALE_DOWN:
+      return "SCALE_DOWN";
+  }
+  return "UNKNOWN";
 }
 
 int64_t monotonic_time_ns() {
@@ -670,6 +691,8 @@ Scheduler::Scheduler(const Options& options)
     lb_policy_ = std::make_unique<RoundRobin>(instance_mgr_);
   }
 
+  initialize_placement();
+
   auto handle_master = std::bind(&Scheduler::handle_master_service_watch,
                                  this,
                                  std::placeholders::_1,
@@ -701,12 +724,21 @@ Scheduler::Scheduler(const Options& options)
       std::make_unique<std::thread>(&Scheduler::run_flow_dispatch, this);
   observability_thread_ = std::make_unique<std::thread>(
       &Scheduler::run_observability_exporter, this);
+  if (placement_config_.has_value()) {
+    placement_thread_ = std::make_unique<std::thread>(
+        &Scheduler::run_placement_controller, this);
+  }
 }
 
 Scheduler::~Scheduler() {
   set_draining(true);
   refresh_readiness();
   exited_.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(placement_wait_mutex_);
+    placement_stopped_ = true;
+  }
+  placement_cv_.notify_all();
   {
     std::lock_guard<std::mutex> lock(flow_dispatch_wait_mutex_);
     flow_dispatch_stopped_ = true;
@@ -715,6 +747,9 @@ Scheduler::~Scheduler() {
   state_stream_cv_.notify_all();
   kv_state_cv_.notify_all();
   kv_snapshot_cv_.notify_all();
+  if (placement_thread_ != nullptr && placement_thread_->joinable()) {
+    placement_thread_->join();
+  }
   etcd_client_->stop_watch();
   if (state_stream_thread_ != nullptr && state_stream_thread_->joinable()) {
     state_stream_thread_->join();
@@ -1035,6 +1070,14 @@ bool Scheduler::admit_flow_control_locked(
       work, FlowControlQueue::Clock::now(), flow_saturation_state());
   request->admission_status = admission.status;
   if (admission.status != FlowControlStatus::OK) {
+    if (placement_observation_collector_ != nullptr) {
+      const placement::PlacementObservationStatus observation_status =
+          placement_observation_collector_->record_admission_reject(
+              request->model, monotonic_time_ms());
+      MULTI_COUNTER_INC(
+          xllm_service_v3_placement_observations_total,
+          placement::placement_observation_status_name(observation_status));
+    }
     const xllm::proto::EventReason reason =
         event_reason_for_flow_status(admission.status);
     record_request_event(
@@ -1069,6 +1112,17 @@ bool Scheduler::admit_flow_control_locked(
     return false;
   }
   request->enqueue_time = FlowControlQueue::Clock::now();
+  if (placement_observation_collector_ != nullptr) {
+    const placement::PlacementObservationStatus observation_status =
+        placement_observation_collector_->record_ingress(
+            request->model,
+            token_count,
+            canonical.effective_max_new_tokens(),
+            monotonic_time_ms());
+    MULTI_COUNTER_INC(
+        xllm_service_v3_placement_observations_total,
+        placement::placement_observation_status_name(observation_status));
+  }
   record_request_event(request,
                        xllm::proto::REQUEST_EVENT_TYPE_PREFILL_QUEUE,
                        xllm::proto::EVENT_RESULT_ACCEPTED,
@@ -1221,6 +1275,7 @@ void Scheduler::activate_as_master() {
     LOG(ERROR) << "Failed to fence KV State on master activation.";
   }
   kv_state_cv_.notify_all();
+  placement_cv_.notify_all();
 }
 
 void Scheduler::deactivate_as_master() {
@@ -1234,6 +1289,7 @@ void Scheduler::deactivate_as_master() {
   if (!kv_state_replica_->set_master("")) {
     LOG(ERROR) << "Failed to fence KV State on master deactivation.";
   }
+  placement_cv_.notify_all();
 }
 
 bool Scheduler::refresh_state_stream_subscribers() {
@@ -1674,6 +1730,282 @@ void Scheduler::run_kv_snapshot_recovery() {
       }
     }
   }
+}
+
+void Scheduler::initialize_placement() {
+  GAUGE_SET(xllm_service_v3_placement_leader, 0);
+  GAUGE_SET(xllm_service_v3_placement_mode,
+            static_cast<int32_t>(placement::PlacementMode::DISABLED));
+  GAUGE_SET(xllm_service_v3_placement_pools, 0);
+  GAUGE_SET(xllm_service_v3_placement_operations, 0);
+  if (options_.placement_config_path().empty()) {
+    LOG(INFO) << "V3 Placement is disabled because no config path was set.";
+    return;
+  }
+
+  placement::PlacementRuntimeConfig config;
+  std::string error;
+  const placement::PlacementConfigStatus status =
+      placement::load_placement_runtime_config(
+          options_.placement_config_path(), &config, &error);
+  if (status != placement::PlacementConfigStatus::OK) {
+    LOG(FATAL) << "Failed to load V3 Placement config, status="
+               << placement::placement_config_status_name(status)
+               << ", error=" << error;
+  }
+  placement_config_ = std::move(config);
+  placement_observation_collector_ =
+      std::make_unique<placement::PlacementObservationCollector>(
+          placement_config_->observation);
+  placement_input_builder_ = std::make_unique<placement::PlacementInputBuilder>(
+      placement_config_->input_builder, kv_shadow_index_.get());
+  const uint64_t now_ms = monotonic_time_ms();
+  std::unordered_set<std::string> registered_models;
+  for (const placement::PlacementPoolRuntimeSpec& pool :
+       placement_config_->pools) {
+    if (!registered_models.insert(pool.profile.pool.model_revision).second) {
+      continue;
+    }
+    const placement::PlacementObservationStatus register_status =
+        placement_observation_collector_->register_model(
+            pool.profile.pool.model_revision, now_ms);
+    if (register_status != placement::PlacementObservationStatus::OK) {
+      LOG(FATAL) << "Failed to register Placement model observation, status="
+                 << placement::placement_observation_status_name(
+                        register_status);
+    }
+  }
+
+  placement_fenced_kv_ =
+      std::make_unique<placement::EtcdPlacementFencedKv>(etcd_client_.get());
+  placement_desired_store_ = std::make_unique<placement::PlacementDesiredStore>(
+      placement_fenced_kv_.get());
+  placement_operation_store_ =
+      std::make_unique<placement::PlacementOperationStore>(
+          placement_fenced_kv_.get());
+  placement_native_transport_ =
+      std::make_unique<placement::BrpcProviderLifecycleTransport>(
+          placement_config_->transports.native);
+  placement_vllm_transport_ =
+      std::make_unique<placement::HttpProviderLifecycleTransport>(
+          placement_config_->transports.vllm_ascend);
+  placement_transport_router_ =
+      std::make_unique<placement::ProviderLifecycleTransportRouter>(
+          placement_native_transport_.get(), placement_vllm_transport_.get());
+  placement_deployment_http_ =
+      std::make_unique<placement::HttpPlacementDeploymentActuator>(
+          placement_config_->deployment);
+  placement_deployment_verified_ =
+      std::make_unique<placement::RegistryVerifiedPlacementDeploymentActuator>(
+          instance_mgr_->mutable_engine_registry(),
+          placement_deployment_http_.get(),
+          monotonic_time_ms);
+  placement_actuator_ = std::make_unique<placement::ProviderPlacementActuator>(
+      instance_mgr_->mutable_engine_registry(),
+      placement_transport_router_.get(),
+      placement_deployment_verified_.get());
+  placement_operation_executor_ =
+      std::make_unique<placement::PlacementOperationExecutor>(
+          placement_config_->executor,
+          placement_actuator_.get(),
+          placement_operation_store_.get());
+  placement_controller_ = std::make_unique<placement::PlacementController>(
+      placement_config_->controller,
+      placement_desired_store_.get(),
+      placement_operation_executor_.get());
+  if (FLAGS_placement_mode_override >= 0 &&
+      !placement_controller_->set_mode(static_cast<placement::PlacementMode>(
+          FLAGS_placement_mode_override))) {
+    LOG(FATAL) << "Invalid V3 Placement mode override: "
+               << FLAGS_placement_mode_override;
+  }
+
+  GAUGE_SET(xllm_service_v3_placement_mode,
+            static_cast<int32_t>(placement_controller_->mode()));
+  GAUGE_SET(xllm_service_v3_placement_pools, placement_config_->pools.size());
+  LOG(INFO) << "Initialized V3 Placement, mode="
+            << placement::placement_mode_name(placement_controller_->mode())
+            << ", pools=" << placement_config_->pools.size()
+            << ", loop_interval_ms=" << placement_config_->loop_interval_ms;
+}
+
+void Scheduler::run_placement_controller() {
+  std::optional<placement::PlacementLeaderIdentity> active_leader;
+  while (!exited_.load(std::memory_order_acquire)) {
+    const auto cycle_started = std::chrono::steady_clock::now();
+    bool cycle_attempted = false;
+    if (!is_master_service_.load(std::memory_order_acquire)) {
+      active_leader.reset();
+      GAUGE_SET(xllm_service_v3_placement_leader, 0);
+      MULTI_COUNTER_INC(xllm_service_v3_placement_cycles_total, "FOLLOWER");
+    } else {
+      std::string address;
+      std::string incarnation;
+      uint64_t epoch = 0;
+      const EtcdReadStatus identity_status =
+          etcd_client_->get_master_identity(&address, &incarnation, &epoch);
+      if (identity_status != EtcdReadStatus::OK ||
+          address != options_.service_name() ||
+          incarnation != service_incarnation_id_ || epoch == 0) {
+        active_leader.reset();
+        GAUGE_SET(xllm_service_v3_placement_leader, 0);
+        MULTI_COUNTER_INC(xllm_service_v3_placement_cycles_total,
+                          "LEADER_FENCE_UNAVAILABLE");
+        LOG_EVERY_N(ERROR, 10)
+            << "Placement leader identity is unavailable or mismatched.";
+      } else {
+        cycle_attempted = true;
+        const placement::PlacementMode requested_mode =
+            FLAGS_placement_mode_override < 0
+                ? placement_config_->controller.mode
+                : static_cast<placement::PlacementMode>(
+                      FLAGS_placement_mode_override);
+        if (placement_controller_->mode() != requested_mode) {
+          const placement::PlacementMode previous_mode =
+              placement_controller_->mode();
+          if (!placement_controller_->set_mode(requested_mode)) {
+            LOG(ERROR) << "Rejected invalid V3 Placement mode override: "
+                       << FLAGS_placement_mode_override;
+          } else {
+            GAUGE_SET(xllm_service_v3_placement_mode,
+                      static_cast<int32_t>(requested_mode));
+            LOG(WARNING) << "V3 Placement runtime mode changed, previous="
+                         << placement::placement_mode_name(previous_mode)
+                         << ", current="
+                         << placement::placement_mode_name(requested_mode);
+          }
+        }
+        const placement::PlacementLeaderIdentity leader{
+            .address = std::move(address),
+            .incarnation = std::move(incarnation),
+            .epoch = epoch,
+        };
+        const bool leader_changed =
+            !active_leader.has_value() ||
+            active_leader->address != leader.address ||
+            active_leader->incarnation != leader.incarnation ||
+            active_leader->epoch != leader.epoch;
+        const uint64_t now_monotonic_ms = monotonic_time_ms();
+        if (leader_changed || !placement_controller_->recovered()) {
+          const placement::PlacementControllerStatus recover_status =
+              placement_controller_->recover(leader, now_monotonic_ms);
+          if (recover_status != placement::PlacementControllerStatus::OK) {
+            active_leader.reset();
+            GAUGE_SET(xllm_service_v3_placement_leader, 0);
+            MULTI_COUNTER_INC(xllm_service_v3_placement_cycles_total,
+                              "RECOVERY_ERROR");
+            LOG_EVERY_N(ERROR, 10)
+                << "Placement recovery failed, status="
+                << placement::placement_controller_status_name(recover_status);
+          } else {
+            active_leader = leader;
+            GAUGE_SET(xllm_service_v3_placement_leader, 1);
+            LOG(INFO) << "Placement leadership recovered, epoch="
+                      << leader.epoch << ", incarnation=" << leader.incarnation;
+          }
+        }
+
+        if (active_leader.has_value()) {
+          std::vector<provider::EngineRegistryMemberSnapshot> members;
+          const provider::ContractResult snapshot_status =
+              instance_mgr_->snapshot_engine_members(
+                  now_monotonic_ms,
+                  placement_config_->input_builder.max_members,
+                  &members);
+          std::vector<placement::PlacementPoolRuntimeSpec> runtime_pools =
+              placement_config_->pools;
+          for (placement::PlacementPoolRuntimeSpec& pool : runtime_pools) {
+            const FlowControlModelSnapshot flow =
+                flow_control_queue_->model_snapshot(
+                    pool.profile.pool.model_revision);
+            pool.external.queue_depth =
+                static_cast<double>(flow.queued_requests);
+          }
+          std::vector<placement::PlacementPoolCycleInput> inputs;
+          placement::PlacementInputBuildStatus input_status =
+              placement::PlacementInputBuildStatus::OBSERVATION_UNAVAILABLE;
+          if (snapshot_status.ok()) {
+            input_status = placement_input_builder_->build(
+                runtime_pools,
+                members,
+                placement_observation_collector_.get(),
+                now_monotonic_ms,
+                &inputs);
+          }
+          MULTI_COUNTER_INC(
+              xllm_service_v3_placement_observations_total,
+              snapshot_status.ok()
+                  ? placement::placement_input_build_status_name(input_status)
+                  : "REGISTRY_ERROR");
+          if (!snapshot_status.ok() ||
+              input_status != placement::PlacementInputBuildStatus::OK) {
+            inputs.clear();
+            LOG_EVERY_N(ERROR, 10)
+                << "Placement input unavailable, registry_ok="
+                << snapshot_status.ok() << ", input_status="
+                << placement::placement_input_build_status_name(input_status);
+          }
+
+          const placement::PlacementControllerResult result =
+              placement_controller_->run_cycle(
+                  *active_leader, inputs, now_monotonic_ms, unix_time_ms());
+          MULTI_COUNTER_INC(
+              xllm_service_v3_placement_cycles_total,
+              placement::placement_controller_status_name(result.status));
+          for (const placement::PlacementPoolCycleReport& pool : result.pools) {
+            MULTI_COUNTER_INC(
+                xllm_service_v3_placement_recommendations_total,
+                placement_action_name(pool.recommendation.action));
+            VLOG(1) << "placement_pool_cycle provider="
+                    << static_cast<int32_t>(pool.pool.provider_id)
+                    << " model=" << pool.pool.model_revision
+                    << " role=" << static_cast<int32_t>(pool.pool.role)
+                    << " profile=" << pool.pool.profile_digest << " action="
+                    << placement_action_name(pool.recommendation.action)
+                    << " reason="
+                    << placement::placement_reason_name(
+                           pool.recommendation.reason)
+                    << " previous_desired="
+                    << pool.recommendation.previous_desired_replicas
+                    << " desired=" << pool.recommendation.desired_replicas
+                    << " persisted=" << pool.desired_persisted
+                    << " intents_added=" << pool.intents_added;
+          }
+          GAUGE_SET(xllm_service_v3_placement_operations,
+                    placement_operation_executor_->size());
+          VLOG(1) << "placement_cycle status="
+                  << placement::placement_controller_status_name(result.status)
+                  << " mode=" << placement::placement_mode_name(result.mode)
+                  << " pools=" << result.pools.size()
+                  << " desired_writes=" << result.desired_writes
+                  << " intents_added=" << result.intents_added
+                  << " actuator_driven=" << result.actuator.driven
+                  << " actuator_terminal=" << result.actuator.terminal
+                  << " actuator_unknown=" << result.actuator.unknown;
+        }
+      }
+    }
+
+    if (cycle_attempted) {
+      const int64_t elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - cycle_started)
+              .count();
+      HISTOGRAM_OBSERVE(xllm_service_v3_placement_cycle_milliseconds,
+                        elapsed_ms);
+    }
+    std::unique_lock<std::mutex> lock(placement_wait_mutex_);
+    placement_cv_.wait_for(
+        lock,
+        std::chrono::milliseconds(placement_config_->loop_interval_ms),
+        [this] {
+          return placement_stopped_ || exited_.load(std::memory_order_acquire);
+        });
+    if (placement_stopped_) {
+      break;
+    }
+  }
+  GAUGE_SET(xllm_service_v3_placement_leader, 0);
 }
 
 void Scheduler::update_master_service_heartbeat() {
@@ -4496,6 +4828,35 @@ void Scheduler::record_request_terminal(const std::shared_ptr<Request>& request,
     }
   }
   record_request_metric(request, std::move(metric));
+
+  if (result == xllm::proto::EVENT_RESULT_SUCCEEDED &&
+      placement_observation_collector_ != nullptr) {
+    std::optional<double> ttft_ms;
+    std::optional<double> tpot_ms;
+    const int64_t ingress_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            request->trace_ingress_time.time_since_epoch())
+            .count();
+    if (first_ns >= ingress_ns && ingress_ns > 0) {
+      ttft_ms = static_cast<double>(first_ns - ingress_ns) / 1000000.0;
+    }
+    if (output_tokens > first_response_output_tokens && first_ns > 0 &&
+        last_ns >= first_ns) {
+      tpot_ms =
+          static_cast<double>(last_ns - first_ns) /
+          static_cast<double>(output_tokens - first_response_output_tokens) /
+          1000000.0;
+    }
+    const placement::PlacementObservationStatus observation_status =
+        placement_observation_collector_->record_terminal(request->model,
+                                                          output_tokens,
+                                                          ttft_ms,
+                                                          tpot_ms,
+                                                          monotonic_time_ms());
+    MULTI_COUNTER_INC(
+        xllm_service_v3_placement_observations_total,
+        placement::placement_observation_status_name(observation_status));
+  }
 }
 
 bool Scheduler::has_available_instances() const {

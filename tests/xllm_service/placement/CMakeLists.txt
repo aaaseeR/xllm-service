@@ -105,6 +105,19 @@ cc_test(
 
 cc_test(
   NAME
+    placement_deployment_actuator_test
+  SRCS
+    placement_deployment_actuator_test.cpp
+  DEPS
+    :placement_deployment_actuator
+    GTest::gtest_main
+    brpc-static
+    nlohmann_json::nlohmann_json
+    proto::proto_http_service
+)
+
+cc_test(
+  NAME
     placement_controller_test
   SRCS
     placement_controller_test.cpp

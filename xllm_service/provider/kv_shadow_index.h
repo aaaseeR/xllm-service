@@ -76,6 +76,11 @@ struct KVPrefixMatch {
   size_t contiguous_blocks = 0;
 };
 
+struct KVEngineCacheValue {
+  KVShadowHealth health = KVShadowHealth::UNKNOWN;
+  size_t hbm_entries = 0;
+};
+
 // Bounded, fail-closed Service-side KV observation. It is deliberately not an
 // allocator or admission ledger: UNKNOWN and RECOVERING always mean zero KV
 // routing credit while normal load routing remains available.
@@ -113,6 +118,12 @@ class KVShadowIndex final {
       const std::string& cache_group,
       xllm::proto::KVCacheTier tier) const;
   size_t resident_entries(const xllm::proto::KVStreamIdentity& identity) const;
+  // Returns HBM-resident logical blocks only when every observed stream for
+  // the exact Engine incarnation and model is READY. UNKNOWN/RECOVERING never
+  // receives scale-down cache credit.
+  KVEngineCacheValue engine_cache_value(
+      const xllm::proto::ProviderEngineKey& engine,
+      const std::string& model_revision) const;
   std::vector<xllm::proto::KVStreamIdentity> snapshot_required() const;
   KVShadowIndexStats stats() const;
 

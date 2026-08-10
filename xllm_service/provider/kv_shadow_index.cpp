@@ -16,6 +16,7 @@ limitations under the License.
 #include "provider/kv_shadow_index.h"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace xllm_service::provider {
@@ -654,6 +655,42 @@ size_t KVShadowIndex::resident_entries(
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = streams_.find(stream_key(identity));
   return found == streams_.end() ? 0 : found->second.live.size();
+}
+
+KVEngineCacheValue KVShadowIndex::engine_cache_value(
+    const xllm::proto::ProviderEngineKey& engine,
+    const std::string& model_revision) const {
+  KVEngineCacheValue value;
+  std::lock_guard<std::mutex> lock(mutex_);
+  bool matched = false;
+  for (const auto& [key, shadow] : streams_) {
+    static_cast<void>(key);
+    const xllm::proto::ProviderEngineKey& current = shadow.identity.engine();
+    if (current.provider_id() != engine.provider_id() ||
+        current.profile_digest() != engine.profile_digest() ||
+        current.engine_uid() != engine.engine_uid() ||
+        current.incarnation_id() != engine.incarnation_id() ||
+        shadow.identity.model_revision() != model_revision) {
+      continue;
+    }
+    matched = true;
+    if (shadow.health != KVShadowHealth::READY) {
+      return value;
+    }
+    for (const auto& [entry_key, entry] : shadow.live) {
+      static_cast<void>(entry_key);
+      if (entry.tier() == xllm::proto::KV_CACHE_TIER_HBM) {
+        if (value.hbm_entries == std::numeric_limits<size_t>::max()) {
+          return KVEngineCacheValue{};
+        }
+        ++value.hbm_entries;
+      }
+    }
+  }
+  if (matched) {
+    value.health = KVShadowHealth::READY;
+  }
+  return value;
 }
 
 std::vector<xllm::proto::KVStreamIdentity> KVShadowIndex::snapshot_required()

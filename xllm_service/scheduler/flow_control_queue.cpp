@@ -634,4 +634,19 @@ FlowControlSnapshot FlowControlQueue::snapshot() const {
   };
 }
 
+FlowControlModelSnapshot FlowControlQueue::model_snapshot(
+    const std::string& model_pool) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto iterator = model_usage_.find(model_pool);
+  if (iterator == model_usage_.end()) {
+    return {};
+  }
+  return FlowControlModelSnapshot{
+      .queued_requests = iterator->second.queued_requests,
+      .dispatched_requests = iterator->second.dispatched_requests,
+      .queued_prompt_tokens = iterator->second.queued_prompt_tokens,
+      .queued_bytes = iterator->second.queued_bytes,
+  };
+}
+
 }  // namespace xllm_service

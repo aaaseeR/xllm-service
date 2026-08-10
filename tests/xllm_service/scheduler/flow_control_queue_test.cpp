@@ -256,6 +256,53 @@ TEST(FlowControlQueueTest, FullModelDoesNotBlockAnotherModel) {
   EXPECT_EQ(dispatch.work->request_uid, "m2");
 }
 
+TEST(FlowControlQueueTest, ModelSnapshotTracksQueuedAndDispatchedExactly) {
+  FlowControlQueue queue(config());
+  const auto now = FlowControlQueue::Clock::now();
+  ASSERT_EQ(queue
+                .admit(work("a", now, "a", "model-a", 2, 11, 101),
+                       now,
+                       SaturationState::SATURATED)
+                .status,
+            FlowControlStatus::OK);
+  ASSERT_EQ(queue
+                .admit(work("b", now, "b", "model-a", 2, 13, 103),
+                       now,
+                       SaturationState::SATURATED)
+                .status,
+            FlowControlStatus::OK);
+  ASSERT_EQ(queue
+                .admit(work("other", now, "c", "model-b"),
+                       now,
+                       SaturationState::SATURATED)
+                .status,
+            FlowControlStatus::OK);
+
+  FlowControlModelSnapshot snapshot = queue.model_snapshot("model-a");
+  EXPECT_EQ(snapshot.queued_requests, 2u);
+  EXPECT_EQ(snapshot.dispatched_requests, 0u);
+  EXPECT_EQ(snapshot.queued_prompt_tokens, 24u);
+  EXPECT_EQ(snapshot.queued_bytes, 204u);
+
+  const FlowControlDispatch dispatch =
+      queue.take_next(now, SaturationState::AVAILABLE);
+  ASSERT_TRUE(dispatch.work.has_value());
+  ASSERT_EQ(dispatch.work->request_uid, "a");
+  snapshot = queue.model_snapshot("model-a");
+  EXPECT_EQ(snapshot.queued_requests, 1u);
+  EXPECT_EQ(snapshot.dispatched_requests, 1u);
+  EXPECT_EQ(snapshot.queued_prompt_tokens, 13u);
+  EXPECT_EQ(snapshot.queued_bytes, 103u);
+
+  ASSERT_EQ(queue.complete(dispatch.work->request_uid), FlowControlStatus::OK);
+  ASSERT_EQ(queue.cancel("b"), FlowControlStatus::OK);
+  snapshot = queue.model_snapshot("model-a");
+  EXPECT_EQ(snapshot.queued_requests, 0u);
+  EXPECT_EQ(snapshot.dispatched_requests, 0u);
+  EXPECT_EQ(snapshot.queued_prompt_tokens, 0u);
+  EXPECT_EQ(snapshot.queued_bytes, 0u);
+}
+
 TEST(FlowControlQueueTest, FailedRouteCanReturnWithoutLosingReservation) {
   FlowControlQueue queue(config());
   const auto now = FlowControlQueue::Clock::now();
@@ -374,11 +421,10 @@ TEST(FlowControlQueueTest, LateFlowSharesDispatchWithEstablishedFlow) {
 
   for (int index = 0; index < 20; ++index) {
     const std::string uid = "a-warm-" + std::to_string(index);
-    ASSERT_EQ(queue.admit(flow_work(uid, "flow-a"),
-                          now,
-                          SaturationState::AVAILABLE)
-                  .status,
-              FlowControlStatus::OK);
+    ASSERT_EQ(
+        queue.admit(flow_work(uid, "flow-a"), now, SaturationState::AVAILABLE)
+            .status,
+        FlowControlStatus::OK);
     const FlowControlDispatch dispatch =
         queue.take_next(now, SaturationState::AVAILABLE);
     ASSERT_TRUE(dispatch.work.has_value());
@@ -423,9 +469,8 @@ TEST(FlowControlQueueTest, LateFlowSharesDispatchWithEstablishedFlow) {
   size_t longest_run = 0;
   size_t current_run = 0;
   for (size_t index = 0; index < order.size(); ++index) {
-    current_run = index > 0 && order[index] == order[index - 1]
-                      ? current_run + 1
-                      : 1;
+    current_run =
+        index > 0 && order[index] == order[index - 1] ? current_run + 1 : 1;
     longest_run = std::max(longest_run, current_run);
   }
   EXPECT_LE(longest_run, 2u) << "dispatch order was " << order;

@@ -104,11 +104,16 @@ provider::EngineRegistryMemberSnapshot member(
   return value;
 }
 
-PlacementInputBuilder builder(size_t max_pools = 4, size_t max_members = 16) {
-  return PlacementInputBuilder(PlacementInputBuilderConfig{
-      .max_pools = max_pools,
-      .max_members = max_members,
-  });
+PlacementInputBuilder builder(
+    size_t max_pools = 4,
+    size_t max_members = 16,
+    const provider::KVShadowIndex* kv_shadow_index = nullptr) {
+  return PlacementInputBuilder(
+      PlacementInputBuilderConfig{
+          .max_pools = max_pools,
+          .max_members = max_members,
+      },
+      kv_shadow_index);
 }
 
 void seed(PlacementObservationCollector* collector) {
@@ -186,6 +191,64 @@ TEST(PlacementInputBuilderTest, StaleOrUnschedulableReadyFailsClosed) {
             PlacementInputBuildStatus::OK);
   EXPECT_EQ(inputs[0].replicas[0].state, PlacementLifecycleState::FAILED);
   EXPECT_FALSE(inputs[0].replicas[0].fresh);
+}
+
+TEST(PlacementInputBuilderTest, ImportsOnlyReadyHbmCacheValue) {
+  PlacementObservationCollector observations(observation_config());
+  seed(&observations);
+  provider::KVShadowIndex index(provider::KVShadowIndexConfig{
+      .max_engine_streams = 8,
+      .max_index_entries = 32,
+      .max_index_bytes = 64 * 1024,
+      .max_recovery_events_per_engine = 8,
+      .max_recovery_bytes_per_engine = 64 * 1024,
+      .max_snapshot_entries_per_engine = 32,
+      .max_snapshot_bytes_per_engine = 64 * 1024,
+      .event_ttl_ms = 30000,
+      .recovery_timeout_ms = 30000,
+  });
+  provider::EngineRegistryMemberSnapshot ready =
+      member("engine-ready", "inc-ready", xllm::proto::ENGINE_LIFECYCLE_READY);
+  xllm::proto::KVStreamIdentity identity;
+  identity.mutable_engine()->set_provider_id(
+      xllm::proto::PROVIDER_ID_XLLM_NATIVE);
+  identity.mutable_engine()->set_profile_digest("profile-a");
+  identity.mutable_engine()->set_engine_uid("engine-ready");
+  identity.mutable_engine()->set_incarnation_id("inc-ready");
+  identity.set_model_revision("model-r1");
+  identity.set_kv_namespace("namespace-a");
+  identity.set_cache_epoch(1);
+  xllm::proto::KVEventBatch batch;
+  batch.set_contract_version(1);
+  *batch.mutable_identity() = identity;
+  batch.set_last_event_seq(1);
+  batch.set_batch_age_ms_at_publish(0);
+  xllm::proto::KVEvent* event = batch.add_events();
+  event->set_event_seq(1);
+  event->set_kind(xllm::proto::KV_EVENT_KIND_STORED);
+  event->set_reason(xllm::proto::KV_EVENT_REASON_PREFIX_PUBLISHED);
+  event->mutable_block()->set_block_hash(std::string(16, 'h'));
+  event->mutable_block()->set_token_begin(0);
+  event->mutable_block()->set_token_end(16);
+  event->mutable_block()->set_cache_group("group-a");
+  event->mutable_block()->set_tier(xllm::proto::KV_CACHE_TIER_HBM);
+  ASSERT_EQ(index.apply_event_batch(batch, 2000).code,
+            provider::KVApplyCode::APPLIED);
+
+  std::vector<PlacementPoolCycleInput> inputs;
+  ASSERT_EQ(builder(4, 16, &index)
+                .build({spec()}, {ready}, &observations, 3000, &inputs),
+            PlacementInputBuildStatus::OK);
+  ASSERT_EQ(inputs[0].replicas.size(), 1u);
+  EXPECT_TRUE(inputs[0].replicas[0].cache_value_known);
+  EXPECT_DOUBLE_EQ(inputs[0].replicas[0].cache_value, 1.0);
+
+  index.expire(40000);
+  ASSERT_EQ(builder(4, 16, &index)
+                .build({spec()}, {ready}, &observations, 40000, &inputs),
+            PlacementInputBuildStatus::OK);
+  EXPECT_FALSE(inputs[0].replicas[0].cache_value_known);
+  EXPECT_DOUBLE_EQ(inputs[0].replicas[0].cache_value, 0.0);
 }
 
 TEST(PlacementInputBuilderTest, IgnoresMembersFromAnotherExactPool) {

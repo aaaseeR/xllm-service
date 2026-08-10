@@ -23,6 +23,7 @@ limitations under the License.
 #include "placement/placement_controller.h"
 #include "placement/placement_observation_collector.h"
 #include "provider/engine_registry.h"
+#include "provider/kv_shadow_index.h"
 
 namespace xllm_service::placement {
 
@@ -51,7 +52,9 @@ struct PlacementPoolRuntimeSpec {
 // retain Registry pointers or take any Scheduler request-path lock.
 class PlacementInputBuilder final {
  public:
-  explicit PlacementInputBuilder(PlacementInputBuilderConfig config);
+  explicit PlacementInputBuilder(
+      PlacementInputBuilderConfig config,
+      const provider::KVShadowIndex* kv_shadow_index = nullptr);
 
   PlacementInputBuildStatus build(
       const std::vector<PlacementPoolRuntimeSpec>& pools,
@@ -64,6 +67,7 @@ class PlacementInputBuilder final {
 
  private:
   PlacementInputBuilderConfig config_;
+  const provider::KVShadowIndex* kv_shadow_index_ = nullptr;
   bool valid_ = false;
 };
 

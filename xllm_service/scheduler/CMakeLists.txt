@@ -80,6 +80,9 @@ cc_library(
     :kv_state_replica
     :kv_state_stream_client
     :model_type
+    :placement_config
+    :placement_controller
+    :placement_deployment_actuator
     :provider_registry
     :readiness_controller
     :state_stream_outbox

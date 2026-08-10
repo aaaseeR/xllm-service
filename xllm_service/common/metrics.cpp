@@ -47,6 +47,14 @@ DEFINE_GAUGE(xllm_service_v2_engine_kv_min_free_blocks,
              "Minimum fresh Engine KV free blocks per DP rank");
 DEFINE_GAUGE(xllm_service_v2_engine_kv_total_free_blocks,
              "Sum of fresh Engine KV free blocks across DP ranks");
+DEFINE_GAUGE(xllm_service_v3_placement_leader,
+             "Whether this Service currently owns Placement leadership");
+DEFINE_GAUGE(xllm_service_v3_placement_mode,
+             "V3 Placement mode enum for the configured Service");
+DEFINE_GAUGE(xllm_service_v3_placement_pools,
+             "Configured V3 Placement pool count");
+DEFINE_GAUGE(xllm_service_v3_placement_operations,
+             "Current bounded V3 operation ledger records");
 
 DEFINE_MULTI_COUNTER(xllm_service_v2_request_lifecycle_total,
                      "phase",
@@ -66,6 +74,15 @@ DEFINE_MULTI_COUNTER(xllm_service_v2_observability_events_total,
 DEFINE_MULTI_COUNTER(xllm_service_v2_output_sequence_total,
                      "outcome",
                      "Output sequencing outcomes");
+DEFINE_MULTI_COUNTER(xllm_service_v3_placement_cycles_total,
+                     "outcome",
+                     "V3 Placement control cycles by bounded outcome");
+DEFINE_MULTI_COUNTER(xllm_service_v3_placement_observations_total,
+                     "outcome",
+                     "V3 observation producer/build outcomes");
+DEFINE_MULTI_COUNTER(xllm_service_v3_placement_recommendations_total,
+                     "action",
+                     "V3 Placement recommendations by bounded action");
 
 // ttft latency histogram
 DEFINE_HISTOGRAM(time_to_first_token_latency_milliseconds,
@@ -85,3 +102,5 @@ DEFINE_MULTI_HISTOGRAM(xllm_service_v2_tpot_milliseconds,
 DEFINE_MULTI_HISTOGRAM(xllm_service_v2_e2e_milliseconds,
                        "mode",
                        "Server E2E by execution mode");
+DEFINE_HISTOGRAM(xllm_service_v3_placement_cycle_milliseconds,
+                 "V3 Placement control-cycle latency in milliseconds");
