@@ -8,7 +8,7 @@
 
 **最终形态：** 同一控制面通过 Provider Adapter 管理多 Runtime、多硬件、多超节点、多模型、P/D 角色和分层 KV；为每个请求选择已验证的 Provider 与执行模式，再决定在哪里 Prefill/Decode、复用或加载哪份 KV、何时排队或拒绝。目标是在 SLO、公平和成本约束下最大化有效请求量，而不是只追求设备利用率。
 
-三种形态的请求路径、故障语义和明确边界见 [总体架构 §2](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md)。最终目标沿三条正交轴共同推进：
+总体组件拓扑、请求/状态/执行平面和多硬件边界见 [总体架构 §4](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md)；三种形态的请求路径、故障语义和明确边界见同文 §2。最终目标沿三条正交轴共同推进：
 
 - **请求调度轴：** V2-B0 硬准入与快速拒绝 → V2 策略感知的有界流控、优先级与租户公平 → 持续演进 SLO goodput 与成本联合优化。
 - **执行拓扑轴：** V2-B0 单域单模型、多 Provider（xLLM 动态 P/D + vLLM-Ascend 聚合）→ V2 多模型与逐请求执行模式 → V3 模型与角色自动放置 → V4 跨域整请求溢出 → V5 收益可证明的有限跨域 P/D。
@@ -48,7 +48,7 @@
 | 顺序 | 文档 | 用途 |
 | --- | --- | --- |
 | 0 | [V2 代码开发与交付规范](./00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md) | 首版直接 V2、xLLM 代码风格、CPU/Torch CPU 测试、开发文档和完成度门禁 |
-| 1 | [总体架构与阶段演进](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md) | 最终目标、系统边界、状态归属、请求流程和 V2–V5 分工 |
+| 1 | [总体架构与阶段演进](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md) | 总体组件拓扑、请求/状态/执行平面、多硬件边界、状态归属、请求流程和 V2–V5 分工 |
 | 2 | [V2 基础协议规格（原 V1 能力集）](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md) | V2 必须包含的基础接口、状态、容错、开发顺序和门禁；不独立发布 |
 | 3 | [多引擎 Provider 与 Adapter](./11_XLLM_SERVICE_MULTI_ENGINE_PROVIDER_DESIGN.md) | xLLM Native/vLLM-Ascend 的公共 SPI、能力门禁、执行计划、状态和兼容矩阵 |
 | 4 | [Engine 性能建模](./03_XLLM_INFERENCE_ENGINE_MODELING_DESIGN.md) | M1/M2 使用的预测、校准、Scheduler 重放和配置搜索 |

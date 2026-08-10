@@ -3,9 +3,9 @@
 ## 1. 文档定位
 
 - 状态：最终架构、阶段目标与系统边界基线
-- 日期：2026-08-07
+- 日期：2026-08-10
 - 设计对象：xLLM Service 请求控制面；xLLM Native 与 vLLM-Ascend Provider 为首批执行数据面
-- 实现基线：xllm-service `322bcda03793`，xLLM `8164a701bab7`，vLLM-Ascend `ba58907c6d1c`，Mooncake `129a9db9579c`
+- 实现基线：xllm-service `b0a57172dbad`，xLLM `6c9d661e7f41`，vLLM-Ascend `ba58907c6d1c`，Mooncake `129a9db9579c`
 - V2 开发规范：[V2 代码开发与交付规范](./00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md)
 - V2 基础协议：[V2 基础协议规格（原 V1 能力集）](./02_XLLM_SERVICE_V1_IMPLEMENTATION_SPEC.md)
 - 集群 KV 路由：[集群级 KV-aware Router](./08_XLLM_SERVICE_CLUSTER_KV_AWARE_ROUTER_DESIGN.md)
@@ -167,50 +167,111 @@ Service 不根据产品名推断能力。每个 Engine incarnation 注册不可�
 
 xLLM Native 与 vLLM-Ascend 可以共享 Registry、State Stream、选择器和观测，但保留各自 wire、请求编码与内部 scheduler。跨 Provider P/D 默认关闭；Provider/profile/mode 也是 CapacityProfile、trace 和 online residual 的隔离边界。完整接口见 [多引擎 Provider 设计](./11_XLLM_SERVICE_MULTI_ENGINE_PROVIDER_DESIGN.md)。
 
-## 4. 总体架构
+## 4. 总体架构：组件拓扑与平面边界
+
+下图是**静态组件架构图**，不是请求时序图，也不是版本演进流程图。它回答四个问题：请求控制归谁、资源和 KV 真相归谁、高频状态怎样形成可丢失视图、未来能力从哪个边界扩展。空间分组表示部署/责任边界，箭头只表示接口和数据方向，不表示严格执行顺序。
+
+表达方式参考 [llm-d Architecture](https://llm-d.ai/docs/dev/architecture) 的 `Router → InferencePool → Model Server` 分层，以及 [NVIDIA Dynamo Overall Architecture](https://docs.nvidia.com/dynamo/dev/knowledge-base/overview) 对 Request、Control、Storage & Events 三类平面的拆分；xLLM Service 不照搬其部署单元，而是保留自己的 Provider Contract、Engine 原子准入、逐层 P→D PUSH、attempt/commit/fencing 和多 Service 软状态语义。
 
 ```mermaid
-%%{init: {"flowchart": {"useMaxWidth": true, "rankSpacing": 70, "nodeSpacing": 45}, "themeVariables": {"fontSize": "21px"}}}%%
+%%{init: {"flowchart": {"useMaxWidth": true, "rankSpacing": 65, "nodeSpacing": 38}, "themeVariables": {"fontSize": "19px"}}}%%
 flowchart TB
-  C["Client"] -->|"HTTP / SSE"| LB["L4 / L7 Load Balancer"]
-  LB --> S["xLLM Service replicas<br/>normalize / Filter / Score / Pick<br/>ExecutionPlan / retry / output relay"]
+  subgraph ACCESS["外部接入层"]
+    direction TB
+    CLIENT["Client / 上层应用"]
+    GATEWAY["Gateway + L4/L7<br/>鉴权 · API 限流 · 业务幂等<br/>连接与 Service 副本均衡"]
+    CLIENT <-->|"HTTP / SSE"| GATEWAY
+  end
 
-  REG["Engine Registry<br/>identity / capability / lease"] --> S
-  STATE["State Stream<br/>queue / KV / credit / latency"] --> S
-  INDEX["Local KVIndex<br/>Prefix location / tier hint"] --> S
+  subgraph SERVICE["xLLM Service Cluster · V2 请求控制面（不依赖设备 API、硬件无关）"]
+    direction TB
+    CONTROL["Request Plane · 每个副本<br/>API / RequestContext · 有界流控<br/>Resolver + Scheduler · ExecutionPlan<br/>attempt / commit / retry / output"]
+    VIEWS["Discovery & Decision Views · 每个副本、可重建<br/>Registry / Descriptor · EngineState / LinkState<br/>有界 HBM KVIndex<br/>State Stream + 独立 KV State lane"]
+    ADAPTERS["Provider Contract + Adapters<br/>Descriptor / capability / ExecutionPlan<br/>Submit / Query / Cancel / output / events<br/>xLLM Native · vLLM-Ascend · 后续 Provider"]
+    OBS["统一可观测性<br/>global_request_id + request_uid/attempt<br/>provider/model/profile/mode/domain<br/>结构化 log · metrics · trace · audit"]
 
-  S --> A["Provider Adapter<br/>xLLM Native / vLLM-Ascend Agent"]
-  A -->|"REMOTE_PD plan"| P["P Engine"]
-  A -->|"AGGREGATED plan"| E["Aggregated Engine"]
-  P -->|"AddNewRequests / KV PUSH / FirstGeneration"| D["D Engine"]
-  P -->|"first event"| OUT["Service output relay"]
-  D -->|"subsequent Generations"| OUT
-  OUT --> C
+    VIEWS -.->|"过滤 / 流控 / 评分输入"| CONTROL
+    CONTROL -->|"ExecutionPlan"| ADAPTERS
+    CONTROL -.-> OBS
+    VIEWS -.-> OBS
+  end
 
-  STORE["V2.5 Mooncake Store<br/>cross-request KV write / restore / replicate"] <--> P
-  STORE <--> D
-  PLACE["V3+ Placement Controller<br/>model / role / replica desired state"] --> P
-  PLACE --> D
+  subgraph EXECUTION["Provider Execution Domains · 执行与资源数据面（最终资源权威）"]
+    direction TB
+    XDOMAIN["xLLM Native Domain<br/>P Pool ⇄ D Pool；逐层 KV tensor 直传<br/>REMOTE_PD · LOCAL_PREFILL_DECODE · PREFILL_ONLY<br/>原子准入 · BlockManager · HBM/HOST · Connector<br/>NPU / CUDA / 后续硬件 backend"]
+    VDOMAIN["vLLM-Ascend Domain · V2 严格 AGGREGATED<br/>Provider Agent 是唯一入口并与 Runtime 同命<br/>admission / attempt / deadline / Query/Cancel / fencing<br/>受控 vLLM 的 KV / slot / scheduler 是资源权威<br/>Ascend NPU / CANN backend"]
+    FDOMAIN["后续 Provider Domain<br/>Engine / Agent + GPU / NPU / 其他硬件 backend<br/>先通过 Provider conformance，能力未知则 fail closed"]
+  end
+
+  subgraph INFRA["集群基础设施与后续慢环"]
+    direction TB
+    ETCD["etcd Registry<br/>低频身份 · Descriptor · lease<br/>不承载高频 Engine/KV 事件"]
+    TELEMETRY["集群观测平台<br/>Log / Metrics / Trace / Audit<br/>容量、SLO 与性能分析"]
+    STORE["V2.5+ KV Memory Layer<br/>Mooncake Store · DRAM/SSD/共享层<br/>不保存 Decode 状态"]
+    PLACEMENT["V3+ Placement / Autoscale<br/>模型 · 角色 · profile · 副本 desired state"]
+  end
+
+  GATEWAY ==>|"推理请求"| CONTROL
+  CONTROL ==>|"SSE / response"| GATEWAY
+
+  ADAPTERS ==>|"Native plan / RPC"| XDOMAIN
+  XDOMAIN ==>|"Output / result"| ADAPTERS
+  ADAPTERS ==>|"严格 Agent 协议"| VDOMAIN
+  VDOMAIN ==>|"Output / result"| ADAPTERS
+  ADAPTERS ==>|"能力门禁后开放"| FDOMAIN
+  FDOMAIN ==>|"Output / result"| ADAPTERS
+
+  XDOMAIN -.->|"Descriptor / lease"| ETCD
+  VDOMAIN -.->|"Descriptor / lease"| ETCD
+  FDOMAIN -.->|"Descriptor / lease"| ETCD
+  ETCD -.->|"watch"| VIEWS
+
+  XDOMAIN -.->|"EngineState / LinkState / KV events"| VIEWS
+  VDOMAIN -.->|"EngineState / health"| VIEWS
+  FDOMAIN -.->|"capability-gated state/events"| VIEWS
+
+  OBS -.-> TELEMETRY
+  XDOMAIN -.->|"同一关联键"| TELEMETRY
+  VDOMAIN -.->|"同一关联键"| TELEMETRY
+
+  STORE <-.->|"V2.5+ load / write / restore"| XDOMAIN
+  STORE -.->|"位置事件"| VIEWS
+  PLACEMENT -.->|"V3+ desired state"| XDOMAIN
+  PLACEMENT -.->|"V3+ desired state"| VDOMAIN
 ```
 
-### 4.1 组件职责
+### 4.1 图例与关键边界
+
+- **粗实线：** 请求、输出或 KV tensor 数据路径；P→D KV 直传发生在 Engine/Connector 数据面，不经过 Service。
+- **虚线：** Registry、EngineState、KV 位置、观测或 desired state；这些只影响选择、运维和后续规划，不能替代 Engine 本地 allocator 的原子决定。
+- **V2 核心范围：** Gateway 后的 xLLM Service 请求控制面、Provider Contract、xLLM Native 与 vLLM-Ascend 执行域、etcd Registry、State/KV Stream 和统一可观测性；图中明确标为“后续”“V2.5+”“V3+”的节点不属于 V2 门禁。
+- **V2.5+/V3+ 节点：** 共享 KV 内存层和 Placement/Autoscale 是明确扩展点，不是 V2 请求正确性的隐藏依赖。
+- **多硬件边界：** Service 只理解 Provider Descriptor、能力、profile、执行模式、资源摘要和稳定错误，不调用 CANN/CUDA、不处理 device pointer。NPU、GPU 和后续硬件差异由 Engine Runtime、allocator、Connector 和硬件 backend 暴露为经过验证的 Provider 能力。
+
+这个分层与 llm-d/Dynamo 的共同点是把请求决策、执行资源和异步状态分开；关键差异是 xLLM Service 对每个 attempt 负责跨 P/D 协调和输出提交屏障，而 Engine/Agent 对准入、KV、执行、deadline 和 fencing 保持最终权威。CPU 与 Torch CPU 测试只验证同一 Provider/Engine 契约及 simulated HBM 资源链路；上 NPU 时替换的是硬件 backend 和真实传输证据，不改变 Service 架构。
+
+### 4.2 组件职责
 
 | 组件 | 职责 |
 | --- | --- |
 | Gateway/LB | 可由现有 HTTP 接入层与外部 L4/L7 共同承担；负责鉴权、API 级限流、业务幂等、连接和 Service 副本负载均衡，不选择 P/D |
-| xLLM Service | 推理级有界流控、请求规范化、Provider/执行模式选择、进程内重试、KV 路由和结果中继；V1 不启用策略队列 |
-| Provider Adapter/Agent | 把公共 Descriptor、状态、请求、取消、deadline、fencing 和可选 P/D 语义映射到具体 Runtime；不伪造 Runtime 不具备的能力 |
-| Engine Registry | Service/Engine 发现、incarnation、模型和静态能力 |
-| State Stream | V1 的 xllm-service 内置模块，负责全量 Engine 高频软状态扇出；不独立部署 |
+| xLLM Service | 推理级有界流控、请求规范化、Provider/执行模式选择、进程内重试、KV 路由和结果中继；只持有当前请求与可丢失软视图，不持有 Engine 资源 |
+| Provider SPI / Adapter | Service 内部硬件无关扩展边界；把公共 Descriptor、状态、计划、请求、取消、deadline 和事件映射到具体 Runtime wire，不伪造 Runtime 不具备的能力 |
+| Provider Agent | 与需要代理的 Runtime 同失效域部署，承担严格准入、attempt、Query/Cancel、deadline、fencing、状态与输出桥接；不是 Service 内部 Adapter，也不能与受控 Runtime 脱离生命周期 |
+| Engine Registry | 通过 etcd 保存 Service/Engine 发现、incarnation、模型、静态能力与 lease；不承载高频 Engine/KV 状态 |
+| State/KV Stream | xllm-service 内置模块；EngineState/LinkState 与 KV State 使用独立有界 lane，由 master 聚合并向所有副本扇出；不独立部署、不拥有请求或 KV |
+| HBM KVIndex | 每个 Service 副本内的有界可丢失 Prefix 位置索引；只给路由提供收益证据，Engine BlockManager/allocator 仍是 HBM 资源权威 |
 | Aggregated Engine | 在一个 Provider 实例内完成完整推理；vLLM-Ascend V2 首发的严格接入模式 |
 | P Engine | Prefill、本地准入、源 KV 和传输驱动 |
 | D Engine | 目标 KV/credit 原子准入、预留 TTL、Decode 和输出 |
+| Engine Runtime / Backend | 实现 allocator、scheduler、BlockManager、Connector、NPU/GPU 操作与真实 HBM/HOST 数据生命周期；只通过 Provider 能力和状态向 Service 暴露必要事实 |
+| Observability Platform | 汇聚 Gateway、Service、Agent、P/D/聚合 Engine 的统一关联日志、指标、trace 与审计，支撑集群级正确性定位、SLO 分解、容量分析和性能优化 |
 | Placement Controller | V3 慢环：模型 load/warmup/drain、角色和副本目标 |
 | Mooncake Store | V2.5 的 Prefix/跨请求 KV 数据层，不参与基础请求正确性，也不保存 Decode 执行状态 |
 
-V1 没有请求级 Coordination Store、Request Journal、Stable Request Plane、Engine manager 或 Capability Issuer。
+V2 不引入请求级 Coordination Store、Request Journal、Stable Request Plane、Engine manager 或 Capability Issuer。
 
-### 4.2 多 Service 的集群视图
+### 4.3 多 Service 的集群视图
 
 当前 `xllm-service` 的每个副本已经 watch etcd 中的全部 Engine 注册信息，并各自维护 `InstanceMgr`、本地请求表和 RR/CAR/SLO-aware 策略；Engine heartbeat 只发往 etcd 选出的 master。master 目前每 3 秒把 `waiting_requests_num` 和 `gpu_cache_usage_perc` 等粗粒度负载写回 etcd，其他副本通过 watch 更新。当前选择结果是一个 `Routing{prefill_name, decode_name}`，即请求到达时一次锁定单个 P 和单个 D；实例故障直接失败相关请求，没有跨 Service 请求接管。
 
@@ -229,7 +290,7 @@ V1 直接扩展这些现有类：`Scheduler` 继续负责请求规范化和调�
 
 State Stream 是 `Scheduler/InstanceMgr` 的内部模块，不是新部署服务。master 只负责软状态聚合，不拥有请求或 Engine；切主无需请求对账。现有 `service_name` 就是 `ip:rpc_port`，继续作为 Registry member value 和推送地址，不改 value 格式。master 枚举成员时必须先按完整 key 排除 `XLLM:SERVICE:MASTER`，再校验地址并去重；普通 Service 不保存其他 Service 的请求、负载或 ownership 信息，也不执行 Service 间请求级调用。
 
-### 4.3 公共标识
+### 4.4 公共标识
 
 ```text
 request_id        API/业务追踪 ID，不承担 Engine 唯一性
