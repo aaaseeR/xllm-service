@@ -353,6 +353,47 @@ TEST(FlowControlQueueTest, FailedRouteCanReturnWithoutLosingReservation) {
   EXPECT_EQ(snapshot.queued_bytes, 100);
 }
 
+TEST(FlowControlQueueTest, ReturnFailsAtomicallyWhenQueueSlotWasReused) {
+  FlowControlConfig limits = config();
+  limits.max_queued_requests = 1;
+  limits.max_model_queued_requests = 1;
+  limits.max_queued_requests_per_tenant = 1;
+  FlowControlQueue queue(limits);
+  const auto now = FlowControlQueue::Clock::now();
+  ASSERT_EQ(queue
+                .admit(work("selected", now, "tenant-a", "model-a"),
+                       now,
+                       SaturationState::SATURATED)
+                .status,
+            FlowControlStatus::OK);
+  const FlowControlDispatch selected =
+      queue.take_next(now, SaturationState::AVAILABLE);
+  ASSERT_TRUE(selected.work.has_value());
+  ASSERT_EQ(selected.work->request_uid, "selected");
+
+  ASSERT_EQ(queue
+                .admit(work("replacement", now, "tenant-a", "model-a"),
+                       now,
+                       SaturationState::SATURATED)
+                .status,
+            FlowControlStatus::OK);
+  EXPECT_EQ(queue.return_to_queue("selected"),
+            FlowControlStatus::QUEUE_CAPACITY_EXHAUSTED);
+
+  const FlowControlSnapshot snapshot = queue.snapshot();
+  EXPECT_EQ(snapshot.queued_requests, 1u);
+  EXPECT_EQ(snapshot.dispatched_requests, 1u);
+  EXPECT_EQ(snapshot.queued_prompt_tokens, 10u);
+  EXPECT_EQ(snapshot.queued_bytes, 100u);
+  EXPECT_EQ(snapshot.active_model_accounts, 1u);
+  EXPECT_EQ(snapshot.active_tenant_accounts, 1u);
+  EXPECT_EQ(snapshot.active_queued_flows, 1u);
+  EXPECT_EQ(queue.complete("selected"), FlowControlStatus::OK);
+  EXPECT_EQ(queue.cancel("replacement"), FlowControlStatus::OK);
+  EXPECT_EQ(queue.snapshot().queued_requests, 0u);
+  EXPECT_EQ(queue.snapshot().dispatched_requests, 0u);
+}
+
 TEST(FlowControlQueueTest, DrainRetryReturnsOnlyUndispatchedWork) {
   FlowControlQueue queue(config());
   const auto now = FlowControlQueue::Clock::now();

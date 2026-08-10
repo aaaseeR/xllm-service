@@ -569,17 +569,41 @@ FlowControlStatus FlowControlQueue::return_to_queue(
   if (!entry.dispatched) {
     return FlowControlStatus::INVALID_ARGUMENT;
   }
+
+  const Usage& service = service_usage_;
+  const Usage& model = model_usage_.at(entry.work.model_pool);
+  const Usage& tenant = tenant_usage_.at(entry.work.tenant_id);
+  if (service.queued_requests >= config_.max_queued_requests ||
+      model.queued_requests >= config_.max_model_queued_requests ||
+      tenant.queued_requests >= config_.max_queued_requests_per_tenant ||
+      add_overflows(service.queued_prompt_tokens, entry.work.prompt_tokens) ||
+      service.queued_prompt_tokens + entry.work.prompt_tokens >
+          config_.max_queued_prompt_tokens ||
+      add_overflows(model.queued_prompt_tokens, entry.work.prompt_tokens) ||
+      model.queued_prompt_tokens + entry.work.prompt_tokens >
+          config_.max_model_queued_prompt_tokens ||
+      add_overflows(tenant.queued_prompt_tokens, entry.work.prompt_tokens) ||
+      tenant.queued_prompt_tokens + entry.work.prompt_tokens >
+          config_.max_queued_tokens_per_tenant ||
+      add_overflows(service.queued_bytes, entry.work.request_bytes) ||
+      service.queued_bytes + entry.work.request_bytes >
+          config_.max_queued_bytes ||
+      add_overflows(model.queued_bytes, entry.work.request_bytes) ||
+      model.queued_bytes + entry.work.request_bytes >
+          config_.max_model_queued_bytes) {
+    return FlowControlStatus::QUEUE_CAPACITY_EXHAUSTED;
+  }
   decrement_dispatched_locked(entry, /*erase_empty_usage=*/false);
 
-  Usage& service = service_usage_;
-  Usage& model = model_usage_.at(entry.work.model_pool);
-  Usage& tenant = tenant_usage_.at(entry.work.tenant_id);
-  for (Usage* usage : {&service, &model, &tenant}) {
+  for (Usage* usage : {&service_usage_,
+                       &model_usage_.at(entry.work.model_pool),
+                       &tenant_usage_.at(entry.work.tenant_id)}) {
     ++usage->queued_requests;
     usage->queued_prompt_tokens += entry.work.prompt_tokens;
   }
-  service.queued_bytes += entry.work.request_bytes;
-  model.queued_bytes += entry.work.request_bytes;
+  service_usage_.queued_bytes += entry.work.request_bytes;
+  model_usage_.at(entry.work.model_pool).queued_bytes +=
+      entry.work.request_bytes;
   activate_queued_work_locked(entry.work);
   entry.dispatched = false;
   entry.blind_probe = false;

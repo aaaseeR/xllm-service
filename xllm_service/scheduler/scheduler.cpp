@@ -3280,6 +3280,37 @@ void Scheduler::run_execution_hold_cleanup() {
   }
 }
 
+bool Scheduler::return_flow_to_queue_or_fail(
+    const std::shared_ptr<Request>& request,
+    std::string message) {
+  if (request == nullptr) {
+    return false;
+  }
+  const std::string request_uid = request->correlation.request_uid();
+  const FlowControlStatus status =
+      flow_control_queue_->return_to_queue(request_uid);
+  if (status == FlowControlStatus::OK) {
+    request->queue_state.store(RequestQueueState::QUEUED,
+                               std::memory_order_release);
+    return true;
+  }
+
+  LOG(ERROR) << "Cannot safely return selected request to the bounded queue, "
+             << "request_uid=" << request_uid
+             << ", flow_status=" << static_cast<int32_t>(status);
+  std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
+  {
+    std::lock_guard<std::mutex> request_guard(request_mutex_);
+    const auto iterator = requests_.find(request_uid);
+    if (iterator == requests_.end() || iterator->second != request) {
+      return false;
+    }
+  }
+  fail_output_dispatch_locked(
+      request, llm::StatusCode::RESOURCE_EXHAUSTED, std::move(message));
+  return false;
+}
+
 void Scheduler::run_flow_dispatch() {
   std::unique_lock<std::mutex> wait_lock(flow_dispatch_wait_mutex_);
   while (!flow_dispatch_stopped_) {
@@ -3365,16 +3396,23 @@ void Scheduler::run_flow_dispatch() {
         if (request != nullptr &&
             request->queue_state.load(std::memory_order_acquire) ==
                 RequestQueueState::QUEUED) {
-          flow_control_queue_->return_to_queue(request_uid);
-          break;
+          if (return_flow_to_queue_or_fail(
+                  request,
+                  "Dispatch readiness changed after queue selection")) {
+            break;
+          }
+          continue;
         }
         flow_control_queue_->cancel(request_uid);
         continue;
       }
 
       if (!select_and_prepare_dispatch(request)) {
-        flow_control_queue_->return_to_queue(request_uid);
-        break;
+        if (return_flow_to_queue_or_fail(
+                request, "No safe route was available after queue selection")) {
+          break;
+        }
+        continue;
       }
 
       std::optional<uint64_t> queue_wait_ns;
@@ -3441,10 +3479,12 @@ void Scheduler::run_flow_dispatch() {
       }
       if (!hold_installed) {
         request->execution_hold.abandon_before_dispatch();
-        flow_control_queue_->return_to_queue(request_uid);
-        request->queue_state.store(RequestQueueState::QUEUED,
-                                   std::memory_order_release);
-        break;
+        if (return_flow_to_queue_or_fail(request,
+                                         "Execution hold could not be "
+                                         "installed after queue selection")) {
+          break;
+        }
+        continue;
       }
       if (!dispatch_started) {
         finish_d_admission(request,

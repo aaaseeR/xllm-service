@@ -215,6 +215,8 @@ class Scheduler final {
   void record_resource_release(const std::shared_ptr<Request>& request);
   void finish_resource_release_traces(bool fail_pending = false);
   bool admit_flow_control_locked(const std::shared_ptr<Request>& request);
+  bool return_flow_to_queue_or_fail(const std::shared_ptr<Request>& request,
+                                    std::string message);
   void record_kv_route_decision(const std::shared_ptr<Request>& request);
   void record_kv_route_actual(const std::shared_ptr<Request>& request,
                               const llm::RequestOutput* output);
