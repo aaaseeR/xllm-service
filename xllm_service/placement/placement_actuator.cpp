@@ -18,6 +18,8 @@ limitations under the License.
 #include <algorithm>
 #include <utility>
 
+#include "placement/placement_operation_store.h"
+
 namespace xllm_service::placement {
 namespace {
 
@@ -44,26 +46,13 @@ bool valid_config(const PlacementOperationExecutorConfig& config) {
          config.operation_timeout_ms > 0;
 }
 
-bool intents_equal(const PlacementOperationIntent& left,
-                   const PlacementOperationIntent& right) {
-  return left.operation_id == right.operation_id &&
-         left.action == right.action &&
-         placement_pool_keys_equal(left.pool, right.pool) &&
-         left.engine_uid == right.engine_uid &&
-         left.engine_incarnation == right.engine_incarnation &&
-         left.leader_incarnation == right.leader_incarnation &&
-         left.desired_generation == right.desired_generation &&
-         left.ordinal == right.ordinal;
-}
-
 bool response_identity_matches(const PlacementOperationRecord& record,
                                const PlacementActuatorResponse& response) {
   const bool has_uid = !response.engine_uid.empty();
   const bool has_incarnation = !response.engine_incarnation.empty();
   if (has_uid != has_incarnation ||
-      (has_uid &&
-       (!valid_placement_identity(response.engine_uid) ||
-        !valid_placement_identity(response.engine_incarnation)))) {
+      (has_uid && (!valid_placement_identity(response.engine_uid) ||
+                   !valid_placement_identity(response.engine_incarnation)))) {
     return false;
   }
   if (record.intent.action == PlacementOperationAction::CREATE) {
@@ -124,8 +113,7 @@ void apply_response(const PlacementActuatorResponse& response,
   record->last_code = response.code;
   record->updated_at_ms = now_ms;
   record->message = response.message.substr(0, max_message_bytes);
-  if (!valid_actuator_code(response.code) ||
-      !valid_message(response.message) ||
+  if (!valid_actuator_code(response.code) || !valid_message(response.message) ||
       !valid_placement_lifecycle_state(response.lifecycle_state) ||
       !response_identity_matches(*record, response)) {
     record->status = PlacementOperationStatus::FAILED;
@@ -174,8 +162,81 @@ void apply_response(const PlacementActuatorResponse& response,
 
 PlacementOperationExecutor::PlacementOperationExecutor(
     PlacementOperationExecutorConfig config,
-    PlacementActuator* actuator)
-    : config_(config), actuator_(actuator) {}
+    PlacementActuator* actuator,
+    PlacementOperationStore* store,
+    PlacementLeaderIdentity leader)
+    : config_(config),
+      actuator_(actuator),
+      store_(store),
+      leader_(std::move(leader)) {}
+
+PlacementExecutorStatus PlacementOperationExecutor::recover(
+    uint64_t now_ms,
+    size_t max_total_bytes) {
+  if (!valid_config(config_) || actuator_ == nullptr || store_ == nullptr ||
+      !valid_placement_leader_identity(leader_) || now_ms == 0 ||
+      max_total_bytes == 0 || !records_.empty()) {
+    return PlacementExecutorStatus::INVALID_INPUT;
+  }
+  std::vector<PlacementPersistedOperation> snapshot;
+  const PlacementStoreStatus status =
+      store_->load_snapshot(config_.max_records, max_total_bytes, &snapshot);
+  if (status == PlacementStoreStatus::CAPACITY_EXCEEDED) {
+    return PlacementExecutorStatus::CAPACITY_EXCEEDED;
+  }
+  if (status != PlacementStoreStatus::OK) {
+    return PlacementExecutorStatus::PERSISTENCE_ERROR;
+  }
+  for (PlacementPersistedOperation& persisted : snapshot) {
+    PlacementOperationRecord& record = persisted.record;
+    if (!placement_operation_terminal(record.status)) {
+      record.created_at_ms = now_ms;
+      record.updated_at_ms = now_ms;
+      record.timed_out = false;
+    }
+    record.command_revision = persisted.command_revision;
+    record.status_revision = persisted.status_revision;
+    if (!records_.emplace(record.intent.operation_id, std::move(record))
+             .second) {
+      records_.clear();
+      return PlacementExecutorStatus::PERSISTENCE_ERROR;
+    }
+  }
+  return PlacementExecutorStatus::OK;
+}
+
+PlacementExecutorStatus PlacementOperationExecutor::recover_for_leader(
+    PlacementLeaderIdentity leader,
+    uint64_t now_ms,
+    size_t max_total_bytes) {
+  if (!valid_placement_leader_identity(leader)) {
+    return PlacementExecutorStatus::INVALID_INPUT;
+  }
+  records_.clear();
+  leader_ = std::move(leader);
+  return recover(now_ms, max_total_bytes);
+}
+
+PlacementExecutorStatus PlacementOperationExecutor::persist(
+    PlacementOperationRecord* record) {
+  if (record == nullptr) {
+    return PlacementExecutorStatus::INVALID_INPUT;
+  }
+  if (store_ == nullptr) {
+    return PlacementExecutorStatus::OK;
+  }
+  int64_t revision = 0;
+  const PlacementStoreStatus status = store_->compare_and_set_status(
+      *record, record->status_revision, leader_, &revision);
+  if (status == PlacementStoreStatus::CAPACITY_EXCEEDED) {
+    return PlacementExecutorStatus::CAPACITY_EXCEEDED;
+  }
+  if (status != PlacementStoreStatus::OK) {
+    return PlacementExecutorStatus::PERSISTENCE_ERROR;
+  }
+  record->status_revision = revision;
+  return PlacementExecutorStatus::OK;
+}
 
 PlacementExecutorResult PlacementOperationExecutor::add_intents(
     const std::vector<PlacementOperationIntent>& intents,
@@ -197,7 +258,8 @@ PlacementExecutorResult PlacementOperationExecutor::add_intents(
     }
     const auto [unique_iterator, inserted] =
         unique_intents.emplace(intent.operation_id, &intent);
-    if (!inserted && !intents_equal(*unique_iterator->second, intent)) {
+    if (!inserted &&
+        !placement_operation_intents_equal(*unique_iterator->second, intent)) {
       result.status = PlacementExecutorStatus::INVALID_INPUT;
       return result;
     }
@@ -209,7 +271,7 @@ PlacementExecutorResult PlacementOperationExecutor::add_intents(
       ++new_records;
       continue;
     }
-    if (!intents_equal(iterator->second.intent, intent)) {
+    if (!placement_operation_intents_equal(iterator->second.intent, intent)) {
       result.status = PlacementExecutorStatus::INVALID_INPUT;
       return result;
     }
@@ -225,20 +287,38 @@ PlacementExecutorResult PlacementOperationExecutor::add_intents(
       ++result.replayed;
       continue;
     }
-    records_.emplace(
-        intent.operation_id,
-        PlacementOperationRecord{
-            .intent = intent,
-            .created_at_ms = now_ms,
-            .updated_at_ms = now_ms,
-        });
+    PlacementOperationRecord record{
+        .intent = intent,
+        .created_at_ms = now_ms,
+        .updated_at_ms = now_ms,
+    };
+    if (store_ != nullptr) {
+      int64_t command_revision = 0;
+      const PlacementStoreStatus command_status =
+          store_->create_command(intent, leader_, &command_revision);
+      if (command_status != PlacementStoreStatus::OK) {
+        result.status =
+            command_status == PlacementStoreStatus::CAPACITY_EXCEEDED
+                ? PlacementExecutorStatus::CAPACITY_EXCEEDED
+                : PlacementExecutorStatus::PERSISTENCE_ERROR;
+        return result;
+      }
+      record.command_revision = command_revision;
+      const PlacementExecutorStatus persist_status = persist(&record);
+      if (persist_status != PlacementExecutorStatus::OK) {
+        result.status = persist_status;
+        return result;
+      }
+    }
+    records_.emplace(intent.operation_id, std::move(record));
     ++result.added;
   }
   return result;
 }
 
-PlacementExecutorResult PlacementOperationExecutor::drive(uint64_t now_ms,
-                                                           uint32_t max_actions) {
+PlacementExecutorResult PlacementOperationExecutor::drive(
+    uint64_t now_ms,
+    uint32_t max_actions) {
   PlacementExecutorResult result{
       .status = PlacementExecutorStatus::OK,
   };
@@ -270,12 +350,27 @@ PlacementExecutorResult PlacementOperationExecutor::drive(uint64_t now_ms,
     PlacementActuatorResponse response;
     if (record.status == PlacementOperationStatus::PLANNED) {
       ++record.execute_attempts;
+      record.status = PlacementOperationStatus::UNKNOWN;
+      record.last_code = PlacementActuatorCode::UNKNOWN;
+      record.updated_at_ms = now_ms;
+      const PlacementExecutorStatus persist_status = persist(&record);
+      if (persist_status != PlacementExecutorStatus::OK) {
+        result.status = persist_status;
+        return result;
+      }
       response = actuator_->execute(record.intent);
     } else {
       ++record.query_attempts;
       response = actuator_->query(record.intent);
     }
     apply_response(response, config_.max_message_bytes, now_ms, &record);
+    const PlacementExecutorStatus persist_status = persist(&record);
+    if (persist_status != PlacementExecutorStatus::OK) {
+      record.status = PlacementOperationStatus::UNKNOWN;
+      record.last_code = PlacementActuatorCode::UNKNOWN;
+      result.status = persist_status;
+      return result;
+    }
     ++result.driven;
     if (placement_operation_terminal(record.status)) {
       ++result.terminal;
@@ -286,8 +381,8 @@ PlacementExecutorResult PlacementOperationExecutor::drive(uint64_t now_ms,
   return result;
 }
 
-std::vector<PlacementOperationRecord>
-PlacementOperationExecutor::snapshot() const {
+std::vector<PlacementOperationRecord> PlacementOperationExecutor::snapshot()
+    const {
   std::vector<PlacementOperationRecord> snapshot;
   snapshot.reserve(records_.size());
   for (const auto& [operation_id, record] : records_) {
@@ -310,10 +405,11 @@ PlacementOperationExecutor::operation_views() const {
         .pool = record.intent.pool,
         .engine_uid = record.engine_uid.empty() ? record.intent.engine_uid
                                                 : record.engine_uid,
-        .engine_incarnation =
-            record.engine_incarnation.empty() ? record.intent.engine_incarnation
-                                              : record.engine_incarnation,
+        .engine_incarnation = record.engine_incarnation.empty()
+                                  ? record.intent.engine_incarnation
+                                  : record.engine_incarnation,
         .leader_incarnation = record.intent.leader_incarnation,
+        .leader_epoch = record.intent.leader_epoch,
         .desired_generation = record.intent.desired_generation,
     });
   }
@@ -322,16 +418,16 @@ PlacementOperationExecutor::operation_views() const {
 
 size_t PlacementOperationExecutor::size() const { return records_.size(); }
 
-bool valid_placement_operation_intent(
-    const PlacementOperationIntent& intent) {
+bool valid_placement_operation_intent(const PlacementOperationIntent& intent) {
   if (!valid_placement_identity(intent.operation_id) ||
       !valid_placement_pool_key(intent.pool) ||
       !valid_placement_identity(intent.leader_incarnation) ||
-      intent.desired_generation == 0 ||
+      intent.leader_epoch == 0 || intent.desired_generation == 0 ||
       intent.operation_id != make_placement_operation_id(
                                  PlacementLeaderIdentity{
                                      .address = "unused",
                                      .incarnation = intent.leader_incarnation,
+                                     .epoch = intent.leader_epoch,
                                  },
                                  intent.desired_generation,
                                  intent.pool,
@@ -346,6 +442,19 @@ bool valid_placement_operation_intent(
   }
   return valid_placement_identity(intent.engine_uid) &&
          valid_placement_identity(intent.engine_incarnation);
+}
+
+bool placement_operation_intents_equal(const PlacementOperationIntent& left,
+                                       const PlacementOperationIntent& right) {
+  return left.operation_id == right.operation_id &&
+         left.action == right.action &&
+         placement_pool_keys_equal(left.pool, right.pool) &&
+         left.engine_uid == right.engine_uid &&
+         left.engine_incarnation == right.engine_incarnation &&
+         left.leader_incarnation == right.leader_incarnation &&
+         left.leader_epoch == right.leader_epoch &&
+         left.desired_generation == right.desired_generation &&
+         left.ordinal == right.ordinal;
 }
 
 bool placement_drain_proof_complete(const PlacementDrainProof& proof) {

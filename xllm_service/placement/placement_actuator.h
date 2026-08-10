@@ -24,6 +24,8 @@ limitations under the License.
 
 namespace xllm_service::placement {
 
+class PlacementOperationStore;
+
 inline constexpr size_t kMaxPlacementActuatorMessageBytes = 1024;
 
 enum class PlacementActuatorCode : int8_t {
@@ -44,6 +46,7 @@ enum class PlacementExecutorStatus : int8_t {
   INVALID_INPUT = 1,
   CAPACITY_EXCEEDED = 2,
   CLOCK_REGRESSION = 3,
+  PERSISTENCE_ERROR = 4,
 };
 
 struct PlacementDrainProof {
@@ -90,6 +93,8 @@ struct PlacementOperationRecord {
   uint64_t updated_at_ms = 0;
   bool timed_out = false;
   std::string message;
+  int64_t command_revision = 0;
+  int64_t status_revision = 0;
 };
 
 struct PlacementOperationExecutorConfig {
@@ -110,7 +115,18 @@ struct PlacementExecutorResult {
 class PlacementOperationExecutor final {
  public:
   PlacementOperationExecutor(PlacementOperationExecutorConfig config,
-                             PlacementActuator* actuator);
+                             PlacementActuator* actuator,
+                             PlacementOperationStore* store = nullptr,
+                             PlacementLeaderIdentity leader = {});
+
+  PlacementExecutorStatus recover(uint64_t now_ms, size_t max_total_bytes);
+
+  // Rebuilds the local ledger after leadership acquisition. Persisted
+  // monotonic timestamps belong to another process clock domain and are
+  // deliberately rebased before any Query is issued.
+  PlacementExecutorStatus recover_for_leader(PlacementLeaderIdentity leader,
+                                             uint64_t now_ms,
+                                             size_t max_total_bytes);
 
   PlacementExecutorResult add_intents(
       const std::vector<PlacementOperationIntent>& intents,
@@ -125,13 +141,19 @@ class PlacementOperationExecutor final {
   size_t size() const;
 
  private:
+  PlacementExecutorStatus persist(PlacementOperationRecord* record);
+
   PlacementOperationExecutorConfig config_;
   PlacementActuator* actuator_ = nullptr;
+  PlacementOperationStore* store_ = nullptr;
+  PlacementLeaderIdentity leader_;
   std::map<std::string, PlacementOperationRecord> records_;
 };
 
-bool valid_placement_operation_intent(
-    const PlacementOperationIntent& intent);
+bool valid_placement_operation_intent(const PlacementOperationIntent& intent);
+
+bool placement_operation_intents_equal(const PlacementOperationIntent& left,
+                                       const PlacementOperationIntent& right);
 
 bool placement_drain_proof_complete(const PlacementDrainProof& proof);
 

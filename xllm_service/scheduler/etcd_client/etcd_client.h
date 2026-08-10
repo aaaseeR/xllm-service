@@ -15,11 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <etcd/KeepAlive.hpp>
 #include <etcd/SyncClient.hpp>
 #include <etcd/Watcher.hpp>
 #include <etcd/v3/Transaction.hpp>
-#include <cstdint>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -139,16 +139,22 @@ class EtcdClient {
                                    std::string* value,
                                    int64_t* mod_revision);
 
-  EtcdReadStatus get_prefix_with_revision(
-      const std::string& key_prefix,
-      std::vector<EtcdKeyValue>* values);
+  EtcdReadStatus get_prefix_with_revision(const std::string& key_prefix,
+                                          std::vector<EtcdKeyValue>* values);
+
+  // Reads the atomically elected master tuple. The master-key mod revision is
+  // the V3 lifecycle fencing epoch and both election keys must share it.
+  EtcdReadStatus get_master_identity(std::string* address,
+                                     std::string* incarnation,
+                                     uint64_t* epoch);
 
   EtcdFencedWriteStatus compare_and_set_fenced(
       const std::string& key,
       const std::string& value,
       int64_t expected_mod_revision,
       const std::string& expected_master_address,
-      const std::string& expected_master_incarnation);
+      const std::string& expected_master_incarnation,
+      uint64_t expected_master_epoch);
 
   template <typename T>
   bool get_prefix(const std::string& key_prefix,

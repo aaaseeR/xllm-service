@@ -59,3 +59,36 @@ cc_test(
     :placement_actuator
     GTest::gtest_main
 )
+
+cc_test(
+  NAME
+    placement_operation_store_test
+  SRCS
+    placement_operation_store_test.cpp
+  DEPS
+    :placement_actuator
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    provider_lifecycle_actuator_test
+  SRCS
+    provider_lifecycle_actuator_test.cpp
+  DEPS
+    :placement_actuator
+    GTest::gtest_main
+    brpc-static
+    nlohmann_json::nlohmann_json
+    proto::proto_http_service
+)
+
+cc_test(
+  NAME
+    placement_controller_test
+  SRCS
+    placement_controller_test.cpp
+  DEPS
+    :placement_controller
+    GTest::gtest_main
+)

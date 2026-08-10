@@ -78,6 +78,12 @@ class AttemptResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class DrainSnapshot:
+    admission_closed: bool
+    active_attempts: int
+
+
 class AttemptLedger:
     def __init__(
         self,
@@ -110,6 +116,7 @@ class AttemptLedger:
         self._incarnation_id = ""
         self._activation_enabled = False
         self._negative_fence_pressure = False
+        self._draining = False
         self._accepting = False
 
     def activate(self, incarnation_id: str) -> None:
@@ -123,10 +130,43 @@ class AttemptLedger:
                 self._attempt_records = 0
                 self._cancel_fences = 0
                 self._negative_fence_pressure = False
+                self._draining = False
                 self._incarnation_id = incarnation_id
             self._activation_enabled = True
-            self._accepting = not self._negative_fence_pressure
+            self._accepting = not (
+                self._negative_fence_pressure or self._draining
+            )
         self._close_all(to_close)
+
+    def begin_drain(self) -> DrainSnapshot:
+        with self._lock:
+            self._draining = True
+            self._accepting = False
+            return self._drain_snapshot_locked()
+
+    def cancel_drain(self) -> DrainSnapshot:
+        with self._lock:
+            self._draining = False
+            self._accepting = (
+                self._activation_enabled and not self._negative_fence_pressure
+            )
+            return self._drain_snapshot_locked()
+
+    def drain_snapshot(self) -> DrainSnapshot:
+        with self._lock:
+            return self._drain_snapshot_locked()
+
+    def _drain_snapshot_locked(self) -> DrainSnapshot:
+        return DrainSnapshot(
+            admission_closed=not self._accepting,
+            active_attempts=sum(
+                record.terminal_at is None for record in self._records.values()
+            ),
+        )
+
+    def draining(self) -> bool:
+        with self._lock:
+            return self._draining
 
     def fence(self, reason: str = "ADMISSION_REASON_ENGINE_DRAINING") -> None:
         with self._lock:
@@ -399,7 +439,7 @@ class AttemptLedger:
             and self._cancel_fences <= low_watermark
         ):
             self._negative_fence_pressure = False
-            self._accepting = self._activation_enabled
+            self._accepting = self._activation_enabled and not self._draining
 
     def size(self) -> int:
         with self._lock:

@@ -17,9 +17,8 @@ limitations under the License.
 
 #include <algorithm>
 #include <limits>
-#include <utility>
-
 #include <nlohmann/json.hpp>
+#include <utility>
 
 #include "scheduler/etcd_client/etcd_client.h"
 
@@ -31,11 +30,11 @@ std::string escape_key_component(const std::string& value) {
   std::string escaped;
   escaped.reserve(value.size());
   for (const unsigned char character : value) {
-    const bool unreserved =
-        (character >= 'a' && character <= 'z') ||
-        (character >= 'A' && character <= 'Z') ||
-        (character >= '0' && character <= '9') || character == '-' ||
-        character == '_' || character == '.' || character == '~';
+    const bool unreserved = (character >= 'a' && character <= 'z') ||
+                            (character >= 'A' && character <= 'Z') ||
+                            (character >= '0' && character <= '9') ||
+                            character == '-' || character == '_' ||
+                            character == '.' || character == '~';
     if (unreserved) {
       escaped.push_back(static_cast<char>(character));
       continue;
@@ -81,9 +80,7 @@ bool add_overflows(size_t left, size_t right) {
   return left > std::numeric_limits<size_t>::max() - right;
 }
 
-bool json_uint64(const nlohmann::json& json,
-                 const char* key,
-                 uint64_t* value) {
+bool json_uint64(const nlohmann::json& json, const char* key, uint64_t* value) {
   if (value == nullptr || !json.contains(key) ||
       !json.at(key).is_number_unsigned()) {
     return false;
@@ -92,9 +89,7 @@ bool json_uint64(const nlohmann::json& json,
   return true;
 }
 
-bool json_uint32(const nlohmann::json& json,
-                 const char* key,
-                 uint32_t* value) {
+bool json_uint32(const nlohmann::json& json, const char* key, uint32_t* value) {
   uint64_t wide_value = 0;
   if (value == nullptr || !json_uint64(json, key, &wide_value) ||
       wide_value > std::numeric_limits<uint32_t>::max()) {
@@ -104,9 +99,7 @@ bool json_uint32(const nlohmann::json& json,
   return true;
 }
 
-bool json_int32(const nlohmann::json& json,
-                const char* key,
-                int32_t* value) {
+bool json_int32(const nlohmann::json& json, const char* key, int32_t* value) {
   if (value == nullptr || !json.contains(key) ||
       !json.at(key).is_number_integer()) {
     return false;
@@ -123,8 +116,7 @@ bool json_int32(const nlohmann::json& json,
 bool json_string(const nlohmann::json& json,
                  const char* key,
                  std::string* value) {
-  if (value == nullptr || !json.contains(key) ||
-      !json.at(key).is_string()) {
+  if (value == nullptr || !json.contains(key) || !json.at(key).is_string()) {
     return false;
   }
   *value = json.at(key).get<std::string>();
@@ -136,10 +128,9 @@ bool json_string(const nlohmann::json& json,
 EtcdPlacementFencedKv::EtcdPlacementFencedKv(EtcdClient* client)
     : client_(client) {}
 
-PlacementStoreStatus EtcdPlacementFencedKv::read(
-    const std::string& logical_key,
-    std::string* value,
-    int64_t* mod_revision) {
+PlacementStoreStatus EtcdPlacementFencedKv::read(const std::string& logical_key,
+                                                 std::string* value,
+                                                 int64_t* mod_revision) {
   if (client_ == nullptr) {
     return PlacementStoreStatus::UNAVAILABLE;
   }
@@ -179,12 +170,12 @@ PlacementStoreStatus EtcdPlacementFencedKv::compare_and_set(
   if (client_ == nullptr) {
     return PlacementStoreStatus::UNAVAILABLE;
   }
-  return map_write_status(client_->compare_and_set_fenced(
-      logical_key,
-      value,
-      expected_mod_revision,
-      leader.address,
-      leader.incarnation));
+  return map_write_status(client_->compare_and_set_fenced(logical_key,
+                                                          value,
+                                                          expected_mod_revision,
+                                                          leader.address,
+                                                          leader.incarnation,
+                                                          leader.epoch));
 }
 
 PlacementDesiredStore::PlacementDesiredStore(PlacementFencedKv* backend)
@@ -237,8 +228,7 @@ PlacementStoreStatus PlacementDesiredStore::load_snapshot(
   }
   std::sort(raw_values.begin(),
             raw_values.end(),
-            [](const PlacementRawValue& left,
-               const PlacementRawValue& right) {
+            [](const PlacementRawValue& left, const PlacementRawValue& right) {
               return left.key_suffix < right.key_suffix;
             });
 
@@ -281,7 +271,8 @@ PlacementStoreStatus PlacementDesiredStore::compare_and_set(
       !valid_placement_desired_state(desired) ||
       !valid_placement_leader_identity(expected_leader) ||
       desired.leader.address != expected_leader.address ||
-      desired.leader.incarnation != expected_leader.incarnation) {
+      desired.leader.incarnation != expected_leader.incarnation ||
+      desired.leader.epoch != expected_leader.epoch) {
     return PlacementStoreStatus::INVALID_INPUT;
   }
   if (expected_mod_revision > 0) {
@@ -301,17 +292,16 @@ PlacementStoreStatus PlacementDesiredStore::compare_and_set(
   if (!serialize_placement_desired_state(desired, &value)) {
     return PlacementStoreStatus::INVALID_INPUT;
   }
-  return backend_->compare_and_set(
-      std::string(kPlacementDesiredPrefix) +
-          placement_pool_key_suffix(desired.pool),
-      value,
-      expected_mod_revision,
-      expected_leader);
+  return backend_->compare_and_set(std::string(kPlacementDesiredPrefix) +
+                                       placement_pool_key_suffix(desired.pool),
+                                   value,
+                                   expected_mod_revision,
+                                   expected_leader);
 }
 
 bool valid_placement_leader_identity(const PlacementLeaderIdentity& leader) {
   return valid_placement_identity(leader.address) &&
-         valid_placement_identity(leader.incarnation);
+         valid_placement_identity(leader.incarnation) && leader.epoch > 0;
 }
 
 bool valid_placement_desired_state(const PlacementDesiredState& desired) {
@@ -320,8 +310,7 @@ bool valid_placement_desired_state(const PlacementDesiredState& desired) {
          desired.generation > 0 && valid_placement_pool_key(desired.pool) &&
          desired.desired_replicas > 0 &&
          valid_placement_reason(desired.reason) &&
-         desired.observation_generation > 0 &&
-         desired.created_at_unix_ms > 0 &&
+         desired.observation_generation > 0 && desired.created_at_unix_ms > 0 &&
          valid_placement_identity(desired.config_digest);
 }
 
@@ -344,6 +333,7 @@ bool serialize_placement_desired_state(const PlacementDesiredState& desired,
       {"schema_version", desired.schema_version},
       {"leader_address", desired.leader.address},
       {"leader_incarnation", desired.leader.incarnation},
+      {"leader_epoch", desired.leader.epoch},
       {"generation", desired.generation},
       {"provider_id", static_cast<int32_t>(desired.pool.provider_id)},
       {"model_revision", desired.pool.model_revision},
@@ -373,6 +363,7 @@ bool parse_placement_desired_state(const std::string& value,
   try {
     uint32_t schema_version = 0;
     uint64_t generation = 0;
+    uint64_t leader_epoch = 0;
     uint32_t desired_replicas = 0;
     uint64_t observation_generation = 0;
     uint64_t created_at_unix_ms = 0;
@@ -386,9 +377,9 @@ bool parse_placement_desired_state(const std::string& value,
     std::string config_digest;
     if (!json_uint32(json, "schema_version", &schema_version) ||
         !json_uint64(json, "generation", &generation) ||
+        !json_uint64(json, "leader_epoch", &leader_epoch) ||
         !json_uint32(json, "desired_replicas", &desired_replicas) ||
-        !json_uint64(
-            json, "observation_generation", &observation_generation) ||
+        !json_uint64(json, "observation_generation", &observation_generation) ||
         !json_uint64(json, "created_at_unix_ms", &created_at_unix_ms) ||
         !json_int32(json, "provider_id", &provider_id) ||
         !json_int32(json, "role", &role) ||
@@ -406,6 +397,7 @@ bool parse_placement_desired_state(const std::string& value,
             PlacementLeaderIdentity{
                 .address = std::move(leader_address),
                 .incarnation = std::move(leader_incarnation),
+                .epoch = leader_epoch,
             },
         .generation = generation,
         .pool =

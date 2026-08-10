@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 from scripts.logger import logger
 
 from .attempts import AttemptKey, AttemptLedger, AttemptResult
+from .lifecycle import LifecycleController
 
 _INFERENCE_PATHS = {
     "/v1/chat/completions",
@@ -130,6 +131,7 @@ class AgentRuntime:
         max_cancel_fences: int = 8192,
         terminal_ttl_seconds: float = 60.0,
         negative_fence_ttl_seconds: float = 60.0,
+        max_lifecycle_records: int = 4096,
         max_inflight_requests: int = 256,
         max_request_body_bytes: int = 8 * 1024 * 1024,
         inflight_body_capacity_bytes: int = 64 * 1024 * 1024,
@@ -173,6 +175,7 @@ class AgentRuntime:
         self._connect_timeout = connect_timeout_seconds
         self._ingress_timeout = ingress_timeout_seconds
         self._internal_token = internal_token
+        self._lifecycle_transition_lock = threading.Lock()
         self._inflight = threading.BoundedSemaphore(max_inflight_requests)
         self._max_request_body_bytes = max_request_body_bytes
         self._body_capacity = _ByteCapacity(inflight_body_capacity_bytes)
@@ -181,6 +184,9 @@ class AgentRuntime:
             terminal_ttl_seconds,
             max_cancel_fences,
             negative_fence_ttl_seconds,
+        )
+        self._lifecycle = LifecycleController(
+            self._ledger, max_records=max_lifecycle_records
         )
         self._server = ThreadingHTTPServer((host, port), self._handler_type())
         self._server.daemon_threads = True
@@ -196,6 +202,10 @@ class AgentRuntime:
     @property
     def ledger(self) -> AttemptLedger:
         return self._ledger
+
+    @property
+    def lifecycle(self) -> LifecycleController:
+        return self._lifecycle
 
     def start(self) -> None:
         if self._thread is not None:
@@ -214,7 +224,7 @@ class AgentRuntime:
         self._reaper_thread.start()
 
     def stop(self) -> None:
-        self._ledger.fence()
+        self.fence()
         self._reaper_stop.set()
         if self._thread is not None:
             self._server.shutdown()
@@ -226,11 +236,18 @@ class AgentRuntime:
         self._thread = None
         self._reaper_thread = None
 
-    def activate(self, incarnation_id: str) -> None:
-        self._ledger.activate(incarnation_id)
+    def activate(self, incarnation_id: str, engine_uid: str | None = None) -> None:
+        with self._lifecycle_transition_lock:
+            self._lifecycle.fence()
+            self._ledger.activate(incarnation_id)
+            self._lifecycle.activate(
+                engine_uid or self.listen_address, incarnation_id
+            )
 
     def fence(self, reason: str = "ADMISSION_REASON_ENGINE_DRAINING") -> None:
-        self._ledger.fence(reason)
+        with self._lifecycle_transition_lock:
+            self._lifecycle.fence()
+            self._ledger.fence(reason)
 
     def _reap_loop(self) -> None:
         while not self._reaper_stop.wait(0.05):
@@ -287,6 +304,18 @@ class AgentRuntime:
                 self._write_json(handler, 405, {"error": "method not allowed"})
                 return
             self._attempt_control(handler, cancel=True)
+            return
+        if path == "/v1/internal/lifecycle/execute":
+            if handler.command != "POST":
+                self._write_json(handler, 405, {"error": "method not allowed"})
+                return
+            self._lifecycle_control(handler, query=False)
+            return
+        if path == "/v1/internal/lifecycle/query":
+            if handler.command != "POST":
+                self._write_json(handler, 405, {"error": "method not allowed"})
+                return
+            self._lifecycle_control(handler, query=True)
             return
         if path in _INFERENCE_PATHS:
             self._inference(handler, path)
@@ -357,6 +386,36 @@ class AgentRuntime:
                 incarnation_id,
             ),
         )
+
+    def _lifecycle_control(
+        self, handler: BaseHTTPRequestHandler, query: bool
+    ) -> None:
+        body = self._read_json(handler)
+        if body is None:
+            return
+        try:
+            with self._lifecycle_transition_lock:
+                response = (
+                    self._lifecycle.query(body)
+                    if query
+                    else self._lifecycle.execute(body)
+                )
+        except ValueError as error:
+            self._write_json(handler, 400, {"error": str(error)})
+            return
+        logger.info(
+            "provider lifecycle %s operation=%s action=%s leader_epoch=%s "
+            "desired_generation=%s engine_incarnation=%s code=%s lifecycle=%s",
+            "query" if query else "execute",
+            response["operation_id"],
+            response["action"],
+            response["leader_epoch"],
+            response["desired_generation"],
+            response["engine_incarnation"],
+            response["code"],
+            response["lifecycle"],
+        )
+        self._write_json(handler, 200, response)
 
     def _inference(self, handler: BaseHTTPRequestHandler, path: str) -> None:
         if handler.command != "POST":

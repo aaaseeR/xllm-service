@@ -66,6 +66,7 @@ PlacementLeaderIdentity leader() {
   return PlacementLeaderIdentity{
       .address = "service-1:2888",
       .incarnation = "leader-1",
+      .epoch = 10,
   };
 }
 
@@ -86,18 +87,14 @@ PlacementOperationIntent intent(
   const std::string engine_incarnation =
       action == PlacementOperationAction::CREATE ? "" : "inc-1";
   return PlacementOperationIntent{
-      .operation_id = make_placement_operation_id(leader(),
-                                                  1,
-                                                  pool(),
-                                                  action,
-                                                  ordinal,
-                                                  engine_uid,
-                                                  engine_incarnation),
+      .operation_id = make_placement_operation_id(
+          leader(), 1, pool(), action, ordinal, engine_uid, engine_incarnation),
       .action = action,
       .pool = pool(),
       .engine_uid = engine_uid,
       .engine_incarnation = engine_incarnation,
       .leader_incarnation = leader().incarnation,
+      .leader_epoch = leader().epoch,
       .desired_generation = 1,
       .ordinal = ordinal,
   };
@@ -187,12 +184,10 @@ TEST(PlacementOperationExecutorTest, CompleteDrainAndTerminationProofSucceed) {
       drain_response(PlacementActuatorCode::SUCCEEDED));
   ASSERT_EQ(executor.add_intents({drain}, 1000).added, 1u);
   EXPECT_EQ(executor.drive(1100, 1).terminal, 1u);
-  EXPECT_EQ(executor.snapshot()[0].status,
-            PlacementOperationStatus::SUCCEEDED);
+  EXPECT_EQ(executor.snapshot()[0].status, PlacementOperationStatus::SUCCEEDED);
 
   FakePlacementActuator terminate_actuator;
-  PlacementOperationExecutor terminate_executor(config(),
-                                                 &terminate_actuator);
+  PlacementOperationExecutor terminate_executor(config(), &terminate_actuator);
   const PlacementOperationIntent terminate =
       intent(PlacementOperationAction::TERMINATE);
   terminate_actuator.execute_responses[terminate.operation_id].push_back(
@@ -237,10 +232,9 @@ TEST(PlacementOperationExecutorTest, IsBoundedIdempotentAndFenced) {
   FakePlacementActuator actuator;
   PlacementOperationExecutor executor(config(/*max_records=*/1), &actuator);
   const PlacementOperationIntent first = intent();
-  const PlacementOperationIntent second = intent(
-      PlacementOperationAction::CREATE, /*ordinal=*/1);
-  PlacementExecutorResult result =
-      executor.add_intents({first, first}, 1000);
+  const PlacementOperationIntent second =
+      intent(PlacementOperationAction::CREATE, /*ordinal=*/1);
+  PlacementExecutorResult result = executor.add_intents({first, first}, 1000);
   EXPECT_EQ(result.added, 1u);
   EXPECT_EQ(result.replayed, 1u);
   EXPECT_EQ(executor.add_intents({second}, 1000).status,

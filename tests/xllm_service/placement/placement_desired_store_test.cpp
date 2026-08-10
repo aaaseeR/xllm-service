@@ -20,12 +20,11 @@ limitations under the License.
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 namespace xllm_service::placement {
 namespace {
@@ -51,9 +50,8 @@ class FakePlacementFencedKv final : public PlacementFencedKv {
     return PlacementStoreStatus::OK;
   }
 
-  PlacementStoreStatus list(
-      const std::string& logical_prefix,
-      std::vector<PlacementRawValue>* values) override {
+  PlacementStoreStatus list(const std::string& logical_prefix,
+                            std::vector<PlacementRawValue>* values) override {
     if (logical_prefix.empty() || values == nullptr) {
       return PlacementStoreStatus::INVALID_INPUT;
     }
@@ -79,7 +77,8 @@ class FakePlacementFencedKv final : public PlacementFencedKv {
       const PlacementLeaderIdentity& leader) override {
     std::lock_guard<std::mutex> lock(mutex_);
     if (leader.address != leader_.address ||
-        leader.incarnation != leader_.incarnation) {
+        leader.incarnation != leader_.incarnation ||
+        leader.epoch != leader_.epoch) {
       return PlacementStoreStatus::FENCED;
     }
     const auto iterator = entries_.find(logical_key);
@@ -88,12 +87,11 @@ class FakePlacementFencedKv final : public PlacementFencedKv {
     if (current_revision != expected_mod_revision) {
       return PlacementStoreStatus::REVISION_CONFLICT;
     }
-    entries_.insert_or_assign(
-        logical_key,
-        Entry{
-            .value = value,
-            .mod_revision = next_revision_++,
-        });
+    entries_.insert_or_assign(logical_key,
+                              Entry{
+                                  .value = value,
+                                  .mod_revision = next_revision_++,
+                              });
     return PlacementStoreStatus::OK;
   }
 
@@ -106,12 +104,11 @@ class FakePlacementFencedKv final : public PlacementFencedKv {
                std::string value,
                int64_t revision) {
     std::lock_guard<std::mutex> lock(mutex_);
-    entries_.insert_or_assign(
-        logical_key,
-        Entry{
-            .value = std::move(value),
-            .mod_revision = revision,
-        });
+    entries_.insert_or_assign(logical_key,
+                              Entry{
+                                  .value = std::move(value),
+                                  .mod_revision = revision,
+                              });
   }
 
  private:
@@ -130,6 +127,7 @@ PlacementLeaderIdentity leader(const std::string& incarnation = "leader-1") {
   return PlacementLeaderIdentity{
       .address = "service-1:2888",
       .incarnation = incarnation,
+      .epoch = incarnation == "leader-1" ? 10u : 20u,
   };
 }
 
@@ -164,6 +162,7 @@ TEST(PlacementDesiredStateTest, RoundTripsStrictSchemaAndEscapedKey) {
   ASSERT_TRUE(parse_placement_desired_state(value, &parsed));
   EXPECT_TRUE(placement_pool_keys_equal(input.pool, parsed.pool));
   EXPECT_EQ(parsed.leader.address, input.leader.address);
+  EXPECT_EQ(parsed.leader.epoch, input.leader.epoch);
   EXPECT_EQ(parsed.generation, input.generation);
   EXPECT_EQ(parsed.desired_replicas, input.desired_replicas);
   EXPECT_EQ(parsed.reason, input.reason);
@@ -252,10 +251,10 @@ TEST(PlacementDesiredStoreTest, LoadsStableBoundedSnapshot) {
 TEST(PlacementDesiredStoreTest, CorruptSnapshotFailsClosed) {
   FakePlacementFencedKv backend(leader());
   PlacementDesiredStore store(&backend);
-  backend.set_raw(std::string(kPlacementDesiredPrefix) +
-                      placement_pool_key_suffix(pool()),
-                  "{broken-json",
-                  1);
+  backend.set_raw(
+      std::string(kPlacementDesiredPrefix) + placement_pool_key_suffix(pool()),
+      "{broken-json",
+      1);
   std::vector<PlacementDesiredSnapshot> snapshot;
   EXPECT_EQ(store.load_snapshot(10, 10000, &snapshot),
             PlacementStoreStatus::CORRUPT);

@@ -59,6 +59,9 @@ enum class PlacementReconcileReason : int8_t {
   INVALID_ACTUAL = 8,
   INVALID_OPERATION = 9,
   CLOCK_REGRESSION = 10,
+  CANCEL_DRAIN = 11,
+  TERMINATE_DRAINED = 12,
+  TERMINAL_OPERATION = 13,
 };
 
 struct PlacementReconcileConfig {
@@ -90,6 +93,7 @@ struct PlacementOperationView {
   std::string engine_uid;
   std::string engine_incarnation;
   std::string leader_incarnation;
+  uint64_t leader_epoch = 0;
   uint64_t desired_generation = 0;
 };
 
@@ -100,14 +104,14 @@ struct PlacementOperationIntent {
   std::string engine_uid;
   std::string engine_incarnation;
   std::string leader_incarnation;
+  uint64_t leader_epoch = 0;
   uint64_t desired_generation = 0;
   uint32_t ordinal = 0;
 };
 
 struct PlacementReconcileResult {
   PlacementReconcileStatus status = PlacementReconcileStatus::INVALID_INPUT;
-  PlacementReconcileReason reason =
-      PlacementReconcileReason::INVALID_CONFIG;
+  PlacementReconcileReason reason = PlacementReconcileReason::INVALID_CONFIG;
   uint32_t desired_replicas = 0;
   uint32_t managed_replicas = 0;
   uint32_t pending_operations = 0;
@@ -122,14 +126,15 @@ PlacementReconcileResult reconcile_placement_pool(
     const std::vector<PlacementOperationView>& operations,
     uint64_t now_ms);
 
-std::string make_placement_operation_id(
-    const PlacementLeaderIdentity& leader,
-    uint64_t desired_generation,
-    const PlacementPoolKey& pool,
-    PlacementOperationAction action,
-    uint32_t ordinal,
-    const std::string& engine_uid,
-    const std::string& engine_incarnation);
+bool valid_placement_reconcile_config(const PlacementReconcileConfig& config);
+
+std::string make_placement_operation_id(const PlacementLeaderIdentity& leader,
+                                        uint64_t desired_generation,
+                                        const PlacementPoolKey& pool,
+                                        PlacementOperationAction action,
+                                        uint32_t ordinal,
+                                        const std::string& engine_uid,
+                                        const std::string& engine_incarnation);
 
 bool placement_operation_terminal(PlacementOperationStatus status);
 

@@ -23,7 +23,7 @@ limitations under the License.
 
 namespace xllm_service::placement {
 
-inline constexpr uint32_t kPlacementSchemaVersion = 1;
+inline constexpr uint32_t kPlacementSchemaVersion = 2;
 inline constexpr size_t kMaxPlacementIdentityBytes = 256;
 
 enum class PlacementPlanStatus : int8_t {
@@ -64,8 +64,7 @@ enum class PlacementReason : int8_t {
 };
 
 struct PlacementPoolKey {
-  xllm::proto::ProviderId provider_id =
-      xllm::proto::PROVIDER_ID_UNSPECIFIED;
+  xllm::proto::ProviderId provider_id = xllm::proto::PROVIDER_ID_UNSPECIFIED;
   std::string model_revision;
   xllm::proto::EngineRole role = xllm::proto::ENGINE_ROLE_UNSPECIFIED;
   std::string profile_digest;
@@ -155,8 +154,7 @@ bool valid_placement_pool_key(const PlacementPoolKey& key);
 bool placement_pool_keys_equal(const PlacementPoolKey& left,
                                const PlacementPoolKey& right);
 
-bool valid_placement_capacity_profile(
-    const PlacementCapacityProfile& profile);
+bool valid_placement_capacity_profile(const PlacementCapacityProfile& profile);
 
 bool valid_placement_planner_config(const PlacementPlannerConfig& config);
 

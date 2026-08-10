@@ -36,6 +36,7 @@ PlacementLeaderIdentity leader() {
   return PlacementLeaderIdentity{
       .address = "service-1:2888",
       .incarnation = "leader-1",
+      .epoch = 10,
   };
 }
 
@@ -48,8 +49,7 @@ PlacementPoolKey pool() {
   };
 }
 
-PlacementDesiredState desired(uint32_t replicas,
-                              uint64_t generation = 1) {
+PlacementDesiredState desired(uint32_t replicas, uint64_t generation = 1) {
   return PlacementDesiredState{
       .leader = leader(),
       .generation = generation,
@@ -86,13 +86,12 @@ PlacementOperationView operation(const std::string& operation_id,
       .action = action,
       .status = status,
       .pool = pool(),
-      .engine_uid = action == PlacementOperationAction::CREATE
-                        ? ""
-                        : "engine-1",
-      .engine_incarnation = action == PlacementOperationAction::CREATE
-                                ? ""
-                                : "engine-1-inc",
+      .engine_uid =
+          action == PlacementOperationAction::CREATE ? "" : "engine-1",
+      .engine_incarnation =
+          action == PlacementOperationAction::CREATE ? "" : "engine-1-inc",
       .leader_incarnation = "leader-1",
+      .leader_epoch = 10,
       .desired_generation = 1,
   };
 }
@@ -110,10 +109,8 @@ TEST(PlacementReconcilerTest, CreatesBoundedDeterministicDeficit) {
   ASSERT_EQ(first.intents.size(), 2u);
   EXPECT_EQ(first.managed_replicas, 1u);
   EXPECT_EQ(first.intents[0].action, PlacementOperationAction::CREATE);
-  EXPECT_EQ(first.intents[0].operation_id,
-            second.intents[0].operation_id);
-  EXPECT_NE(first.intents[0].operation_id,
-            first.intents[1].operation_id);
+  EXPECT_EQ(first.intents[0].operation_id, second.intents[0].operation_id);
+  EXPECT_NE(first.intents[0].operation_id, first.intents[1].operation_id);
 }
 
 TEST(PlacementReconcilerTest, LoadingAndWarmingCountTowardDesired) {
@@ -158,17 +155,70 @@ TEST(PlacementReconcilerTest, SelectsLowestCacheStableSafeVictim) {
       replica("engine-high", PlacementLifecycleState::READY, 10.0);
   PlacementReplicaFact low =
       replica("engine-low", PlacementLifecycleState::READY, 1.0);
-  const PlacementReconcileResult result = reconcile_placement_pool(
-      config(),
-      desired(1, 2),
-      leader(),
-      {unsafe, high, low},
-      {},
-      /*now_ms=*/3000);
+  const PlacementReconcileResult result =
+      reconcile_placement_pool(config(),
+                               desired(1, 2),
+                               leader(),
+                               {unsafe, high, low},
+                               {},
+                               /*now_ms=*/3000);
   ASSERT_EQ(result.reason, PlacementReconcileReason::SCALE_DOWN);
   ASSERT_EQ(result.intents.size(), 2u);
   EXPECT_EQ(result.intents[0].engine_uid, "engine-low");
   EXPECT_EQ(result.intents[1].engine_uid, "engine-high");
+}
+
+TEST(PlacementReconcilerTest, CommittedDrainAdvancesToTerminate) {
+  PlacementOperationView drained =
+      operation("drain-1",
+                PlacementOperationAction::BEGIN_DRAIN,
+                PlacementOperationStatus::SUCCEEDED);
+  PlacementReplicaFact draining =
+      replica("engine-1", PlacementLifecycleState::DRAINING);
+  const PlacementReconcileResult result = reconcile_placement_pool(
+      config(),
+      desired(1, 2),
+      leader(),
+      {draining, replica("engine-2", PlacementLifecycleState::READY)},
+      {drained},
+      /*now_ms=*/3000);
+  ASSERT_EQ(result.reason, PlacementReconcileReason::TERMINATE_DRAINED);
+  ASSERT_EQ(result.intents.size(), 1u);
+  EXPECT_EQ(result.intents[0].action, PlacementOperationAction::TERMINATE);
+  EXPECT_EQ(result.intents[0].engine_uid, "engine-1");
+  EXPECT_EQ(result.intents[0].leader_epoch, leader().epoch);
+}
+
+TEST(PlacementReconcilerTest, NewGenerationCanCancelUncommittedDrain) {
+  PlacementOperationView draining_operation =
+      operation("drain-pending",
+                PlacementOperationAction::BEGIN_DRAIN,
+                PlacementOperationStatus::IN_PROGRESS);
+  PlacementReplicaFact draining =
+      replica("engine-1", PlacementLifecycleState::DRAINING);
+  const PlacementReconcileResult result = reconcile_placement_pool(
+      config(),
+      desired(2, 2),
+      leader(),
+      {draining, replica("engine-2", PlacementLifecycleState::READY)},
+      {draining_operation},
+      /*now_ms=*/3000);
+  ASSERT_EQ(result.reason, PlacementReconcileReason::CANCEL_DRAIN);
+  ASSERT_EQ(result.intents.size(), 1u);
+  EXPECT_EQ(result.intents[0].action, PlacementOperationAction::CANCEL_DRAIN);
+  EXPECT_EQ(result.intents[0].desired_generation, 2u);
+}
+
+TEST(PlacementReconcilerTest, CurrentGenerationTerminalFailureHolds) {
+  const PlacementOperationView failed =
+      operation("create-failed",
+                PlacementOperationAction::CREATE,
+                PlacementOperationStatus::FAILED);
+  const PlacementReconcileResult result = reconcile_placement_pool(
+      config(), desired(2), leader(), {}, {failed}, /*now_ms=*/3000);
+  EXPECT_EQ(result.status, PlacementReconcileStatus::HOLD);
+  EXPECT_EQ(result.reason, PlacementReconcileReason::TERMINAL_OPERATION);
+  EXPECT_TRUE(result.intents.empty());
 }
 
 TEST(PlacementReconcilerTest, HoldsWhenNoVictimHasDrainProofBoundary) {
@@ -176,7 +226,12 @@ TEST(PlacementReconcilerTest, HoldsWhenNoVictimHasDrainProofBoundary) {
       replica("engine-1", PlacementLifecycleState::READY);
   value.drain_capable = false;
   const PlacementReconcileResult result = reconcile_placement_pool(
-      config(), desired(1), leader(), {value, replica("engine-2", PlacementLifecycleState::READY)}, {}, /*now_ms=*/3000);
+      config(),
+      desired(1),
+      leader(),
+      {value, replica("engine-2", PlacementLifecycleState::READY)},
+      {},
+      /*now_ms=*/3000);
   ASSERT_EQ(result.reason, PlacementReconcileReason::SCALE_DOWN);
   ASSERT_EQ(result.intents.size(), 1u);
 
@@ -199,8 +254,12 @@ TEST(PlacementReconcilerTest, FailsClosedOnInvalidActualAndOperation) {
             PlacementReconcileReason::INVALID_ACTUAL);
 
   std::vector<PlacementOperationView> duplicate = {
-      operation("same", PlacementOperationAction::CREATE, PlacementOperationStatus::SUCCEEDED),
-      operation("same", PlacementOperationAction::CREATE, PlacementOperationStatus::FAILED),
+      operation("same",
+                PlacementOperationAction::CREATE,
+                PlacementOperationStatus::SUCCEEDED),
+      operation("same",
+                PlacementOperationAction::CREATE,
+                PlacementOperationStatus::FAILED),
   };
   EXPECT_EQ(reconcile_placement_pool(
                 config(), desired(1), leader(), {}, duplicate, /*now_ms=*/3000)
@@ -209,22 +268,49 @@ TEST(PlacementReconcilerTest, FailsClosedOnInvalidActualAndOperation) {
 }
 
 TEST(PlacementReconcilerTest, OperationIdFencesGenerationActionAndEngine) {
-  const std::string base = make_placement_operation_id(
-      leader(), 1, pool(), PlacementOperationAction::BEGIN_DRAIN, 0,
-      "engine-1", "inc-1");
+  const std::string base =
+      make_placement_operation_id(leader(),
+                                  1,
+                                  pool(),
+                                  PlacementOperationAction::BEGIN_DRAIN,
+                                  0,
+                                  "engine-1",
+                                  "inc-1");
   ASSERT_FALSE(base.empty());
   EXPECT_NE(base,
-            make_placement_operation_id(
-                leader(), 2, pool(), PlacementOperationAction::BEGIN_DRAIN, 0,
-                "engine-1", "inc-1"));
+            make_placement_operation_id(leader(),
+                                        2,
+                                        pool(),
+                                        PlacementOperationAction::BEGIN_DRAIN,
+                                        0,
+                                        "engine-1",
+                                        "inc-1"));
   EXPECT_NE(base,
-            make_placement_operation_id(
-                leader(), 1, pool(), PlacementOperationAction::TERMINATE, 0,
-                "engine-1", "inc-1"));
+            make_placement_operation_id(leader(),
+                                        1,
+                                        pool(),
+                                        PlacementOperationAction::TERMINATE,
+                                        0,
+                                        "engine-1",
+                                        "inc-1"));
   EXPECT_NE(base,
-            make_placement_operation_id(
-                leader(), 1, pool(), PlacementOperationAction::BEGIN_DRAIN, 0,
-                "engine-1", "inc-2"));
+            make_placement_operation_id(leader(),
+                                        1,
+                                        pool(),
+                                        PlacementOperationAction::BEGIN_DRAIN,
+                                        0,
+                                        "engine-1",
+                                        "inc-2"));
+  PlacementLeaderIdentity next_epoch = leader();
+  ++next_epoch.epoch;
+  EXPECT_NE(base,
+            make_placement_operation_id(next_epoch,
+                                        1,
+                                        pool(),
+                                        PlacementOperationAction::BEGIN_DRAIN,
+                                        0,
+                                        "engine-1",
+                                        "inc-1"));
 }
 
 }  // namespace

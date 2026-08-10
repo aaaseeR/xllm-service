@@ -94,6 +94,9 @@ class Sidecar:
                 negative_fence_ttl_seconds=getattr(
                     args, "negative_fence_ttl", 60.0
                 ),
+                max_lifecycle_records=getattr(
+                    args, "max_lifecycle_records", 4096
+                ),
                 max_inflight_requests=getattr(
                     args, "agent_max_inflight_requests", 256
                 ),
@@ -175,7 +178,7 @@ class Sidecar:
             self._incarnation_id = incarnation
             self._state_seq = 0
             if self._agent is not None:
-                self._agent.activate(incarnation)
+                self._agent.activate(incarnation, self._args.register_addr)
             logger.info(
                 "registered %s (incarnation=%s, lease=%s, ttl=%ds)",
                 self._key,
@@ -281,7 +284,9 @@ class Sidecar:
                 # A transient health failure fences ingress immediately. Only
                 # a successful ownership renewal may reopen the same
                 # incarnation after health recovers.
-                self._agent.activate(self._incarnation_id)
+                self._agent.activate(
+                    self._incarnation_id, self._args.register_addr
+                )
         except EtcdError as error:
             logger.warning("keepalive failed, re-registering: %s", error)
             if self._agent is not None:
@@ -317,6 +322,7 @@ class Sidecar:
         }
         if self._provider_config is not None:
             self._state_seq += 1
+            lifecycle = self._agent.lifecycle.engine_state()
             descriptor = build_provider_descriptor(
                 self._provider_config,
                 self._args.register_addr,
@@ -328,11 +334,7 @@ class Sidecar:
                 "incarnation_id": self._incarnation_id,
                 "state_seq": self._state_seq,
                 "observed_at_unix_ms": int(time.time() * 1000),
-                "lifecycle": (
-                    "ENGINE_LIFECYCLE_READY"
-                    if self._agent is None or self._agent.ledger.accepting()
-                    else "ENGINE_LIFECYCLE_DRAINING"
-                ),
+                "lifecycle": lifecycle["lifecycle"],
                 "ownership": "ENGINE_OWNERSHIP_OWNED",
                 "shallow_health": "HEALTH_STATUS_HEALTHY",
                 "deep_health": "HEALTH_STATUS_UNKNOWN",
@@ -343,7 +345,18 @@ class Sidecar:
                 "model_revision": descriptor["model"]["model_revision"],
                 "heartbeat_age_ms_at_publish": 0,
                 "state_age_ms_at_publish": 0,
+                "drain": lifecycle["drain"],
             }
+            if lifecycle["operation_id"]:
+                body["engine_state"]["lifecycle_operation_id"] = lifecycle[
+                    "operation_id"
+                ]
+                body["engine_state"]["lifecycle_leader_epoch"] = lifecycle[
+                    "leader_epoch"
+                ]
+                body["engine_state"]["lifecycle_desired_generation"] = lifecycle[
+                    "desired_generation"
+                ]
         headers = {"Content-Type": "application/json"}
         if self._args.internal_token:
             headers["X-Internal-Token"] = self._args.internal_token
@@ -419,6 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-attempt-records", type=int, default=8192)
     parser.add_argument("--max-cancel-fences", type=int, default=8192)
+    parser.add_argument("--max-lifecycle-records", type=int, default=4096)
     parser.add_argument("--attempt-terminal-ttl", type=float, default=60.0)
     parser.add_argument("--negative-fence-ttl", type=float, default=60.0)
     parser.add_argument("--agent-max-inflight-requests", type=int, default=256)

@@ -28,8 +28,7 @@ class EtcdClient;
 namespace xllm_service::placement {
 
 inline constexpr size_t kMaxPlacementDesiredBytes = 16384;
-inline constexpr char kPlacementDesiredPrefix[] =
-    "XLLM:PLACEMENT:DESIRED/";
+inline constexpr char kPlacementDesiredPrefix[] = "XLLM:PLACEMENT:DESIRED/";
 
 enum class PlacementStoreStatus : int8_t {
   OK = 0,
@@ -45,6 +44,9 @@ enum class PlacementStoreStatus : int8_t {
 struct PlacementLeaderIdentity {
   std::string address;
   std::string incarnation;
+  // Monotonic etcd mod revision of XLLM:SERVICE:MASTER. Incarnation is an
+  // opaque identity; epoch is the ordering/fencing token.
+  uint64_t epoch = 0;
 };
 
 struct PlacementDesiredState {
@@ -78,9 +80,8 @@ class PlacementFencedKv {
                                     std::string* value,
                                     int64_t* mod_revision) = 0;
 
-  virtual PlacementStoreStatus list(
-      const std::string& logical_prefix,
-      std::vector<PlacementRawValue>* values) = 0;
+  virtual PlacementStoreStatus list(const std::string& logical_prefix,
+                                    std::vector<PlacementRawValue>* values) = 0;
 
   virtual PlacementStoreStatus compare_and_set(
       const std::string& logical_key,
@@ -97,9 +98,8 @@ class EtcdPlacementFencedKv final : public PlacementFencedKv {
                             std::string* value,
                             int64_t* mod_revision) override;
 
-  PlacementStoreStatus list(
-      const std::string& logical_prefix,
-      std::vector<PlacementRawValue>* values) override;
+  PlacementStoreStatus list(const std::string& logical_prefix,
+                            std::vector<PlacementRawValue>* values) override;
 
   PlacementStoreStatus compare_and_set(
       const std::string& logical_key,

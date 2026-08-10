@@ -75,8 +75,32 @@ cc_library(
     placement_actuator
   HDRS
     placement_actuator.h
+    placement_operation_store.h
+    provider_lifecycle_actuator.h
   SRCS
     placement_actuator.cpp
+    placement_operation_store.cpp
+    provider_lifecycle_actuator.cpp
   DEPS
+    :engine_registry
+    :placement_reconciler
+    glog::glog
+    nlohmann_json::nlohmann_json
+    proto_xllm
+)
+target_link_libraries(placement_actuator PRIVATE brpc-static)
+
+cc_library(
+  NAME
+    placement_controller
+  HDRS
+    placement_controller.h
+  SRCS
+    placement_controller.cpp
+  DEPS
+    :placement_actuator
+    :placement_budget_allocator
+    :placement_desired_store
+    :placement_planner
     :placement_reconciler
 )

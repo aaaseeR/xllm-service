@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <limits>
 #include <nlohmann/json.hpp>
 
 #include "common/types.h"
@@ -260,21 +261,52 @@ EtcdReadStatus EtcdClient::get_prefix_with_revision(
   return EtcdReadStatus::OK;
 }
 
+EtcdReadStatus EtcdClient::get_master_identity(std::string* address,
+                                               std::string* incarnation,
+                                               uint64_t* epoch) {
+  if (address == nullptr || incarnation == nullptr || epoch == nullptr) {
+    return EtcdReadStatus::INVALID_INPUT;
+  }
+  int64_t address_revision = 0;
+  int64_t incarnation_revision = 0;
+  const EtcdReadStatus address_status =
+      get_with_revision(ETCD_MASTER_SERVICE_KEY, address, &address_revision);
+  if (address_status != EtcdReadStatus::OK) {
+    return address_status;
+  }
+  const EtcdReadStatus incarnation_status = get_with_revision(
+      ETCD_MASTER_SERVICE_INCARNATION_KEY, incarnation, &incarnation_revision);
+  if (incarnation_status != EtcdReadStatus::OK) {
+    return incarnation_status;
+  }
+  if (address->empty() || incarnation->empty() || address_revision <= 0 ||
+      incarnation_revision != address_revision) {
+    return EtcdReadStatus::UNAVAILABLE;
+  }
+  *epoch = static_cast<uint64_t>(address_revision);
+  return EtcdReadStatus::OK;
+}
+
 EtcdFencedWriteStatus EtcdClient::compare_and_set_fenced(
     const std::string& key,
     const std::string& value,
     int64_t expected_mod_revision,
     const std::string& expected_master_address,
-    const std::string& expected_master_incarnation) {
+    const std::string& expected_master_incarnation,
+    uint64_t expected_master_epoch) {
   if (key.empty() || value.empty() || expected_mod_revision < 0 ||
-      expected_master_address.empty() ||
-      expected_master_incarnation.empty()) {
+      expected_master_address.empty() || expected_master_incarnation.empty() ||
+      expected_master_epoch == 0 ||
+      expected_master_epoch >
+          static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
     return EtcdFencedWriteStatus::INVALID_INPUT;
   }
 
   etcdv3::Transaction transaction;
   transaction.add_compare_value(namespaced_key(ETCD_MASTER_SERVICE_KEY),
                                 expected_master_address);
+  transaction.add_compare_mod(namespaced_key(ETCD_MASTER_SERVICE_KEY),
+                              static_cast<int64_t>(expected_master_epoch));
   transaction.add_compare_value(
       namespaced_key(ETCD_MASTER_SERVICE_INCARNATION_KEY),
       expected_master_incarnation);
@@ -296,14 +328,16 @@ EtcdFencedWriteStatus EtcdClient::compare_and_set_fenced(
   int64_t master_incarnation_revision = 0;
   const EtcdReadStatus address_status = get_with_revision(
       ETCD_MASTER_SERVICE_KEY, &master_address, &master_address_revision);
-  const EtcdReadStatus incarnation_status = get_with_revision(
-      ETCD_MASTER_SERVICE_INCARNATION_KEY,
-      &master_incarnation,
-      &master_incarnation_revision);
+  const EtcdReadStatus incarnation_status =
+      get_with_revision(ETCD_MASTER_SERVICE_INCARNATION_KEY,
+                        &master_incarnation,
+                        &master_incarnation_revision);
   if (address_status != EtcdReadStatus::OK ||
       incarnation_status != EtcdReadStatus::OK ||
       master_address != expected_master_address ||
-      master_incarnation != expected_master_incarnation) {
+      master_incarnation != expected_master_incarnation ||
+      master_address_revision != static_cast<int64_t>(expected_master_epoch) ||
+      master_incarnation_revision != master_address_revision) {
     return EtcdFencedWriteStatus::FENCED;
   }
   return EtcdFencedWriteStatus::REVISION_CONFLICT;
