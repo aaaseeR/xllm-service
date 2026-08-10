@@ -13,9 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================-->
 
-# V2 功能开发状态文档
+# 功能开发状态文档
 
-本目录记录 V2 功能的真实支持范围和完善情况。每项功能使用一个
+本目录记录各版本功能的真实支持范围和完善情况。每项功能使用一个
 `<feature>_STATUS.md`，并遵循
 [V2 代码开发与交付规范](../00_XLLM_SERVICE_V2_DEVELOPMENT_STANDARD.md)第 5 节。
 
@@ -39,6 +39,7 @@ limitations under the License.
 | V2 Debug、日志与性能分析手册 | CPU_VERIFIED / CLUSTER_CALIBRATION_PENDING | [OBSERVABILITY_RUNBOOK.md](./OBSERVABILITY_RUNBOOK.md) |
 | G1 执行资源安全协议 CPU 核心 | CPU_VERIFIED / NPU_PENDING | [RESOURCE_SAFETY_STATUS.md](./RESOURCE_SAFETY_STATUS.md) |
 | G2 输出定序、缺口与请求截止时间 CPU 核心 | CPU_VERIFIED / NPU_AND_CLUSTER_PENDING | [OUTPUT_DEADLINE_STATUS.md](./OUTPUT_DEADLINE_STATUS.md) |
+| V3 Placement/Autoscale | IN_PROGRESS（Planner/预算 CPU_VERIFIED） | [V3_PLACEMENT_AUTOSCALE_STATUS.md](./V3_PLACEMENT_AUTOSCALE_STATUS.md) |
 
 状态文档使用以下模板：
 
