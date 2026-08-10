@@ -16,11 +16,13 @@ limitations under the License.
 #include "master.h"
 
 #include <chrono>
+#include <cmath>
 #include <csignal>
 
 #include "common/global_gflags.h"
 #include "common/types.h"
 #include "common/utils.h"
+#include "http_service/request_trust_policy.h"
 
 namespace xllm_service {
 
@@ -220,9 +222,62 @@ int main(int argc, char* argv[]) {
   if (FLAGS_kv_route_enforced_gate_open &&
       (FLAGS_load_balance_policy != "CAR" ||
        FLAGS_kv_route_mode != "ENFORCED" ||
-       FLAGS_kv_route_enforced_bucket_permyriad == 0)) {
+       FLAGS_kv_route_enforced_bucket_permyriad == 0 ||
+       FLAGS_kv_route_bytes_per_token == 0 ||
+       FLAGS_kv_route_transfer_byte_cost_us <= 0.0 ||
+       FLAGS_kv_route_prefill_token_cost_us == 0)) {
     LOG(ERROR) << "KV route enforced gate requires --load_balance_policy=CAR, "
-                  "--kv_route_mode=ENFORCED, and a non-zero bucket";
+                  "--kv_route_mode=ENFORCED, a non-zero bucket, and a "
+                  "non-zero byte/token and transfer/prefill cost calibration";
+    return -1;
+  }
+  if (FLAGS_kv_route_max_candidate_plans == 0 ||
+      FLAGS_kv_route_least_load_shortlist == 0 ||
+      FLAGS_kv_route_top_prefix_shortlist == 0 ||
+      FLAGS_kv_route_prefill_queue_cost_us == 0 ||
+      FLAGS_kv_route_decode_request_cost_us == 0 ||
+      FLAGS_kv_route_prefill_token_cost_us == 0 ||
+      !std::isfinite(FLAGS_kv_route_transfer_byte_cost_us) ||
+      FLAGS_kv_route_transfer_byte_cost_us < 0.0 ||
+      FLAGS_kv_route_decode_headroom_cost_us == 0) {
+    LOG(ERROR) << "KV route planner capacity and shortlist bounds must be "
+                  "greater than zero and calibrated costs must be finite";
+    return -1;
+  }
+  if (!FLAGS_kv_session_hmac_secret.empty() &&
+      (FLAGS_kv_session_hmac_secret.size() < 32 ||
+       FLAGS_kv_session_hmac_secret.size() > 256)) {
+    LOG(ERROR) << "--kv_session_hmac_secret must contain 32-256 bytes when "
+                  "configured";
+    return -1;
+  }
+  if (!FLAGS_kv_session_hmac_previous_secret.empty() &&
+      (FLAGS_kv_session_hmac_previous_secret.size() < 32 ||
+       FLAGS_kv_session_hmac_previous_secret.size() > 256)) {
+    LOG(ERROR) << "--kv_session_hmac_previous_secret must contain 32-256 "
+                  "bytes when configured";
+    return -1;
+  }
+  if (FLAGS_kv_session_token_ttl_seconds == 0 ||
+      FLAGS_kv_session_token_ttl_seconds >
+          KVSessionTokenCodec::kMaxTokenTtlSeconds) {
+    LOG(ERROR) << "--kv_session_token_ttl_seconds must be in [1, "
+               << KVSessionTokenCodec::kMaxTokenTtlSeconds << "]";
+    return -1;
+  }
+  if (FLAGS_kv_route_enforced_gate_open &&
+      !FLAGS_trusted_tenant_headers_enabled &&
+      FLAGS_kv_session_hmac_secret.empty()) {
+    LOG(ERROR) << "KV route enforcement without trusted tenant headers "
+                  "requires a shared --kv_session_hmac_secret";
+    return -1;
+  }
+  if (FLAGS_kv_route_enforced_gate_open &&
+      (FLAGS_observability_build_id.empty() ||
+       FLAGS_observability_build_id == "development" ||
+       FLAGS_observability_build_id == "REPLACE_WITH_IMMUTABLE_ARTIFACT_ID")) {
+    LOG(ERROR) << "KV route enforcement requires an immutable "
+                  "--observability_build_id";
     return -1;
   }
 
@@ -247,6 +302,17 @@ int main(int argc, char* argv[]) {
       .kv_route_enforced_gate_open(FLAGS_kv_route_enforced_gate_open)
       .kv_route_enforced_bucket_permyriad(
           FLAGS_kv_route_enforced_bucket_permyriad)
+      .kv_route_max_candidate_plans(FLAGS_kv_route_max_candidate_plans)
+      .kv_route_least_load_shortlist(FLAGS_kv_route_least_load_shortlist)
+      .kv_route_top_prefix_shortlist(FLAGS_kv_route_top_prefix_shortlist)
+      .kv_route_prefill_queue_cost_us(FLAGS_kv_route_prefill_queue_cost_us)
+      .kv_route_decode_request_cost_us(FLAGS_kv_route_decode_request_cost_us)
+      .kv_route_prefill_token_cost_us(FLAGS_kv_route_prefill_token_cost_us)
+      .kv_route_transfer_byte_cost_us(FLAGS_kv_route_transfer_byte_cost_us)
+      .kv_route_decode_headroom_cost_us(FLAGS_kv_route_decode_headroom_cost_us)
+      .kv_route_prefill_reserve_blocks(FLAGS_kv_route_prefill_reserve_blocks)
+      .kv_route_margin_us(FLAGS_kv_route_margin_us)
+      .kv_route_near_equal_cost_us(FLAGS_kv_route_near_equal_cost_us)
       .kv_route_bytes_per_token(FLAGS_kv_route_bytes_per_token)
       .flow_max_queued_requests(FLAGS_flow_max_queued_requests)
       .flow_max_dispatched_contexts(FLAGS_flow_max_dispatched_contexts)
@@ -283,6 +349,9 @@ int main(int argc, char* argv[]) {
       .native_prefill_only_output_token_cap(
           FLAGS_native_prefill_only_output_token_cap)
       .trusted_tenant_headers_enabled(FLAGS_trusted_tenant_headers_enabled)
+      .kv_session_hmac_secret(FLAGS_kv_session_hmac_secret)
+      .kv_session_hmac_previous_secret(FLAGS_kv_session_hmac_previous_secret)
+      .kv_session_token_ttl_seconds(FLAGS_kv_session_token_ttl_seconds)
       .observability_event_capacity(FLAGS_observability_event_capacity)
       .observability_export_batch_size(FLAGS_observability_export_batch_size)
       .observability_export_interval_ms(FLAGS_observability_export_interval_ms)

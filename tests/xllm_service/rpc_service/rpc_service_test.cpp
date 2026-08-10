@@ -137,6 +137,11 @@ TEST(DisaggGenerationAdapterTest, OutputSequenceRemainsWireCompatible) {
   sender.set_attempt_seq(3);
   sender.set_sender_engine_uid("decode-1");
   sender.set_sender_incarnation_id("decode-incarnation-1");
+  sender.set_decode_admission_disposition(
+      xllm::proto::ADMISSION_DISPOSITION_ACCEPTED);
+  sender.set_decode_admission_reason(xllm::proto::ADMISSION_REASON_NONE);
+  sender.set_decode_admission_attempts(2);
+  sender.set_decode_admission_rpc_duration_ns(12345);
   proto::DisaggStreamGeneration receiver;
   ASSERT_TRUE(receiver.ParseFromString(sender.SerializeAsString()));
   EXPECT_TRUE(receiver.has_output_event_seq());
@@ -145,6 +150,12 @@ TEST(DisaggGenerationAdapterTest, OutputSequenceRemainsWireCompatible) {
   EXPECT_EQ(receiver.attempt_seq(), 3);
   EXPECT_EQ(receiver.sender_engine_uid(), "decode-1");
   EXPECT_EQ(receiver.sender_incarnation_id(), "decode-incarnation-1");
+  EXPECT_EQ(receiver.decode_admission_disposition(),
+            xllm::proto::ADMISSION_DISPOSITION_ACCEPTED);
+  EXPECT_EQ(receiver.decode_admission_reason(),
+            xllm::proto::ADMISSION_REASON_NONE);
+  EXPECT_EQ(receiver.decode_admission_attempts(), 2u);
+  EXPECT_EQ(receiver.decode_admission_rpc_duration_ns(), 12345u);
 }
 
 TEST(DisaggGenerationAdapterTest, DeliveryReasonRemainsWireCompatible) {
@@ -271,6 +282,25 @@ TEST(DisaggGenerationAdapterTest, RejectsInvalidDecodeCachedTokens) {
   EXPECT_FALSE(result.output.has_value());
 }
 
+TEST(DisaggGenerationAdapterTest, RejectsPartialDecodeAdmissionObservation) {
+  proto::DisaggStreamGeneration generation =
+      make_generation(/*num_prompt_tokens=*/8,
+                      /*num_generated_tokens=*/2,
+                      /*num_total_tokens=*/10,
+                      /*num_cache_hit_tokens=*/6);
+  generation.set_decode_admission_disposition(
+      xllm::proto::ADMISSION_DISPOSITION_ACCEPTED);
+
+  RequestOutputConversionResult result =
+      request_output_from_disagg_generation(generation);
+
+  EXPECT_FALSE(result.status.ok());
+  EXPECT_EQ(result.status.code(), llm::StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(result.status.message().find("admission observation"),
+            std::string::npos);
+  EXPECT_FALSE(result.output.has_value());
+}
+
 TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   proto::DisaggStreamGeneration generation =
       make_generation(/*num_prompt_tokens=*/8,
@@ -287,6 +317,11 @@ TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   generation.set_attempt_seq(3);
   generation.set_sender_engine_uid("prefill-1");
   generation.set_sender_incarnation_id("prefill-incarnation-1");
+  generation.set_decode_admission_disposition(
+      xllm::proto::ADMISSION_DISPOSITION_ACCEPTED);
+  generation.set_decode_admission_reason(xllm::proto::ADMISSION_REASON_NONE);
+  generation.set_decode_admission_attempts(2);
+  generation.set_decode_admission_rpc_duration_ns(12345);
   generation.mutable_usage()->set_num_decode_cached_tokens(4);
 
   proto::SequenceOutput* sequence = generation.add_outputs();
@@ -325,6 +360,16 @@ TEST(DisaggGenerationAdapterTest, ConvertsCompleteValidGeneration) {
   EXPECT_EQ(*output.attempt_seq, 3);
   EXPECT_EQ(output.sender_engine_uid, "prefill-1");
   EXPECT_EQ(output.sender_incarnation_id, "prefill-incarnation-1");
+  ASSERT_TRUE(output.decode_admission_disposition.has_value());
+  EXPECT_EQ(*output.decode_admission_disposition,
+            xllm::proto::ADMISSION_DISPOSITION_ACCEPTED);
+  ASSERT_TRUE(output.decode_admission_reason.has_value());
+  EXPECT_EQ(*output.decode_admission_reason,
+            xllm::proto::ADMISSION_REASON_NONE);
+  ASSERT_TRUE(output.decode_admission_attempts.has_value());
+  EXPECT_EQ(*output.decode_admission_attempts, 2u);
+  ASSERT_TRUE(output.decode_admission_rpc_duration_ns.has_value());
+  EXPECT_EQ(*output.decode_admission_rpc_duration_ns, 12345u);
   ASSERT_TRUE(output.usage.has_value());
   EXPECT_EQ(output.usage->num_prompt_tokens, 8u);
   EXPECT_EQ(output.usage->num_generated_tokens, 2u);

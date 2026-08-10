@@ -86,8 +86,6 @@ struct KVRouteEngineCandidate {
   KVShadowHealth kv_health = KVShadowHealth::UNKNOWN;
   uint64_t hbm_prefix_blocks = 0;
   uint64_t host_prefix_blocks = 0;
-  uint64_t ssd_prefix_blocks = 0;
-  uint64_t store_prefix_blocks = 0;
   double residence_probability = 1.0;
 };
 
@@ -131,11 +129,7 @@ struct KVRouteObservation {
   uint64_t predicted_effective_prefill_tokens = 0;
   uint64_t predicted_transfer_bytes = 0;
   uint64_t shadow_prefill_host_hit_tokens_ub = 0;
-  uint64_t shadow_prefill_ssd_hit_tokens_ub = 0;
-  uint64_t shadow_prefill_store_hit_tokens_ub = 0;
   uint64_t shadow_decode_host_hit_tokens_ub = 0;
-  uint64_t shadow_decode_ssd_hit_tokens_ub = 0;
-  uint64_t shadow_decode_store_hit_tokens_ub = 0;
   uint64_t kv_bytes_per_token = 0;
   double load_only_cost_us = 0.0;
   double kv_cost_us = 0.0;
@@ -143,11 +137,7 @@ struct KVRouteObservation {
 
 struct LowerTierShadowCredit {
   uint64_t prefill_host_hit_tokens_ub = 0;
-  uint64_t prefill_ssd_hit_tokens_ub = 0;
-  uint64_t prefill_store_hit_tokens_ub = 0;
   uint64_t decode_host_hit_tokens_ub = 0;
-  uint64_t decode_ssd_hit_tokens_ub = 0;
-  uint64_t decode_store_hit_tokens_ub = 0;
 };
 
 // Reports only bounded hit-token upper bounds for future tier-cost

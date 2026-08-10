@@ -139,7 +139,7 @@ CPU/simulated HBM 门；不表示真实 NPU allocator、DMA/Link 或故障矩阵
 | 内存/未定义行为 | GCC 13 ASan+UBSan 定向运行 Engine 17 项与 Service hold 19 项 | N/A | N/A | PASS；Clang sanitizer runtime 未随 ARM64 镜像安装 |
 | deadline 约束 reservation/调度 | optional wire、fake monotonic、Service 有界并发索引；D admission/reservation cap、P 三个边界和六类 Engine 调度路径生产 TU 以 `-Werror` 编译 | 公共测试目标使用 Torch CPU；无 tensor 数值变化 | 待真实 KV/transfer | PASS（CPU 核心与生产编译）；loopback 待补 |
 | G1/G2 exact 首事件保留与恢复 | xLLM adapter/protocol/4 MiB/field 24；Service Query state、D/P incarnation、attempt、seq、payload 和 index fail-closed；7 项真实 brpc loopback 覆盖并发、timeout、D restart 和 live race | adapter 目标链接 Torch CPU；无 tensor 数值变化 | 待 P/D 数据面故障注入 | PASS（CPU loopback） |
-| 双仓回归 | xLLM 当前八目标 118/118，含 simulated HBM 12/12、Provider 9/9、RequestEvent 14/14，另有 queue 既有 14/14；Service pinned/override 均为 380/380；vLLM Agent/sidecar 60/60；xLLM 受影响生产 TU 严格编译；Service 三个生产二进制 build/link verify | queue 含 Torch CPU retained-storage/ownership 测试 | simulated HBM 证明固定容量/所有权/地址/内容与并发回收，不代表真实 HBM | PASS |
+| 双仓回归 | Service pinned/override 当前均为 388/388，三个生产二进制 build/link verify；xLLM `6c9d661e` production resource adapter/simulator 15/15、admission adapter 3/3；xLLM 118/118 与 vLLM Agent/sidecar 60/60 为前一完整公共基线 | queue 的 Torch CPU retained-storage/ownership 为前一完整基线；本批完整 runtime 受第三方 Mooncake 阻断 | simulator 与 production BlockManager adapter 证明固定容量/所有权/地址与并发回收，不代表真实 HBM | PASS（受影响路径）；全 runtime 未声称 PASS |
 
 ## 完善情况
 

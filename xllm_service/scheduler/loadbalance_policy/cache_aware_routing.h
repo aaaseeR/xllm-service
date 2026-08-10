@@ -34,7 +34,7 @@ class CacheAwareRouting final : public LoadBalancePolicy {
   bool select_instances_pair(std::shared_ptr<Request> request) override;
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(CacheAwareRouting);
+  XLLM_SERVICE_DISALLOW_COPY_AND_ASSIGN(CacheAwareRouting);
 
   bool fallback_load_only(const std::shared_ptr<Request>& request) const;
 

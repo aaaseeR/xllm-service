@@ -20,8 +20,8 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：CPU_VERIFIED
 - 关联设计/Requirement ID：G-2、G-1、F66、F72、F73、F80-F82、D50、D52、D56
-- 最近验证基线：xLLM `446bae12`、xllm-service 本状态文档所在提交
-- 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-09
+- 最近验证基线：xLLM `6c9d661e`、xllm-service 本状态文档所在提交
+- 验证环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，2026-08-10
 
 ## 支持范围
 
@@ -52,10 +52,14 @@ limitations under the License.
   admission 和统一 Engine/Link 状态；不调用 CANN/CUDA，不持有 device pointer、真实
   HBM 地址或具体 stream/event/allocator。`soc` 和硬件 Runtime 版本仅参与已验证
   profile 的兼容与发布门禁，不作为硬件特例分支键。
-- 真实与 simulated HBM allocator 均位于 Engine/backend 或 fake Provider 边界。
-  Service 通过相同 Provider Contract 验证 reservation、execution hold、transfer、
-  cancel/fencing 和回收，不在生产 Service 内复制 KV/HBM allocator。B6 实现和 CPU
-  证据见 [SIMULATED_HBM_STATUS.md](./SIMULATED_HBM_STATUS.md)。
+- 生产 `BlockManagerKVResourceBackend` 位于 Engine/backend 边界，直接包装调度使用的
+  `BlockManagerPool` leaf 并共享 free-list；simulated HBM 是并列的测试/故障注入后端，
+  不是生产 allocator 或真实 HBM 证据。Service 通过相同 Provider Contract 验证
+  reservation、execution hold、transfer、cancel/fencing 和回收，不复制 KV/HBM
+  allocator。B6 实现和 CPU 证据见 [SIMULATED_HBM_STATUS.md](./SIMULATED_HBM_STATUS.md)。
+- V2 的资源 tier 只开放 HBM/HOST：device 与 hierarchy host prefix leaf 分别发布；HOST
+  仅作 shadow upper bound，不进入 route/admission。SSD/STORE 已从 V2 wire/查询删除并
+  reserved，真实 Store 数据路径属于后续版本。
 - 跨仓协议与依赖：xLLM 是 `provider.proto` 的唯一源；xllm-service 通过
   `proto_xllm` 直接生成和链接同一文件。`renderer_digest` 覆盖 tokenizer +
   template 渲染契约，STRICT 编码结果必须与 Descriptor 相等。
@@ -92,6 +96,9 @@ limitations under the License.
   Scheduler 计划时继续保持字段缺失。xLLM Engine 在实际接收点用本机 UID/incarnation
   校验 request identity、attempt、P/D role 与 routing、deadline、capability、资源估算、
   compatibility proof 和 provider payload，STRICT 计划不能投递到错误或已重启的 P。
+- REMOTE_PD 的实际 D admission 结果由 xLLM D 聚合并经 P scheduler/输出 wire 回传
+  Service，保留 disposition、reason、尝试数和 P 侧观测到的 RPC 累计时长；Service 不
+  再用本地 elapsed time 猜测 D 成败，证据缺失时 fail closed。
 - STRICT Native P/D 使用显式兼容矩阵，不要求两端 `profile_digest` 相等，但要求
   runtime/protocol、model revision/quantization、KV layout/dtype/block/cache group、
   Connector/version、layerwise transfer 和可证明 topology 一致，并生成确定性的
@@ -121,11 +128,13 @@ limitations under the License.
 
 Service 的 Provider/Registry 纯 CPU 测试已覆盖 Adapter、route、EngineState 和
 LinkState；当前全量 service CPU 回归在 pinned 与外部 xLLM 两种构建下均为
-380/380，vLLM Agent/sidecar CPU 回归为 60/60，xLLM CPU 公共路径基线为
-118/118（含 simulated HBM 12/12、Provider protocol 9/9）。新增 xLLM Engine plan
+388/388，vLLM Agent/sidecar 上一个完整 CPU 基线为 60/60。xLLM `6c9d661e` 本批重建
+resource adapter/simulator 15/15、request-output admission wire 3/3；前一提交的公共路径
+完整基线为 118/118。新增 xLLM Engine plan
 validator 为 6/6，相关 protocol allowlist 通过；RequestParams、Completion 与 Chat
-生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。完整 RequestParams target
-仍受既有 CPU sandbox `ProcessGroupImpl` 不完整类型阻塞，该限制不来自本批变更。
+生产对象均在 Torch CPU 头文件环境以 `-Werror` 编译通过。无硬件 process-group 工厂
+已经 fail closed 编译；完整 runtime 继续构建时停于第三方 Mooncake 的 Clang
+thread-safety annotation 与 incomplete `PutOperation`，不记作本批 PASS。
 
 ## 完善情况
 

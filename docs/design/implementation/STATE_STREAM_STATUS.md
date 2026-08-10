@@ -139,17 +139,19 @@ NPU handshake 故障矩阵待最终环境验证。
 | xLLM Native 生产 | Descriptor 确定性/非法输入、P/D mode、per-DP 完整/空容量、缺失 capability、snapshot 序号不消耗、32 线程唯一序号；heartbeat field 7 | N/A，无 tensor 数值逻辑 | 待真实 CANN/SOC 版本、NPU block 账本与 P/D heartbeat | PASS；Native 6/6、协议 8/8，并发套件连续 100 轮 |
 
 本批验证：xllm-service Debug 三个生产服务目标编译、动态链接通过，pinned 与外部
-xLLM Service pinned/override 两种构建的当前全量 CPU 测试均为 380/380；ObservationController 8/8；
+xLLM Service pinned/override 两种构建的当前全量 CPU 测试均为 388/388；ObservationController 8/8；
 ReadinessController 6/6；HealthResponse 3/3；EngineRegistry 15/15；
 StateStreamOutbox 6/6；
 StateStreamClient BRPC loopback 4/4；
 LinkReconciler 5/5；xLLM Native producer 6/6、Provider 协议 9/9。State Stream、
-Link 和 Native producer 的关键并发用例连续 100 轮通过；xLLM 公共 CPU 回归为
-118/118。xLLM 的
+Link 和 Native producer 的关键并发用例连续 100 轮通过；xLLM 公共 CPU 的前一完整
+基线为 118/118，本批 `6c9d661e` 重建 resource adapter/simulator 15/15 与 admission
+adapter 3/3。xLLM 的
 `native_provider_runtime.cpp`、`xservice_client.cpp`、`llm_master.cpp` 和
-`vlm_master.cpp` 使用真实 Torch CPU/BRPC 编译参数通过。完整 xLLM runtime 目标仍被
-既有 `process_group.cpp` 的 CPU `ProcessGroupImpl` 不完整类型错误阻断，该文件不在本批
-改动中。没有 tensor 数值逻辑，因此本功能当前无伪造的 Torch CPU 测试项。
+`vlm_master.cpp` 使用真实 Torch CPU/BRPC 编译参数通过。无硬件 process-group factory
+已明确 fail closed；完整 xLLM runtime 继续构建后停于第三方 Mooncake 的 Clang
+thread-safety/incomplete-type 错误。没有 tensor 数值逻辑，因此本功能当前无伪造的
+Torch CPU 测试项。
 
 ## 完善情况
 

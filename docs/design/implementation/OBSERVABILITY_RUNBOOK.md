@@ -55,8 +55,9 @@ Engine UID + incarnation 区分；禁止只按可复用的进程地址关联。
 `REQUEST_TERMINAL` 表示终态已抢占成功，但 E2E/TPOT metric sample 可能取得更大的
 event_seq，因此不能假设 terminal 是物理最后一行。若 event loss 任一 counter 增长，
 该窗口只能做部分诊断，不能把“未看到事件”解释为“阶段没有发生”。
-强制 shutdown 超时后，仍在执行的 producer 可能晚于 exporter 最终 drain 产生事件；
-这种窗口同样视为 trace 不完整，必须结合 shutdown/terminal counter 判断。
+正常 shutdown 会先停止 cleanup producer、把未收敛的资源释放 trace 标成 FAILED，再由
+exporter 排空 ring。强制 shutdown 超时或进程被外部杀死时仍可能来不及形成终态；这种
+窗口视为 trace 不完整，必须结合 shutdown、event-loss 与 terminal counter 判断。
 
 ## 3. 单请求定位顺序
 
@@ -64,14 +65,18 @@ event_seq，因此不能假设 terminal 是物理最后一行。若 event loss �
    `error_stage/reason`，并核对 readiness、deadline 和 flow capacity。
 2. 查 `ROUTE`：分别核对 P/D Engine UID/incarnation、Provider/profile、model revision、
    execution mode 和 queue wait。缺 route 且重复回队通常是池饱和或硬过滤后无候选。
-3. 查 `P_DISPATCH` 与 xLLM `d_admission`：D 临时容量不足、永久不兼容、attempt terminal
-   必须用 disposition/reason 区分，不能统一当作超时重试。
+3. 查 `P_DISPATCH`、Service `D_ADMISSION` 与 xLLM `d_admission`：Service 终态来自 D
+   实际 `AdmissionResult`，不是由 Service elapsed time 推测；duration 是 P scheduler
+   观测到的 `AddNewRequests` RPC 累计时间。临时容量不足、永久不兼容和 attempt terminal
+   必须用 disposition/reason 区分，缺少 D evidence 记为 `MISSING_TERMINAL`。
 4. 查 transfer/commit 与 `p_first_generation/d_kv_restore/d_first_generation`：定位 P
    计算、传输、D restore、首事件 handoff 的耗时和失败归属。
 5. 查 `FIRST_TOKEN_FLUSH`、TTFT/ITL/TPOT：只有累计 generated-token count 增长才形成
    token 边界；缺 usage 时指标如实缺失，不用 chunk 数补造。
-6. 查 output sequence outcome 与 terminal：gap/buffered/duplicate/closed、cancel、deadline、
-   provider error、terminal proof 和 cleanup 必须与 attempt/incarnation 一致。
+6. 查 output sequence outcome、`RESOURCE_RELEASE` 与 terminal：gap/buffered/duplicate/closed、
+   cancel、deadline、provider error、terminal proof 和 cleanup 必须与 attempt/incarnation
+   一致。即时释放应为单个 SUCCEEDED；deferred cleanup 先 STARTED，收敛后 SUCCEEDED，
+   shutdown 仍未收敛则 FAILED，不能把只有 STARTED 的 trace 当成成功。
 
 日志不包含请求正文。如果必须核对业务内容，应在受控上游审计系统用
 `global_request_id` 关联，禁止临时把 prompt/output/token IDs 加回普通 Service 日志。
@@ -93,6 +98,8 @@ event_seq，因此不能假设 terminal 是物理最后一行。若 event loss �
 | E2E 高且 TTFT/TPOT 均正常 | queue wait、terminal/cleanup、客户端 write | 排队、尾部终态证明或下游反压；核对 measurement boundary |
 | predicted 高、actual 低 | overpredicted、decode overpredicted、admission conflict | KV shadow 陈旧、residence/survival 校准偏乐观；关闭 ENFORCED gate 回 SHADOW |
 | predicted transfer 高、skipped 低 | namespace/model/profile、P/D actual hit | hash/isolation 不一致或 D 未驻留；按 request namespace/Engine stream 分开检查 |
+| Engine KV used ratio 高、free blocks 低 | reporting engines/DP ranks、max used ratio、min/total free blocks | 只聚合 fresh EngineState；先区分真实容量压力与 stale/未上报，禁止用缺失 Engine 的乐观总量扩容准入 |
+| resource release 长时间无终态 | cleanup pending、holder/incarnation、shutdown | cleanup 未收敛或 trace 丢失；先看 event-loss，再查 convergence proof，禁止人工绕过 fencing |
 | output gap/duplicate 增长 | attempt、incarnation、event sequence、first-event recovery | 重试竞态、发送方越权或网络乱序；不要绕过 fencing/sequence gate |
 | event loss 增长 | ring events、capacity/contention、export interval | 降低 VLOG 范围、增大有界 ring/batch或缩短 interval；该窗口 trace 不完整 |
 
@@ -101,21 +108,35 @@ event_seq，因此不能假设 terminal 是物理最后一行。若 event loss �
 之和。首个 snapshot 的 delta 固定为 0，不能纳入速率。跨模型/tenant/Engine 分析只从
 逐请求 VLOG 离线聚合，不把高基数身份变成 bvar label。
 
-## 5. KV 与多层 shadow
+## 5. KV tier、会话与多硬件边界
 
-HBM predicted/actual 是 V2 K1 路由校准依据；HOST/SSD/Store 字段都以 `_ub` 结尾，
-表示 bounded shortlist 内的可观测命中 token 上界。它们不表示数据可读、带宽可用、
-对象已提交或 Store 数据路径已交付，也不进入 V2 route/admission。任何优化建议必须先
-在 V2.5 实现真实 tier producer、数据搬运、成本与故障契约，再开独立门禁。
+V2 只接入两个有真实 producer 的 tier：device prefix leaf 发布 HBM，hierarchy host
+prefix leaf 发布 HOST。HBM predicted/actual 是 K1 路由校准依据；HOST 只发布 bounded
+shortlist 命中 token 上界，不表示可读带宽、搬运完成或 admission capacity，也不进入
+V2 route/admission。SSD/STORE 的旧字段已删除并 reserved，V2 不查询也不宣传这两层；
+后续版本必须先交付真实 producer、数据搬运、成本与故障契约，再开独立门禁。
+
+HBM 的 CPU 证据由生产 `BlockManagerKVResourceBackend` 与真实 BlockManager leaf 共享
+free-list；simulated HBM 只负责故障注入和容量/所有权不变量，不能证明 CANN allocator、
+真实 HBM 地址、DMA 或设备性能。Service 只消费 Engine/Provider 标准化状态，不感知
+CANN/CUDA allocator、stream/event 或 device pointer。
 
 默认不信任 tenant header 时，每请求 namespace 由 request UID 派生，CAR 回到 load-only，
 但同一次 P→D 的 hash domain 仍一致。可信头模式只允许同 tenant 复用；跨 tenant、模型、
 Provider cache semantics 或未来 dynamic adapter identity 均生成不同 namespace。
 
+标准 OpenAI SDK 可用请求体 `user`，Anthropic SDK 可用 `metadata.user_id`；Service 会把
+它们与 `Authorization`/`x-api-key` 身份共同 HMAC 派生，不能只凭可猜测的 user 值跨客户
+复用。自研客户端可回传 Service 签发的 `v2.<issued_at>.<session>.<hmac>` opaque token。
+生产多副本必须配置同一 `--kv_session_hmac_secret`；轮转时先配置
+`--kv_session_hmac_previous_secret`，等待 `--kv_session_token_ttl_seconds` 窗口后移除旧
+key。随机本地 key 只适合 SHADOW/dev 且必须 sticky routing；flagfile 和日志禁止写 secret。
+
 ## 6. 告警与发布门
 
 - 立即告警：readiness 不接受请求、state hard-stale、Engine/Link 数突降、event loss、
-  invalid event、duplicate terminal、admission conflict、output gap、失败 terminal 激增。
+  invalid event、duplicate terminal、admission conflict、D admission missing terminal、
+  resource release 未终结、output gap、失败 terminal 激增。
 - 灰度 KV ENFORCED 前：在同 model revision + Provider profile + base/request namespace
   窗口核对 actual 缺失率、overprediction、fallback、conflict、skipped bytes；从小 bucket
   开始，异常立即关闭 gate。

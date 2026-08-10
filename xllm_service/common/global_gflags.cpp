@@ -104,6 +104,40 @@ DEFINE_uint32(kv_route_enforced_bucket_permyriad,
               0,
               "Stable ENFORCED traffic bucket in [0, 10000].");
 
+DEFINE_uint64(kv_route_max_candidate_plans,
+              16384,
+              "Bound on retained KV route candidate plans.");
+DEFINE_uint64(kv_route_least_load_shortlist,
+              8,
+              "Least-load candidates evaluated by the KV route planner.");
+DEFINE_uint64(kv_route_top_prefix_shortlist,
+              8,
+              "Top-prefix candidates evaluated by the KV route planner.");
+DEFINE_uint64(kv_route_prefill_queue_cost_us,
+              1000,
+              "Calibrated cost per queued Prefill request.");
+DEFINE_uint64(kv_route_decode_request_cost_us,
+              1000,
+              "Calibrated cost per running Decode request.");
+DEFINE_uint64(kv_route_prefill_token_cost_us,
+              10,
+              "Calibrated Prefill cost per uncached prompt token.");
+DEFINE_double(kv_route_transfer_byte_cost_us,
+              0.001,
+              "Calibrated transfer cost in microseconds per KV byte.");
+DEFINE_uint64(kv_route_decode_headroom_cost_us,
+              1000,
+              "Penalty for each Decode request beyond advertised headroom.");
+DEFINE_uint64(kv_route_prefill_reserve_blocks,
+              1,
+              "Free KV blocks reserved before a Prefill route is feasible.");
+DEFINE_uint64(kv_route_margin_us,
+              100,
+              "Safety margin added to predicted KV route completion cost.");
+DEFINE_uint64(kv_route_near_equal_cost_us,
+              10,
+              "Cost delta treated as near-equal for deterministic tie-breaks.");
+
 DEFINE_uint64(kv_route_bytes_per_token,
               0,
               "Logical KV bytes per prompt token for routing calibration.");
@@ -145,7 +179,8 @@ DEFINE_uint64(flow_service_memory_budget_bytes,
               "Queue plus dispatched context memory exposure bound.");
 DEFINE_uint64(flow_dispatched_context_bytes,
               4096,
-              "Conservative bytes charged to one dispatched context.");
+              "Conservative estimated bytes charged to one dispatched "
+              "request context for Service memory budgeting.");
 DEFINE_double(flow_dispatch_rate_lb_per_second,
               1.0,
               "Fresh normal-observation dispatch-rate lower bound.");
@@ -175,7 +210,7 @@ DEFINE_uint64(native_local_prefill_token_cap,
               512,
               "Maximum prompt tokens for Native local Prefill.");
 DEFINE_bool(native_prefill_only_enabled,
-            true,
+            false,
             "Enable capability-gated Native Prefill-only selection.");
 DEFINE_uint64(native_prefill_only_output_token_cap,
               1,
@@ -183,8 +218,20 @@ DEFINE_uint64(native_prefill_only_output_token_cap,
 DEFINE_bool(trusted_tenant_headers_enabled,
             false,
             "Trust authenticated x-tenant-id/x-flow-id Gateway headers. When "
-            "false, tenant headers are ignored and cross-request KV reuse is "
-            "disabled.");
+            "false, tenant headers and request priority are ignored; an "
+            "opaque Service-signed session scopes cross-request KV reuse.");
+DEFINE_string(kv_session_hmac_secret,
+              "",
+              "Shared 32-256 byte secret for signing opaque KV session "
+              "tokens. Empty generates an instance-local secret and requires "
+              "sticky routing for session reuse across requests.");
+DEFINE_string(kv_session_hmac_previous_secret,
+              "",
+              "Previous shared KV session signing secret accepted only for "
+              "verification during bounded key rotation.");
+DEFINE_uint64(kv_session_token_ttl_seconds,
+              86400,
+              "Maximum lifetime of an opaque signed KV session token.");
 DEFINE_uint64(observability_event_capacity,
               65536,
               "Fixed-capacity Service request-event ring size.");

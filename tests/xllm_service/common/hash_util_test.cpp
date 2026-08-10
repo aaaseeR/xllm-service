@@ -92,20 +92,17 @@ TEST(HashUtilTest, CanonicalNamespaceMatchesEngineGolden) {
   EXPECT_NE(isolated, first);
 }
 
-TEST(HashUtilTest, RequestNamespaceStrictlyIsolatesTenantAndAdapter) {
-  const std::string tenant_a =
-      derive_request_kv_namespace("base", "tenant-a", "");
+TEST(HashUtilTest, RequestNamespaceStrictlyIsolatesAuthorizedDomain) {
+  const std::string tenant_a = derive_request_kv_namespace("base", "tenant-a");
   const std::string tenant_a_repeat =
-      derive_request_kv_namespace("base", "tenant-a", "");
+      derive_request_kv_namespace("base", "tenant-a");
   ASSERT_FALSE(tenant_a.empty());
   EXPECT_EQ(tenant_a, tenant_a_repeat);
-  EXPECT_NE(tenant_a, derive_request_kv_namespace("base", "tenant-b", ""));
-  EXPECT_NE(tenant_a,
-            derive_request_kv_namespace("base", "tenant-a", "lora-a"));
-  EXPECT_NE(tenant_a, derive_request_kv_namespace("other", "tenant-a", ""));
-  EXPECT_TRUE(derive_request_kv_namespace("", "tenant-a", "").empty());
+  EXPECT_NE(tenant_a, derive_request_kv_namespace("base", "tenant-b"));
+  EXPECT_NE(tenant_a, derive_request_kv_namespace("other", "tenant-a"));
+  EXPECT_TRUE(derive_request_kv_namespace("", "tenant-a").empty());
   EXPECT_TRUE(
-      derive_request_kv_namespace("base", std::string(257, 'x'), "").empty());
+      derive_request_kv_namespace("base", std::string(257, 'x')).empty());
 }
 
 }  // namespace

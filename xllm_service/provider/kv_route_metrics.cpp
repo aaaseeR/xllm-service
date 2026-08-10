@@ -63,16 +63,8 @@ void KVRouteMetrics::record_decision(const KVRouteObservation& observation) {
                 observation.predicted_transfer_bytes);
   saturated_add(&shadow_prefill_host_hit_tokens_ub_,
                 observation.shadow_prefill_host_hit_tokens_ub);
-  saturated_add(&shadow_prefill_ssd_hit_tokens_ub_,
-                observation.shadow_prefill_ssd_hit_tokens_ub);
-  saturated_add(&shadow_prefill_store_hit_tokens_ub_,
-                observation.shadow_prefill_store_hit_tokens_ub);
   saturated_add(&shadow_decode_host_hit_tokens_ub_,
                 observation.shadow_decode_host_hit_tokens_ub);
-  saturated_add(&shadow_decode_ssd_hit_tokens_ub_,
-                observation.shadow_decode_ssd_hit_tokens_ub);
-  saturated_add(&shadow_decode_store_hit_tokens_ub_,
-                observation.shadow_decode_store_hit_tokens_ub);
   const size_t fallback = static_cast<size_t>(observation.fallback);
   if (fallback < fallbacks_.size()) {
     saturated_add(&fallbacks_[fallback], 1);
@@ -136,16 +128,8 @@ KVRouteMetricsSnapshot KVRouteMetrics::snapshot() const {
       predicted_transfer_bytes_.load(std::memory_order_relaxed);
   current.shadow_prefill_host_hit_tokens_ub =
       shadow_prefill_host_hit_tokens_ub_.load(std::memory_order_relaxed);
-  current.shadow_prefill_ssd_hit_tokens_ub =
-      shadow_prefill_ssd_hit_tokens_ub_.load(std::memory_order_relaxed);
-  current.shadow_prefill_store_hit_tokens_ub =
-      shadow_prefill_store_hit_tokens_ub_.load(std::memory_order_relaxed);
   current.shadow_decode_host_hit_tokens_ub =
       shadow_decode_host_hit_tokens_ub_.load(std::memory_order_relaxed);
-  current.shadow_decode_ssd_hit_tokens_ub =
-      shadow_decode_ssd_hit_tokens_ub_.load(std::memory_order_relaxed);
-  current.shadow_decode_store_hit_tokens_ub =
-      shadow_decode_store_hit_tokens_ub_.load(std::memory_order_relaxed);
   current.actual_hit_tokens =
       actual_hit_tokens_.load(std::memory_order_relaxed);
   current.actual_decode_hit_tokens =

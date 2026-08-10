@@ -899,6 +899,60 @@ std::optional<ObservationSnapshot> EngineRegistry::observation_snapshot(
   return update_observation_locked(receiver_monotonic_ms);
 }
 
+EngineKVCapacitySnapshot EngineRegistry::kv_capacity_snapshot(
+    uint64_t receiver_monotonic_ms) const {
+  std::shared_lock lock(mutex_);
+  EngineKVCapacitySnapshot snapshot;
+  uint64_t min_free_blocks = std::numeric_limits<uint64_t>::max();
+  for (const auto& [key, cached] : states_) {
+    if (members_.find(key) == members_.end()) {
+      continue;
+    }
+    const xllm::proto::EngineState& state = cached.state;
+    if (!state.has_state_age_ms_at_publish() ||
+        !state.has_heartbeat_age_ms_at_publish() ||
+        effective_age_ms(state.state_age_ms_at_publish(),
+                         cached.received_monotonic_ms,
+                         receiver_monotonic_ms) > config_.state_hard_ttl_ms ||
+        effective_age_ms(state.heartbeat_age_ms_at_publish(),
+                         cached.received_monotonic_ms,
+                         receiver_monotonic_ms) >
+            config_.heartbeat_hard_ttl_ms) {
+      continue;
+    }
+    bool engine_reporting = false;
+    for (const xllm::proto::PerDpEngineState& dp : state.per_dp()) {
+      if (!dp.has_kv_used_ratio() && !dp.has_kv_free_blocks()) {
+        continue;
+      }
+      engine_reporting = true;
+      ++snapshot.reporting_dp_ranks;
+      if (dp.has_kv_used_ratio()) {
+        snapshot.has_used_ratio = true;
+        snapshot.max_used_ratio = std::max(
+            snapshot.max_used_ratio, std::clamp(dp.kv_used_ratio(), 0.0, 1.0));
+      }
+      if (dp.has_kv_free_blocks()) {
+        snapshot.has_free_blocks = true;
+        min_free_blocks = std::min(min_free_blocks, dp.kv_free_blocks());
+        if (std::numeric_limits<uint64_t>::max() - snapshot.total_free_blocks <
+            dp.kv_free_blocks()) {
+          snapshot.total_free_blocks = std::numeric_limits<uint64_t>::max();
+        } else {
+          snapshot.total_free_blocks += dp.kv_free_blocks();
+        }
+      }
+    }
+    if (engine_reporting) {
+      ++snapshot.reporting_engines;
+    }
+  }
+  if (snapshot.has_free_blocks) {
+    snapshot.min_free_blocks = min_free_blocks;
+  }
+  return snapshot;
+}
+
 bool EngineRegistry::registry_known() const {
   std::shared_lock lock(mutex_);
   return registry_known_;

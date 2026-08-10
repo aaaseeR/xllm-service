@@ -187,7 +187,7 @@ TEST(AnthropicAdapterTest, IgnoresUnknownJsonFields) {
   auto request = parse_request(R"({
     "model": "test-model",
     "max_tokens": 8,
-    "metadata": {"trace": "x"},
+    "metadata": {"trace": "x", "user_id": "anthropic-user-7"},
     "unknown_top_level": true,
     "messages": [
       {
@@ -204,6 +204,7 @@ TEST(AnthropicAdapterTest, IgnoresUnknownJsonFields) {
   ASSERT_TRUE(result.ok) << result.error;
   ASSERT_EQ(chat_request.messages_size(), 1);
   EXPECT_EQ(chat_request.messages(0).content(), "hello");
+  EXPECT_EQ(chat_request.user(), "anthropic-user-7");
 }
 
 TEST(AnthropicAdapterTest, RejectsEmptyMessages) {

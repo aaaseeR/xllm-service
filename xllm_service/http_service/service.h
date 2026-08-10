@@ -28,6 +28,7 @@ limitations under the License.
 #include "completion.pb.h"
 #include "request/request.h"
 #include "request_tracer.h"
+#include "request_trust_policy.h"
 #include "xllm_http_service.pb.h"
 
 namespace xllm_service {
@@ -124,6 +125,8 @@ class XllmHttpServiceImpl final : public proto::XllmHttpService {
   bool initialized_ = false;
 
   std::unique_ptr<RequestTracer> request_tracer_;
+
+  KVSessionTokenCodec kv_session_token_codec_;
 
   std::unique_ptr<ThreadPool> thread_pool_;
 };

@@ -465,6 +465,13 @@ AnthropicAdaptResult fill_chat_req(
   chat_request->Clear();
   messages->clear();
   fill_generation_params(anthropic_request, chat_request);
+  if (anthropic_request.has_metadata()) {
+    const auto user_id = anthropic_request.metadata().fields().find("user_id");
+    if (user_id != anthropic_request.metadata().fields().end() &&
+        user_id->second.kind_case() == google::protobuf::Value::kStringValue) {
+      chat_request->set_user(user_id->second.string_value());
+    }
+  }
   auto tool_result = add_tool_defs(anthropic_request, chat_request);
   if (!tool_result.ok) {
     return tool_result;

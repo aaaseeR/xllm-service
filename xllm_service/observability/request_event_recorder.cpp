@@ -324,25 +324,9 @@ std::string format_request_event_log(const xllm::proto::RequestEvent& event) {
     output["shadow_prefill_host_hit_tokens_ub"] =
         workload.shadow_prefill_host_hit_tokens_ub();
   }
-  if (workload.has_shadow_prefill_ssd_hit_tokens_ub()) {
-    output["shadow_prefill_ssd_hit_tokens_ub"] =
-        workload.shadow_prefill_ssd_hit_tokens_ub();
-  }
-  if (workload.has_shadow_prefill_store_hit_tokens_ub()) {
-    output["shadow_prefill_store_hit_tokens_ub"] =
-        workload.shadow_prefill_store_hit_tokens_ub();
-  }
   if (workload.has_shadow_decode_host_hit_tokens_ub()) {
     output["shadow_decode_host_hit_tokens_ub"] =
         workload.shadow_decode_host_hit_tokens_ub();
-  }
-  if (workload.has_shadow_decode_ssd_hit_tokens_ub()) {
-    output["shadow_decode_ssd_hit_tokens_ub"] =
-        workload.shadow_decode_ssd_hit_tokens_ub();
-  }
-  if (workload.has_shadow_decode_store_hit_tokens_ub()) {
-    output["shadow_decode_store_hit_tokens_ub"] =
-        workload.shadow_decode_store_hit_tokens_ub();
   }
   if (event.has_metric()) {
     const xllm::proto::RequestMetric& metric = event.metric();

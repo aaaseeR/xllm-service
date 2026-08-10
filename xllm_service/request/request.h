@@ -91,6 +91,10 @@ struct Request {
   const std::chrono::steady_clock::time_point trace_ingress_time =
       std::chrono::steady_clock::now();
   std::atomic<uint64_t> trace_next_event_seq{0};
+  std::atomic<bool> trace_route_failure_recorded{false};
+  std::atomic<int64_t> trace_d_admission_started_ns{0};
+  std::atomic<bool> trace_d_admission_terminal_recorded{false};
+  std::atomic<int64_t> trace_resource_release_started_ns{0};
   std::atomic<int64_t> trace_first_response_ns{0};
   std::atomic<int64_t> trace_last_response_ns{0};
   std::atomic<uint64_t> trace_first_response_output_tokens{0};

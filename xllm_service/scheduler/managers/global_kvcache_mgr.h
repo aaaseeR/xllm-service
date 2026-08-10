@@ -47,7 +47,7 @@ class GlobalKVCacheMgr final {
   void set_as_follower();
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(GlobalKVCacheMgr);
+  XLLM_SERVICE_DISALLOW_COPY_AND_ASSIGN(GlobalKVCacheMgr);
 
   void update_kvcache(const etcd::Response& response,
                       const uint64_t prefix_len);

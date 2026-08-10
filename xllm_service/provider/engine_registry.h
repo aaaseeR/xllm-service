@@ -46,6 +46,16 @@ enum class EngineStateFreshness : int8_t {
   HARD_STALE = 3,
 };
 
+struct EngineKVCapacitySnapshot {
+  size_t reporting_engines = 0;
+  size_t reporting_dp_ranks = 0;
+  double max_used_ratio = 0.0;
+  uint64_t min_free_blocks = 0;
+  uint64_t total_free_blocks = 0;
+  bool has_used_ratio = false;
+  bool has_free_blocks = false;
+};
+
 xllm::proto::ProviderEngineKey make_provider_engine_key(
     const xllm::proto::ProviderDescriptor& descriptor);
 
@@ -97,6 +107,8 @@ class EngineRegistry final {
                      const xllm::proto::ProviderEngineKey& decode,
                      uint64_t receiver_monotonic_ms) const;
   std::optional<ObservationSnapshot> observation_snapshot(
+      uint64_t receiver_monotonic_ms) const;
+  EngineKVCapacitySnapshot kv_capacity_snapshot(
       uint64_t receiver_monotonic_ms) const;
 
   bool registry_known() const;

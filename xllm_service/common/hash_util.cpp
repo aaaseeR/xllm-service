@@ -35,7 +35,7 @@ namespace xllm_service {
 namespace {
 
 constexpr std::string_view kCanonicalHashDomain = "xkvh-v1";
-constexpr std::string_view kRequestNamespaceDomain = "xkvns-request-v1";
+constexpr std::string_view kRequestNamespaceDomain = "xkvns-request-v2";
 constexpr size_t kMaxNamespaceComponentLength = 256;
 constexpr uint64_t kRequestNamespaceSeed = 0xd0c4b10c5e771a2bULL;
 
@@ -127,30 +127,27 @@ void xxh3_128bits_hash(std::string_view kv_namespace,
 }
 
 std::string derive_request_kv_namespace(std::string_view base_namespace,
-                                        std::string_view isolation_domain,
-                                        std::string_view adapter_identity) {
+                                        std::string_view isolation_domain) {
   if (base_namespace.empty() || isolation_domain.empty() ||
       base_namespace.size() > kMaxNamespaceComponentLength ||
-      isolation_domain.size() > kMaxNamespaceComponentLength ||
-      adapter_identity.size() > kMaxNamespaceComponentLength) {
+      isolation_domain.size() > kMaxNamespaceComponentLength) {
     return "";
   }
   std::vector<uint8_t> preimage;
   preimage.reserve(kRequestNamespaceDomain.size() + base_namespace.size() +
-                   isolation_domain.size() + adapter_identity.size() + 12);
+                   isolation_domain.size() + 8);
   preimage.insert(preimage.end(),
                   kRequestNamespaceDomain.begin(),
                   kRequestNamespaceDomain.end());
   append_bytes(base_namespace, &preimage);
   append_bytes(isolation_domain, &preimage);
-  append_bytes(adapter_identity, &preimage);
   const XXH128_hash_t digest = XXH3_128bits_withSeed(
       preimage.data(), preimage.size(), kRequestNamespaceSeed);
   std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> bytes{};
   write_u64_le(digest.low64, bytes.data());
   write_u64_le(digest.high64, bytes.data() + sizeof(digest.low64));
   constexpr char kHex[] = "0123456789abcdef";
-  std::string output = "xkvns-request-v1:";
+  std::string output = "xkvns-request-v2:";
   output.reserve(output.size() + bytes.size() * 2);
   for (const uint8_t byte : bytes) {
     output.push_back(kHex[byte >> 4]);

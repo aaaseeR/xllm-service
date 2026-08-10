@@ -63,6 +63,34 @@ bool recoverable_first_event_state(xllm::proto::AttemptLifecycleState state) {
 
 RequestOutputConversionResult request_output_from_disagg_generation(
     const proto::DisaggStreamGeneration& generation) {
+  const bool has_admission_disposition =
+      generation.has_decode_admission_disposition();
+  const bool has_admission_reason = generation.has_decode_admission_reason();
+  const bool has_admission_attempts =
+      generation.has_decode_admission_attempts();
+  const bool has_admission_duration =
+      generation.has_decode_admission_rpc_duration_ns();
+  if (has_admission_disposition != has_admission_reason ||
+      has_admission_disposition != has_admission_attempts ||
+      has_admission_disposition != has_admission_duration ||
+      (has_admission_disposition &&
+       (!xllm::proto::AdmissionDisposition_IsValid(
+            generation.decode_admission_disposition()) ||
+        generation.decode_admission_disposition() ==
+            xllm::proto::ADMISSION_DISPOSITION_UNSPECIFIED ||
+        !xllm::proto::AdmissionReason_IsValid(
+            generation.decode_admission_reason()) ||
+        generation.decode_admission_reason() ==
+            xllm::proto::ADMISSION_REASON_UNSPECIFIED ||
+        ((generation.decode_admission_disposition() ==
+          xllm::proto::ADMISSION_DISPOSITION_ACCEPTED) !=
+         (generation.decode_admission_reason() ==
+          xllm::proto::ADMISSION_REASON_NONE)) ||
+        generation.decode_admission_attempts() == 0))) {
+    return {llm::Status(llm::StatusCode::INVALID_ARGUMENT,
+                        "Invalid Decode admission observation"),
+            std::nullopt};
+  }
   if (generation.has_usage()) {
     RequestOutputConversionResult validation =
         validate_usage(generation.usage());
@@ -106,6 +134,16 @@ RequestOutputConversionResult request_output_from_disagg_generation(
   }
   request_output.sender_engine_uid = generation.sender_engine_uid();
   request_output.sender_incarnation_id = generation.sender_incarnation_id();
+  if (has_admission_disposition) {
+    request_output.decode_admission_disposition =
+        generation.decode_admission_disposition();
+    request_output.decode_admission_reason =
+        generation.decode_admission_reason();
+    request_output.decode_admission_attempts =
+        generation.decode_admission_attempts();
+    request_output.decode_admission_rpc_duration_ns =
+        generation.decode_admission_rpc_duration_ns();
+  }
   request_output.outputs.reserve(generation.outputs_size());
   for (const proto::SequenceOutput& output : generation.outputs()) {
     llm::SequenceOutput sequence_output;

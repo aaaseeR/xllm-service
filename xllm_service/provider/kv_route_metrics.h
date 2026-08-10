@@ -51,11 +51,7 @@ struct KVRouteMetricsSnapshot {
   uint64_t predicted_effective_prefill_tokens = 0;
   uint64_t predicted_transfer_bytes = 0;
   uint64_t shadow_prefill_host_hit_tokens_ub = 0;
-  uint64_t shadow_prefill_ssd_hit_tokens_ub = 0;
-  uint64_t shadow_prefill_store_hit_tokens_ub = 0;
   uint64_t shadow_decode_host_hit_tokens_ub = 0;
-  uint64_t shadow_decode_ssd_hit_tokens_ub = 0;
-  uint64_t shadow_decode_store_hit_tokens_ub = 0;
   uint64_t actual_hit_tokens = 0;
   uint64_t actual_decode_hit_tokens = 0;
   uint64_t actual_prefill_tokens = 0;
@@ -95,11 +91,7 @@ class KVRouteMetrics final {
   std::atomic<uint64_t> predicted_effective_prefill_tokens_ = 0;
   std::atomic<uint64_t> predicted_transfer_bytes_ = 0;
   std::atomic<uint64_t> shadow_prefill_host_hit_tokens_ub_ = 0;
-  std::atomic<uint64_t> shadow_prefill_ssd_hit_tokens_ub_ = 0;
-  std::atomic<uint64_t> shadow_prefill_store_hit_tokens_ub_ = 0;
   std::atomic<uint64_t> shadow_decode_host_hit_tokens_ub_ = 0;
-  std::atomic<uint64_t> shadow_decode_ssd_hit_tokens_ub_ = 0;
-  std::atomic<uint64_t> shadow_decode_store_hit_tokens_ub_ = 0;
   std::atomic<uint64_t> actual_hit_tokens_ = 0;
   std::atomic<uint64_t> actual_decode_hit_tokens_ = 0;
   std::atomic<uint64_t> actual_prefill_tokens_ = 0;

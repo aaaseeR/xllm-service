@@ -31,7 +31,7 @@ class SloAwarePolicy final : public LoadBalancePolicy {
   bool select_instances_pair(std::shared_ptr<Request> request) override;
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(SloAwarePolicy);
+  XLLM_SERVICE_DISALLOW_COPY_AND_ASSIGN(SloAwarePolicy);
 
   Options options_;
 };

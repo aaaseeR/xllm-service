@@ -99,8 +99,9 @@ CPU/Torch CPU 可达路径、simulated HBM、双 Provider CPU conformance、压�
 1. 所有索引、队列、pending work、负缓存、credit 和观测按 model revision + provider
    profile + KV namespace 隔离；多模型之间不能互相命中、占用配额或污染校准。
 2. K2 将 priority/tenant fairness 与 KV/load 选择组合，但 correctness 路径仍是单一
-   Resolver + Engine 原子 admission；低层 tier 只发布 shadow credit，不暗示 V2.5
-   Store 数据路径已经交付。
+   Resolver + Engine 原子 admission；V2 的 HBM/HOST 均有真实 prefix-leaf producer，
+   HOST 只发布 shadow credit。SSD/STORE 已删除并 reserved，不暗示后续 Store 数据路径
+   已经交付。
 3. xLLM Native REMOTE_PD/LOCAL/PREFILL_ONLY 与 vLLM-Ascend AGGREGATED 的支持矩阵、
    稳定拒绝组合、API/SSE/cancel/deadline/fencing/drain 均有 conformance 证据；跨
    Provider P/D 保持关闭并有负向测试。

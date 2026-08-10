@@ -21,9 +21,9 @@ limitations under the License.
 #include <queue>
 
 #if __has_attribute(guarded_by)
-#define GUARDED_BY(x) __attribute__((guarded_by(x)))
+#define XLLM_SERVICE_QUEUE_GUARDED_BY(x) __attribute__((guarded_by(x)))
 #else
-#define GUARDED_BY(x)
+#define XLLM_SERVICE_QUEUE_GUARDED_BY(x)
 #endif
 
 namespace xllm_service {
@@ -88,7 +88,7 @@ class ConcurrentQueue {
 
  private:
   // the underlying queue
-  std::queue<T> queue_ GUARDED_BY(mutex_);
+  std::queue<T> queue_ XLLM_SERVICE_QUEUE_GUARDED_BY(mutex_);
   // mutex lock for the queue
   absl::Mutex mutex_;
 

@@ -182,6 +182,55 @@ void set_registry_view(EngineRegistry* registry, std::string master) {
   ASSERT_TRUE(registry->set_state_stream_master(std::move(master)).ok());
 }
 
+TEST(EngineRegistryTest, KVCapacitySnapshotAggregatesFreshDpState) {
+  EngineRegistry registry(test_config());
+  xllm::proto::ProviderDescriptor descriptor = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p0", "inc-1", "profile-1");
+  descriptor.mutable_topology()->set_dp(2);
+  descriptor.add_capabilities(xllm::proto::PROVIDER_CAPABILITY_PER_DP_STATE);
+  ASSERT_TRUE(registry.upsert_member(descriptor).ok());
+  xllm::proto::EngineState state = make_state(descriptor, 1);
+  xllm::proto::PerDpEngineState* dp0 = state.add_per_dp();
+  dp0->set_dp_rank(0);
+  dp0->set_kv_used_ratio(0.25);
+  dp0->set_kv_free_blocks(40);
+  xllm::proto::PerDpEngineState* dp1 = state.add_per_dp();
+  dp1->set_dp_rank(1);
+  dp1->set_kv_used_ratio(0.75);
+  dp1->set_kv_free_blocks(10);
+  bool applied = false;
+  const ContractResult recorded =
+      registry.record_engine_state(state, 100, &applied);
+  ASSERT_TRUE(recorded.ok()) << recorded.message();
+  ASSERT_TRUE(applied);
+
+  const EngineKVCapacitySnapshot fresh = registry.kv_capacity_snapshot(105);
+  EXPECT_EQ(fresh.reporting_engines, 1u);
+  EXPECT_EQ(fresh.reporting_dp_ranks, 2u);
+  EXPECT_TRUE(fresh.has_used_ratio);
+  EXPECT_DOUBLE_EQ(fresh.max_used_ratio, 0.75);
+  EXPECT_TRUE(fresh.has_free_blocks);
+  EXPECT_EQ(fresh.min_free_blocks, 10u);
+  EXPECT_EQ(fresh.total_free_blocks, 50u);
+
+  state.set_state_seq(2);
+  state.set_heartbeat_age_ms_at_publish(16);
+  ASSERT_TRUE(registry.record_engine_state(state, 100, &applied).ok());
+  ASSERT_TRUE(applied);
+  const EngineKVCapacitySnapshot heartbeat_stale =
+      registry.kv_capacity_snapshot(105);
+  EXPECT_EQ(heartbeat_stale.reporting_engines, 0u);
+
+  state.set_state_seq(3);
+  state.set_heartbeat_age_ms_at_publish(0);
+  ASSERT_TRUE(registry.record_engine_state(state, 100, &applied).ok());
+  ASSERT_TRUE(applied);
+  const EngineKVCapacitySnapshot stale = registry.kv_capacity_snapshot(121);
+  EXPECT_EQ(stale.reporting_engines, 0u);
+  EXPECT_FALSE(stale.has_used_ratio);
+  EXPECT_FALSE(stale.has_free_blocks);
+}
+
 TEST(EngineRegistryTest, RequiresCurrentMasterFullBeforeScheduling) {
   EngineRegistry registry(test_config());
   const xllm::proto::ProviderDescriptor prefill = make_descriptor(

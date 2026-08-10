@@ -60,7 +60,7 @@ class ClosureGuard {
 
  private:
   // Copying this object makes no sense.
-  DISALLOW_COPY_AND_ASSIGN(ClosureGuard);
+  XLLM_SERVICE_DISALLOW_COPY_AND_ASSIGN(ClosureGuard);
 
   google::protobuf::Closure* done_ = nullptr;
 };

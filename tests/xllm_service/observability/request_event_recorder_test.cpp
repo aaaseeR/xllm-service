@@ -117,7 +117,6 @@ TEST(RequestEventRecorderTest, StructuredLogPreservesTraceWithoutContent) {
   event.mutable_workload()->set_predicted_prefill_hit_tokens(0);
   event.mutable_workload()->set_actual_decode_hit_tokens(11);
   event.mutable_workload()->set_shadow_prefill_host_hit_tokens_ub(13);
-  event.mutable_workload()->set_shadow_decode_store_hit_tokens_ub(7);
 
   const nlohmann::json output =
       nlohmann::json::parse(format_request_event_log(event));
@@ -129,7 +128,6 @@ TEST(RequestEventRecorderTest, StructuredLogPreservesTraceWithoutContent) {
   EXPECT_EQ(output.at("predicted_prefill_hit_tokens"), 0);
   EXPECT_EQ(output.at("actual_decode_hit_tokens"), 11);
   EXPECT_EQ(output.at("shadow_prefill_host_hit_tokens_ub"), 13);
-  EXPECT_EQ(output.at("shadow_decode_store_hit_tokens_ub"), 7);
   EXPECT_FALSE(output.contains("prompt"));
   EXPECT_FALSE(output.contains("output"));
   EXPECT_FALSE(output.contains("token_ids"));

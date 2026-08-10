@@ -31,40 +31,40 @@ using SpecialToken = std::pair<std::string, int32_t>;
 
 struct TokenizerArgs {
   // Type of tokenizer to use. valid values are "sentencepiece" and "tiktoken".
-  PROPERTY(std::string, tokenizer_type) = "sentencepiece";
+  XLLM_SERVICE_PROPERTY(std::string, tokenizer_type) = "sentencepiece";
 
   // Vocab file name.
-  PROPERTY(std::string, vocab_file) = "tokenizer.model";
+  XLLM_SERVICE_PROPERTY(std::string, vocab_file) = "tokenizer.model";
 
   // Special tokens to add to the vocabulary.
-  PROPERTY(std::vector<SpecialToken>, special_tokens);
+  XLLM_SERVICE_PROPERTY(std::vector<SpecialToken>, special_tokens);
 
   // Regex pattern used by tiktok tokenizer only.
-  PROPERTY(std::string, pattern);
+  XLLM_SERVICE_PROPERTY(std::string, pattern);
 
   // tokens to add to the beginning of the input sequence.
-  PROPERTY(std::vector<std::string>, prefix_tokens);
+  XLLM_SERVICE_PROPERTY(std::vector<std::string>, prefix_tokens);
 
   // chat template
-  PROPERTY(std::string, chat_template);
+  XLLM_SERVICE_PROPERTY(std::string, chat_template);
 
   // add_bos_token
-  PROPERTY(bool, add_bos_token) = false;
+  XLLM_SERVICE_PROPERTY(bool, add_bos_token) = false;
 
   // add_eos_token
-  PROPERTY(bool, add_eos_token) = false;
+  XLLM_SERVICE_PROPERTY(bool, add_eos_token) = false;
 
   // bos_token
-  PROPERTY(std::string, bos_token);
+  XLLM_SERVICE_PROPERTY(std::string, bos_token);
 
   // eos_token
-  PROPERTY(std::string, eos_token);
+  XLLM_SERVICE_PROPERTY(std::string, eos_token);
 
   // pad_token
-  PROPERTY(std::string, pad_token);
+  XLLM_SERVICE_PROPERTY(std::string, pad_token);
 
   // tokenizer_class
-  PROPERTY(std::string, tokenizer_class);
+  XLLM_SERVICE_PROPERTY(std::string, tokenizer_class);
 };
 
 inline std::ostream& operator<<(std::ostream& os, const TokenizerArgs& args) {

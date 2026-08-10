@@ -119,6 +119,8 @@ class InstanceMgr final {
   bool has_accepted_engine_state_full_snapshot() const;
   std::optional<provider::ObservationSnapshot> engine_observation_snapshot(
       uint64_t receiver_monotonic_ms) const;
+  provider::EngineKVCapacitySnapshot engine_kv_capacity_snapshot(
+      uint64_t receiver_monotonic_ms) const;
   size_t engine_member_count() const;
   size_t engine_state_count() const;
   size_t engine_link_count() const;
@@ -148,7 +150,7 @@ class InstanceMgr final {
   bool has_available_instances_at(uint64_t now_monotonic_ms) const;
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(InstanceMgr);
+  XLLM_SERVICE_DISALLOW_COPY_AND_ASSIGN(InstanceMgr);
 
   void init();
 

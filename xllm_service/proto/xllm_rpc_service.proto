@@ -180,6 +180,12 @@ message DisaggStreamGeneration {
   optional uint64 attempt_seq = 9;
   string sender_engine_uid = 10;
   string sender_incarnation_id = 11;
+  // Wire-compatible with xLLM's DisaggStreamGeneration. Service closes its
+  // D_ADMISSION event only from this Engine-observed result.
+  optional xllm.proto.AdmissionDisposition decode_admission_disposition = 12;
+  optional xllm.proto.AdmissionReason decode_admission_reason = 13;
+  optional uint32 decode_admission_attempts = 14;
+  optional uint64 decode_admission_rpc_duration_ns = 15;
 }
 
 message DisaggStreamGenerations {

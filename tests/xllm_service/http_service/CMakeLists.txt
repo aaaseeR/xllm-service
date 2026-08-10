@@ -34,6 +34,16 @@ cc_test(
 
 cc_test(
   NAME
+    request_trust_policy_test
+  SRCS
+    request_trust_policy_test.cpp
+  DEPS
+    :request_trust_policy
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     usage_proto_adapter_test
   SRCS
     usage_proto_adapter_test.cpp

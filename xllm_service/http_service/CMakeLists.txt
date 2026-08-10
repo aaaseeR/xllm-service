@@ -27,6 +27,18 @@ cc_library(
 
 cc_library(
   NAME
+    request_trust_policy
+  HDRS
+    request_trust_policy.h
+  SRCS
+    request_trust_policy.cpp
+  DEPS
+    glog::glog
+)
+target_link_libraries(request_trust_policy PUBLIC OpenSSL::Crypto)
+
+cc_library(
+  NAME
     anthropic_adapter
   HDRS
     anthropic_adapter.h
@@ -87,6 +99,7 @@ cc_library(
   HDRS
     health_response.h
     request_execution_context.h
+    request_trust_policy.h
     sse_terminal_marker.h
     service.h
     request_tracer.h
@@ -100,6 +113,7 @@ cc_library(
     :common
     :health_response
     :request_identity
+    :request_trust_policy
     :request
     :scheduler
     absl::random_random

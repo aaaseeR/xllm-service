@@ -97,6 +97,9 @@ struct FlowControlSnapshot {
   uint64_t queued_bytes = 0;
   uint64_t dispatched_context_bytes = 0;
   size_t blind_probes_inflight = 0;
+  size_t active_model_accounts = 0;
+  size_t active_tenant_accounts = 0;
+  size_t active_queued_flows = 0;
 };
 
 struct FlowControlAdmission {
@@ -156,13 +159,22 @@ class FlowControlQueue final {
     uint64_t queued_bytes = 0;
   };
 
+  struct RoundRobinState {
+    uint64_t turn = 0;
+    size_t queued_requests = 0;
+  };
+
   bool has_capacity_locked(const FlowControlWork& work) const;
   uint64_t earliest_dispatch_ms_ub_locked(const FlowControlWork& work,
                                           SaturationState state) const;
   std::optional<std::string> select_next_locked(TimePoint now,
                                                 bool allow_strict) const;
+  void activate_queued_work_locked(const FlowControlWork& work);
+  void remove_queued_work_locked(const FlowControlWork& work);
+  void rotate_queued_work_after_dispatch_locked(const FlowControlWork& work);
   void erase_queued_locked(std::unordered_map<std::string, Entry>::iterator it);
-  void decrement_dispatched_locked(const Entry& entry);
+  void decrement_dispatched_locked(const Entry& entry, bool erase_empty_usage);
+  void erase_empty_usage_locked(const FlowControlWork& work);
 
   FlowControlConfig config_;
   bool valid_ = false;
@@ -172,7 +184,10 @@ class FlowControlQueue final {
   Usage service_usage_;
   std::unordered_map<std::string, Usage> model_usage_;
   std::unordered_map<std::string, Usage> tenant_usage_;
-  std::unordered_map<std::string, uint64_t> flow_dispatch_count_;
+  std::unordered_map<std::string, RoundRobinState> tenant_round_robin_;
+  std::unordered_map<std::string, RoundRobinState> flow_round_robin_;
+  uint64_t next_tenant_turn_ = 0;
+  uint64_t next_flow_turn_ = 0;
   uint64_t next_enqueue_sequence_ = 0;
   int32_t last_priority_band_ = 0;
   size_t consecutive_priority_dispatches_ = 0;

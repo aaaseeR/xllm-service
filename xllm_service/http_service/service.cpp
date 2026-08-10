@@ -43,6 +43,7 @@ limitations under the License.
 #include "http_service/chat_json_parser.h"
 #include "http_service/health_response.h"
 #include "http_service/request_execution_context.h"
+#include "http_service/request_trust_policy.h"
 #include "http_service/sse_terminal_marker.h"
 #include "observability/request_identity.h"
 #include "provider/attempt_control_client.h"
@@ -54,6 +55,21 @@ limitations under the License.
 namespace xllm_service {
 
 namespace {
+
+KVSessionTokenCodec make_kv_session_token_codec(const Options& options) {
+  if (options.kv_session_hmac_secret().empty()) {
+    LOG(WARNING) << "No shared KV session signing secret configured; tokens "
+                    "remain secure but require sticky Service routing for "
+                    "cross-request prefix reuse";
+    return KVSessionTokenCodec::random(options.kv_session_token_ttl_seconds());
+  }
+  std::optional<KVSessionTokenCodec> codec = KVSessionTokenCodec::from_secrets(
+      options.kv_session_hmac_secret(),
+      options.kv_session_hmac_previous_secret(),
+      options.kv_session_token_ttl_seconds());
+  CHECK(codec.has_value()) << "Invalid KV session signing secret";
+  return std::move(*codec);
+}
 
 std::string first_header_value(
     const brpc::Controller* controller,
@@ -116,7 +132,7 @@ bool schedule_request(Scheduler* scheduler,
   return false;
 }
 
-const char* admission_error_message(FlowControlStatus status) {
+const char* flow_control_status_name(FlowControlStatus status) {
   switch (status) {
     case FlowControlStatus::QUEUE_CAPACITY_EXHAUSTED:
       return "QUEUE_CAPACITY_EXHAUSTED";
@@ -124,12 +140,39 @@ const char* admission_error_message(FlowControlStatus status) {
       return "QUEUE_DEADLINE_UNSATISFIABLE";
     case FlowControlStatus::DUPLICATE_REQUEST:
       return "DUPLICATE_REQUEST";
-    case FlowControlStatus::OK:
     case FlowControlStatus::UNKNOWN_REQUEST:
+      return "UNKNOWN_REQUEST";
     case FlowControlStatus::INVALID_ARGUMENT:
-      return "Internal runtime error.";
+      return "INVALID_ARGUMENT";
+    case FlowControlStatus::OK:
+      return "OK";
   }
-  return "Internal runtime error.";
+  return "UNRECOGNIZED";
+}
+
+std::string admission_error_message(const Request& request,
+                                    const Scheduler& scheduler) {
+  const FlowControlSnapshot flow = scheduler.flow_control_snapshot();
+  return std::string("FLOW_CONTROL_REJECTED status=") +
+         flow_control_status_name(request.admission_status) +
+         "; request_uid=" + request.correlation.request_uid() +
+         "; queued_requests=" + std::to_string(flow.queued_requests) +
+         "; dispatched_requests=" + std::to_string(flow.dispatched_requests);
+}
+
+std::string bounded_public_message(const std::string& message) {
+  constexpr size_t kMaxPublicMessageBytes = 256;
+  std::string result;
+  result.reserve(std::min(message.size(), kMaxPublicMessageBytes));
+  for (unsigned char character : message) {
+    if (result.size() == kMaxPublicMessageBytes) {
+      break;
+    }
+    result.push_back(character >= 0x20 && character != 0x7f
+                         ? static_cast<char>(character)
+                         : ' ');
+  }
+  return result;
 }
 
 std::string proto_json(const google::protobuf::Message& message) {
@@ -215,7 +258,9 @@ std::vector<JsonTool> parse_tools_from_proto(
 
 XllmHttpServiceImpl::XllmHttpServiceImpl(const Options& options,
                                          Scheduler* scheduler)
-    : options_(options), scheduler_(scheduler) {
+    : options_(options),
+      scheduler_(scheduler),
+      kv_session_token_codec_(make_kv_session_token_codec(options)) {
   initialized_ = true;
   thread_pool_ = std::make_unique<ThreadPool>(options_.num_threads());
   request_tracer_ =
@@ -265,7 +310,7 @@ void handle_first_send_request(brpc::Controller* cntl,
                                std::shared_ptr<brpc::Channel> channel) {
   std::unique_ptr<brpc::Controller> cntl_guard(cntl);
   std::unique_ptr<RequestProto> request_guard(request_pb);
-  UNUSED_PARAMETER(channel);
+  XLLM_SERVICE_UNUSED_PARAMETER(channel);
   scheduler->record_direct_engine_evidence(
       instance_name, incarnation_id, !cntl->Failed());
   if (cntl->Failed()) {
@@ -411,7 +456,7 @@ void handle_vllm_stream_done(brpc::Controller* redirect_cntl,
                              std::string incarnation_id,
                              std::shared_ptr<Request> request,
                              std::shared_ptr<brpc::Channel> channel) {
-  UNUSED_PARAMETER(channel);
+  XLLM_SERVICE_UNUSED_PARAMETER(channel);
   const int32_t status_code = redirect_cntl->http_response().status_code();
   const bool success =
       !redirect_cntl->Failed() && status_code >= 200 && status_code < 300;
@@ -455,7 +500,7 @@ void handle_vllm_non_stream_done(brpc::Controller* redirect_cntl,
                                  std::string incarnation_id,
                                  std::shared_ptr<Request> request,
                                  std::shared_ptr<brpc::Channel> channel) {
-  UNUSED_PARAMETER(channel);
+  XLLM_SERVICE_UNUSED_PARAMETER(channel);
   const int32_t status_code = redirect_cntl->http_response().status_code();
   bool success =
       !redirect_cntl->Failed() && status_code >= 200 && status_code < 300;
@@ -642,7 +687,7 @@ void XllmHttpServiceImpl::handle(std::shared_ptr<T> call_data,
     LOG(ERROR) << "rpc service add new request error: "
                << request->correlation.request_uid();
     call_data->finish_with_error(
-        admission_error_message(request->admission_status));
+        admission_error_message(*request, *scheduler_));
     return;
   }
 }
@@ -660,19 +705,38 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
       observability::make_request_correlation(correlation_input(controller));
   const std::string tenant_header =
       first_header_value(controller, {"x-tenant-id", "x-jd-tenant-id"});
-  if (options_.trusted_tenant_headers_enabled() && !tenant_header.empty()) {
-    request->tenant_id = tenant_header;
-    request->flow_id = first_header_value(controller, {"x-flow-id"});
-    if (request->flow_id.empty()) {
-      request->flow_id = request->tenant_id;
-    }
-    request->kv_isolation_domain = request->tenant_id;
-    request->kv_isolation_reusable = true;
-  } else {
-    request->tenant_id = "anonymous";
-    request->flow_id = "anonymous";
-    request->kv_isolation_domain = request->correlation.request_uid();
-    request->kv_isolation_reusable = false;
+  const std::optional<int32_t> requested_priority =
+      req_pb->has_priority()
+          ? std::optional<int32_t>(static_cast<int32_t>(req_pb->priority()))
+          : std::nullopt;
+  const std::optional<RequestTrustDecision> trust = decide_request_trust(
+      RequestTrustInput{
+          .trusted_tenant_headers_enabled =
+              options_.trusted_tenant_headers_enabled(),
+          .tenant_header = tenant_header,
+          .flow_header = first_header_value(controller, {"x-flow-id"}),
+          .kv_session_token =
+              first_header_value(controller, {"x-xllm-kv-session"}),
+          .authenticated_client = first_header_value(
+              controller, {"authorization", "x-api-key", "api-key"}),
+          .client_session_hint = req_pb->user(),
+          .request_uid = request->correlation.request_uid(),
+          .requested_priority = requested_priority,
+      },
+      kv_session_token_codec_);
+  if (!trust.has_value()) {
+    LOG(ERROR) << "Failed to establish the request trust boundary.";
+    controller->SetFailed("REQUEST_TRUST_REJECTED; request_uid=" +
+                          request->correlation.request_uid());
+    return nullptr;
+  }
+  request->tenant_id = trust->tenant_id;
+  request->flow_id = trust->flow_id;
+  request->kv_isolation_domain = trust->kv_isolation_domain;
+  request->kv_isolation_reusable = trust->kv_isolation_reusable;
+  if (!trust->issued_kv_session_token.empty()) {
+    controller->http_response().SetHeader("X-Xllm-KV-Session",
+                                          trust->issued_kv_session_token);
   }
   request->first_event_retry_policy =
       xllm::FirstEventRetryPolicy::from_durations_ms(
@@ -710,10 +774,16 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
   if ((req_pb->has_ttft_slo_ms() && req_pb->ttft_slo_ms() <= 0) ||
       (req_pb->has_tpot_slo_ms() && req_pb->tpot_slo_ms() <= 0)) {
     LOG(ERROR) << "Request SLO durations must be positive.";
+    controller->SetFailed(
+        "INVALID_REQUEST_SLO: durations must be positive; "
+        "request_uid=" +
+        request->correlation.request_uid());
     return nullptr;
   }
   if (!request->request_deadline.has_value()) {
     LOG(ERROR) << "Canonical request has no local deadline.";
+    controller->SetFailed("INVALID_REQUEST_DEADLINE; request_uid=" +
+                          request->correlation.request_uid());
     return nullptr;
   }
 
@@ -728,8 +798,7 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
       req_pb->has_max_tokens() ? req_pb->max_tokens() : 5120;
   canonical_input.n = n;
   canonical_input.best_of = req_pb->has_best_of() ? req_pb->best_of() : n;
-  canonical_input.priority =
-      req_pb->has_priority() ? static_cast<int32_t>(req_pb->priority()) : 0;
+  canonical_input.priority = trust->effective_priority;
   canonical_input.remaining_deadline_ms =
       request->request_deadline->remaining_ms();
   if (req_pb->has_ttft_slo_ms()) {
@@ -744,6 +813,11 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
   if (!canonical_result.ok()) {
     LOG(ERROR) << "Canonical request validation failed: "
                << canonical_result.message();
+    controller->SetFailed(
+        "CANONICAL_REQUEST_REJECTED code=" +
+        xllm::proto::ProviderContractError_Name(canonical_result.error()) +
+        "; reason=" + bounded_public_message(canonical_result.message()) +
+        "; request_uid=" + request->correlation.request_uid());
     return nullptr;
   }
   request->canonical_request = std::move(canonical);
@@ -876,7 +950,9 @@ void XllmHttpServiceImpl::Completions(
                                           provider::kOpenAiHttpJsonSchema,
                                           attachment);
   if (service_request == nullptr) {
-    cntl->SetFailed("Canonical request validation failed!");
+    if (!cntl->Failed()) {
+      cntl->SetFailed("REQUEST_VALIDATION_FAILED");
+    }
     return;
   }
 
@@ -921,7 +997,7 @@ void XllmHttpServiceImpl::Completions(
         };
     if (!scheduler_->record_new_request(call_data, service_request)) {
       call_data->finish_with_error(
-          admission_error_message(service_request->admission_status));
+          admission_error_message(*service_request, *scheduler_));
       return;
     }
     return;
@@ -994,7 +1070,9 @@ void XllmHttpServiceImpl::ChatCompletions(
                        provider::kOpenAiHttpJsonSchema,
                        attachment);
   if (service_request == nullptr) {
-    cntl->SetFailed("Canonical request validation failed!");
+    if (!cntl->Failed()) {
+      cntl->SetFailed("REQUEST_VALIDATION_FAILED");
+    }
     return;
   }
 
@@ -1071,7 +1149,7 @@ void XllmHttpServiceImpl::ChatCompletions(
         };
     if (!scheduler_->record_new_request(call_data, service_request)) {
       call_data->finish_with_error(
-          admission_error_message(service_request->admission_status));
+          admission_error_message(*service_request, *scheduler_));
       return;
     }
     return;
@@ -1144,7 +1222,9 @@ void XllmHttpServiceImpl::AnthropicMessages(
                        provider::kAnthropicHttpJsonSchema,
                        attachment);
   if (service_request == nullptr) {
-    cntl->SetFailed("Canonical request validation failed!");
+    if (!cntl->Failed()) {
+      cntl->SetFailed("REQUEST_VALIDATION_FAILED");
+    }
     return;
   }
   auto tracer = make_anthropic_tracer(service_request);

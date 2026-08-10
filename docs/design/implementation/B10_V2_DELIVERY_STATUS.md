@@ -15,15 +15,15 @@ limitations under the License.
 
 # V2-B10 首版代码交付状态
 
-更新时间：2026-08-09
+更新时间：2026-08-10
 状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
 
 ## 结论
 
 首个版本按设计直接交付 V2，没有独立 V1。B0-B10 的仓库内生产代码、公共协议、
-CPU 可达链路、simulated HBM、支持矩阵和运维文档已闭环；代码可以进入 NPU 与真实
-集群验证。`CPU_VERIFIED` 只证明控制面、协议、状态机、host 资源和模拟 HBM 不变量，
-不证明 CANN、真实 HBM/DMA/Link、设备吞吐或生产 SLO。
+CPU 可达链路、生产 BlockManager 资源适配、simulated HBM、支持矩阵和运维文档已闭环；
+代码可以进入 NPU 与真实集群验证。`CPU_VERIFIED` 只证明控制面、协议、状态机、host
+资源和模拟 HBM 不变量，不证明 CANN、真实 HBM/DMA/Link、设备吞吐或生产 SLO。
 
 ## 支持矩阵
 
@@ -34,7 +34,8 @@ CPU 可达链路、simulated HBM、支持矩阵和运维文档已闭环；代码
 | xLLM Native | `PREFILL_ONLY/NONE/P_ONLY` | CPU_VERIFIED；输出上限、单 P 计划与无 execution holder 语义闭环 | NPU 输出一致性和资源回收 |
 | vLLM-Ascend | `AGGREGATED/NONE/SINGLE` | CPU_VERIFIED；严格 Agent、唯一 ingress、attempt/deadline/fencing、cancel/query loopback | vLLM Ascend NPU、同命部署、原始端口隔离和 soak |
 | 任意跨 Provider P/D | 任意 split | 稳定拒绝；selector、compatibility 和负向测试覆盖 | V2 明确不支持，不是待开开关 |
-| HOST/SSD/Store 数据路径 | 分层 KV | 未交付；仅发布 `_ub` shadow credit | 属于 V2.5，不能按 V2 能力宣传 |
+| HOST tier | 分层 KV | CPU_VERIFIED；hierarchy host prefix leaf 发布，Service 仅作 bounded shadow upper bound | 真实 D2H/H2D、带宽和 NPU 长时回收待验证 |
+| SSD/STORE 数据路径 | 分层 KV | V2 不支持；wire/query 已删除并 reserved | 后续版本需独立 producer、搬运、成本与故障契约 |
 
 ## B10 完成范围
 
@@ -42,16 +43,19 @@ CPU 可达链路、simulated HBM、支持矩阵和运维文档已闭环；代码
   都按精确 model revision 过滤。Descriptor-less contract-v0 仅保留显式
   BEST_EFFORT 兼容，不获得 V2 多模型声明。
 - tenant/KV 隔离：租户/flow/model 键有 256 字节上限并拒绝 NUL/CR/LF。默认忽略不可信
-  客户端 tenant/flow 头，以 request UID 派生 KV namespace 并关闭跨请求 credit；
-  只有鉴权 Gateway 部署显式开启可信头开关后，才允许同 tenant 复用。
-- K2 组合：公平队列先决定下一个请求，KV/load planner 只在出队后、公共硬过滤后的
-  候选中排序，不反向改变 priority/tenant 账本。HOST/SSD/Store 只查询有界 shortlist，
-  只形成命中 token 上界，不进入 V2 cost、route 或 admission。
+  客户端 tenant/flow/priority 头；标准 OpenAI `user` 或 Anthropic `metadata.user_id` 只有
+  与认证身份共同 HMAC 派生后才能跨请求复用，自研客户端可回传有 TTL/轮转的 opaque
+  session token。只有鉴权 Gateway 部署显式开启可信头开关后，才允许可信 tenant 复用。
+- K2 组合：tenant→flow 公平队列先决定下一个请求，KV/load planner 只在出队后、公共
+  硬过滤后的候选中排序，不反向改变 priority/tenant 账本。HOST 只查询有界 shortlist，
+  只形成命中 token 上界，不进入 V2 cost、route 或 admission；SSD/STORE 不查询。
 - 执行模式：Native 三种模式走统一 capability Resolver 和 mode-specific commit；
   vLLM 只开放严格 AGGREGATED。跨 Provider、缺 capability、profile/model/KV/Link
   不兼容均 fail closed。
 - 可观测：常开低基数 bvar 指标与周期集群快照；`--v=1` 开启有界、无请求正文的
-  逐请求 JSON 事件；xLLM Engine 使用同风格 attempt/stage VLOG。详见
+  逐请求 JSON 事件；Engine KV 压力聚合排除 hard-stale；ROUTE/D_ADMISSION/
+  RESOURCE_RELEASE 具备稳定原因和完整终态；xLLM Engine 使用同风格 attempt/stage
+  VLOG。详见
   [观测与性能分析手册](./OBSERVABILITY_RUNBOOK.md)。
 
 ## 硬件边界
@@ -59,8 +63,9 @@ CPU 可达链路、simulated HBM、支持矩阵和运维文档已闭环；代码
 多硬件差异由底层 Engine/Provider 暴露。Service 只感知不可变 Provider/profile、
 execution capability、KV/Connector compatibility、topology、统一 admission 和
 Engine/Link 状态；不调用 CANN/CUDA，不保存 device pointer、真实 HBM 地址、stream、
-event、allocator 或 kernel。simulated HBM 是 Engine/backend 契约的 CPU 测试实现，
-不是 Service 生产依赖，也不能代替 NPU 验证。新增 NPU/CUDA/MLU/DCU backend 必须复用
+event、allocator 或 kernel。生产资源适配器包装实际 BlockManager leaf；simulated HBM
+是 Engine/backend 契约的 CPU 故障注入实现，不是 Service 生产依赖，也不能代替 NPU
+验证。新增 NPU/CUDA/MLU/DCU backend 必须复用
 同一 Contract/Resolver，并按 profile 提交 conformance 证据，禁止在 Service 增加
 芯片特例分支。
 
@@ -77,8 +82,11 @@ event、allocator 或 kernel。simulated HBM 是 Engine/backend 契约的 CPU �
 最终验证命令与精确计数记录在本提交的验证日志和
 [B6-B10 总状态](./B6_B10_STATUS.md)。全量门包括外部 xLLM override、Service pinned
 gitlink、三个生产二进制动态链接、vLLM sidecar pytest、压力重复和 sanitizer 切片。
-当前基线为 xLLM `446bae12` 的八目标 118/118（simulated HBM 12/12、Provider 9/9、
-RequestEvent 14/14），Service pinned/override 380/380，vLLM sidecar 60/60。
+当前 pin 为已推送的 xLLM `6c9d661e`。本批重建的 production-adapter/simulated-HBM
+快速目标 15/15、request-output admission wire 3/3；Service pinned 与外部 override 均为
+388/388，三个生产 ELF build/link 通过。xLLM `446bae12` 的 118/118 与 vLLM sidecar
+60/60 是上一个完整公共基线；本批完整 xLLM runtime build 在修复本仓无硬件编译问题后
+停于第三方 Mooncake Clang 错误，未把旧 118/118 数字冒充为新提交的全量结果。
 xLLM attempt/simulated-HBM/RequestEvent 三个目标各重复 100 轮；Service 的 recorder、
 hash/namespace、KV planner/metrics、Provider route 和 flow-control 57 项各重复 100 轮，
 共 5700 次，无失败。同一组 57 项还在 GCC 13 `-fsanitize=address,undefined` 下通过，
@@ -95,15 +103,19 @@ hash/namespace、KV planner/metrics、Provider route 和 flow-control 57 项各�
 3. 测试/文档/隐私轮：刷新陈旧测试计数与 PARTIAL 状态；移除 INFO 级完整 JSON 输出，
    legacy 内容 trace 启用时显式告警；补齐 5700 次压力门、生产二进制和运行手册。
 
-三轮 review 后没有遗留的仓库内 correctness blocker；剩余项均是本文件明确列出的
-NPU、真实集群、平台和生产标定证据。
+§12/§13 的最新 review 又补齐生产资源接线、真实 D admission evidence、资源释放终态、
+Engine KV 压力、标准 SDK 会话、安全轮转和宏/配置边界。当前没有已知、已复现且未处理
+的仓库内 correctness blocker；剩余项是本文明确列出的第三方 CPU 构建边界、NPU、真实
+集群、平台和生产标定证据。
 
 ## 回滚、发布与剩余门
 
 - 关闭 `kv_route_enforced_gate_open` 或把 bucket 设为 0，立即回到 SHADOW；切换
-  load-balance policy 可回到 load-only。低层 tier 无需回滚，因为从不参与 V2 决策。
+  load-balance policy 可回到 load-only。HOST tier 无需单独回滚，因为不参与 V2 决策。
 - 关闭 `--trusted_tenant_headers_enabled` 会忽略租户头、关闭跨请求 KV credit；发布
   系统必须同时确保 Gateway 去除客户端自报头，不能只依赖文档约定。
+- 多副本必须共享 `--kv_session_hmac_secret`；轮转时 previous key 只用于验证，并在最大
+  token TTL 后移除。随机实例 key 只允许 SHADOW/dev sticky routing。
 - `--v=1` 只用于需要逐请求诊断的实例/窗口；关闭后不构造逐请求 protobuf，常开
   低基数指标和集群快照仍保留。
 - 协议变更均为 additive；Service gitlink 必须指向已推送的同版 xLLM commit。

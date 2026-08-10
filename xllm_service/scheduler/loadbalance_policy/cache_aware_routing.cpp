@@ -126,25 +126,17 @@ void observe_prefix(provider::KVShadowIndex* index,
   candidate->hbm_prefix_blocks = match.contiguous_blocks;
 }
 
-void observe_lower_tier_prefix(provider::KVShadowIndex* index,
-                               const std::vector<std::string>& block_hashes,
-                               provider::KVRouteEngineCandidate* candidate) {
+void observe_host_prefix(provider::KVShadowIndex* index,
+                         const std::vector<std::string>& block_hashes,
+                         provider::KVRouteEngineCandidate* candidate) {
   if (candidate == nullptr) {
     return;
   }
-  const auto observe_shadow_blocks = [&](xllm::proto::KVCacheTier tier) {
-    const provider::KVPrefixMatch tier_match =
-        observe_prefix_tier(index, block_hashes, *candidate, tier);
-    return tier_match.health == provider::KVShadowHealth::READY
-               ? tier_match.contiguous_blocks
-               : 0;
-  };
+  const provider::KVPrefixMatch match = observe_prefix_tier(
+      index, block_hashes, *candidate, xllm::proto::KV_CACHE_TIER_HOST);
   candidate->host_prefix_blocks =
-      observe_shadow_blocks(xllm::proto::KV_CACHE_TIER_HOST);
-  candidate->ssd_prefix_blocks =
-      observe_shadow_blocks(xllm::proto::KV_CACHE_TIER_SSD);
-  candidate->store_prefix_blocks =
-      observe_shadow_blocks(xllm::proto::KV_CACHE_TIER_STORE);
+      match.health == provider::KVShadowHealth::READY ? match.contiguous_blocks
+                                                      : 0;
 }
 
 std::string decode_name(const provider::KVRoutePlanCandidate& candidate) {
@@ -208,8 +200,8 @@ bool CacheAwareRouting::select_instances_pair(
     return fallback_load_only(request);
   }
 
-  const std::string request_kv_namespace = derive_request_kv_namespace(
-      kv_namespace, request->kv_isolation_domain, /*adapter_identity=*/"");
+  const std::string request_kv_namespace =
+      derive_request_kv_namespace(kv_namespace, request->kv_isolation_domain);
   if (request_kv_namespace.empty()) {
     return fallback_load_only(request);
   }
@@ -242,17 +234,17 @@ bool CacheAwareRouting::select_instances_pair(
     return fallback_load_only(request);
   }
 
-  // Lower-tier cache state is V2 observation-only. Query only the bounded
-  // planner shortlist after the HBM decision has been frozen, so HOST/SSD/
-  // STORE cannot influence routing and do not add O(all candidates) work.
+  // Host-cache state is V2 observation-only. Query only the bounded planner
+  // shortlist after the HBM decision has been frozen. SSD and shared Store
+  // have no V2 Engine event producer and are deliberately not modeled here.
   for (size_t index = 0; index < candidates.size(); ++index) {
     if (!decision.evaluations[index].in_shortlist) {
       continue;
     }
-    observe_lower_tier_prefix(
+    observe_host_prefix(
         kv_shadow_index_, block_hashes, &candidates[index].prefill);
     if (candidates[index].decode.has_value()) {
-      observe_lower_tier_prefix(
+      observe_host_prefix(
           kv_shadow_index_, block_hashes, &candidates[index].decode.value());
     }
   }
@@ -287,16 +279,8 @@ bool CacheAwareRouting::select_instances_pair(
       .predicted_transfer_bytes = kv_evaluation.effective_transfer_bytes,
       .shadow_prefill_host_hit_tokens_ub =
           lower_tier_credit.prefill_host_hit_tokens_ub,
-      .shadow_prefill_ssd_hit_tokens_ub =
-          lower_tier_credit.prefill_ssd_hit_tokens_ub,
-      .shadow_prefill_store_hit_tokens_ub =
-          lower_tier_credit.prefill_store_hit_tokens_ub,
       .shadow_decode_host_hit_tokens_ub =
           lower_tier_credit.decode_host_hit_tokens_ub,
-      .shadow_decode_ssd_hit_tokens_ub =
-          lower_tier_credit.decode_ssd_hit_tokens_ub,
-      .shadow_decode_store_hit_tokens_ub =
-          lower_tier_credit.decode_store_hit_tokens_ub,
       .kv_bytes_per_token = route_request.kv_bytes_per_token,
       .load_only_cost_us =
           decision.evaluations[decision.load_only_index].load_only_cost_us,

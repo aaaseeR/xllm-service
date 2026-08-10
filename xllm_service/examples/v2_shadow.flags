@@ -1,0 +1,58 @@
+# V2 SHADOW calibration profile. Pass with --flagfile=<absolute path>.
+# Values are explicit so an artifact captures its complete routing policy.
+--load_balance_policy=CAR
+--kv_route_mode=SHADOW
+--kv_route_enforced_gate_open=false
+--kv_route_enforced_bucket_permyriad=0
+--kv_route_max_candidate_plans=16384
+--kv_route_least_load_shortlist=8
+--kv_route_top_prefix_shortlist=8
+--kv_route_prefill_queue_cost_us=1000
+--kv_route_decode_request_cost_us=1000
+--kv_route_prefill_token_cost_us=10
+--kv_route_transfer_byte_cost_us=0.001
+--kv_route_decode_headroom_cost_us=1000
+--kv_route_prefill_reserve_blocks=1
+--kv_route_margin_us=100
+--kv_route_near_equal_cost_us=10
+
+# Keep zero until derived from the deployed model's KV layout. ENFORCED
+# startup rejects zero, so this file cannot accidentally open the gate.
+--kv_route_bytes_per_token=0
+
+# Service queue and in-flight context safety budgets.
+--flow_max_queued_requests=4096
+--flow_max_dispatched_contexts=4096
+--flow_max_queued_prompt_tokens=16777216
+--flow_max_queued_bytes=536870912
+--flow_max_queue_wait_ms=2000
+--flow_max_queued_requests_per_tenant=512
+--flow_max_queued_tokens_per_tenant=2097152
+--flow_max_model_queued_requests=4096
+--flow_max_model_dispatched_contexts=4096
+--flow_max_model_queued_prompt_tokens=16777216
+--flow_max_model_queued_bytes=536870912
+--flow_service_crash_request_budget=8192
+--flow_service_memory_budget_bytes=553648128
+# Conservative accounting estimate, not measured request payload size.
+--flow_dispatched_context_bytes=4096
+--flow_dispatch_rate_lb_per_second=1.0
+--flow_probe_round_ub_ms=200
+--flow_blind_dispatch_probe_concurrency=1
+--flow_starvation_dispatch_bound=32
+--flow_order=FCFS
+--flow_dispatch_interval_ms=10
+--flow_drain_policy=COMPLETE_QUEUED
+
+# Alternate native modes remain opt-in in the V2 baseline.
+--native_local_prefill_enabled=false
+--native_local_prefill_bucket_permyriad=0
+--native_prefill_only_enabled=false
+
+# Replace for every built artifact. Production startup rejects this placeholder
+# when ENFORCED routing is requested.
+--observability_build_id=REPLACE_WITH_IMMUTABLE_ARTIFACT_ID
+
+# Do not put kv_session_hmac_secret in this file. Inject a shared 32-256 byte
+# value through the deployment secret mechanism on every Service replica.
+--kv_session_token_ttl_seconds=86400

@@ -20,7 +20,7 @@ limitations under the License.
 - Owner：xLLM Service V2
 - 状态：`CPU_VERIFIED / NPU_AND_CLUSTER_PENDING`
 - 关联设计/Requirement ID：G0、02 §3.1/§8.3、D37、D43、D58-D60、V2-B10
-- 环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，Clang 18，2026-08-09
+- 环境和日期：xllm-dev-sandbox，Ubuntu 24.04 ARM64，Clang 18，2026-08-10
 
 ## 支持范围
 
@@ -56,8 +56,12 @@ limitations under the License.
   token；计数缺失、为 0 或重复的 terminal/control chunk 不伪造 token/ITL。E2E 以
   `service_request_terminal` 为边界，TTFT/ITL/TPOT 以
   `service_response_write` 为边界，统一使用 steady clock。
-- K1/K2 事件发布 predicted/actual P/D hit、transfer/skipped bytes 和 HOST/SSD/Store
-  `_ub`。低层值只在 bounded shortlist 上查询，只作未来成本校准，绝不参与 V2 路由。
+- K1/K2 事件发布 predicted/actual P/D hit、transfer/skipped bytes 和 HOST 命中上界。
+  HBM/HOST 分别由 device/host prefix leaf 真实发布；HOST 只在 bounded shortlist 上查询，
+  不参与 V2 路由或 admission。SSD/STORE 字段已删除并 reserved，V2 不查询这些 tier。
+- `D_ADMISSION` 终态只由 xLLM D 的真实 `AdmissionResult` 回传产生；`RESOURCE_RELEASE`
+  覆盖即时释放、deferred cleanup、收敛和 shutdown 未收敛。`ROUTE` 对容量、stale、mode
+  和永久不可行发布稳定拒绝原因，缺少终态 fail closed。
 
 ## 指标与容量
 
@@ -65,7 +69,8 @@ limitations under the License.
 
 - gauge：`xllm_service_v2_queued_requests`、`dispatched_requests`、
   `queued_prompt_tokens`、`queued_bytes`、`active_requests`、
-  `observability_ring_events`；
+  `observability_ring_events`，以及 fresh Engine KV reporting engines/DP ranks、max used
+  ratio、min/total free blocks；
 - counter：按有限 enum 的 lifecycle、failure reason、terminal result、execution mode、
   recorder outcome 和 output sequence outcome；
 - histogram：按有限 execution mode 的 queue wait、TTFT、TPOT、E2E；
@@ -88,8 +93,10 @@ limitations under the License.
 | xLLM Engine Debug | attempt lifecycle 与 stage 日志所在生产对象、协议/生命周期回归 | 待 NPU stage | PASS |
 | 集群解释 | bounded metrics/snapshot、delta、loss warning、运行手册 | 待多 Service 聚合/阈值 | PASS（机制） |
 
-当前验证基线：xLLM RequestEvent protocol 14/14；Service 全量 pinned/override 均为
-380/380；包含 recorder、latency、KV route、Provider route、namespace 和 flow-control
+当前验证基线：Service 全量 pinned/override 均为 388/388，三个生产 ELF build/link
+通过；xLLM `6c9d661e` 的 request-output admission wire 3/3、resource adapter/simulator
+15/15。前一完整公共基线的 RequestEvent protocol 为 14/14。包含 recorder、latency、
+KV route、Provider route、namespace 和 flow-control
 在内的 57 项各重复 100 轮，共 5700 次，无失败；同 57 项在 GCC 13
 ASan+UBSan（含 leak detection）下通过且没有 sanitizer 报告。
 

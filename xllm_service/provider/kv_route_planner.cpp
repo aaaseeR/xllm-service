@@ -95,16 +95,6 @@ LowerTierShadowCredit lower_tier_shadow_credit(
                  bounded_hit_tokens(request.prompt_tokens,
                                     request.block_size,
                                     candidate.prefill.host_prefix_blocks));
-    credit.prefill_ssd_hit_tokens_ub =
-        std::max(credit.prefill_ssd_hit_tokens_ub,
-                 bounded_hit_tokens(request.prompt_tokens,
-                                    request.block_size,
-                                    candidate.prefill.ssd_prefix_blocks));
-    credit.prefill_store_hit_tokens_ub =
-        std::max(credit.prefill_store_hit_tokens_ub,
-                 bounded_hit_tokens(request.prompt_tokens,
-                                    request.block_size,
-                                    candidate.prefill.store_prefix_blocks));
     if (!candidate.decode.has_value()) {
       continue;
     }
@@ -113,16 +103,6 @@ LowerTierShadowCredit lower_tier_shadow_credit(
                  bounded_hit_tokens(request.prompt_tokens,
                                     request.block_size,
                                     candidate.decode->host_prefix_blocks));
-    credit.decode_ssd_hit_tokens_ub =
-        std::max(credit.decode_ssd_hit_tokens_ub,
-                 bounded_hit_tokens(request.prompt_tokens,
-                                    request.block_size,
-                                    candidate.decode->ssd_prefix_blocks));
-    credit.decode_store_hit_tokens_ub =
-        std::max(credit.decode_store_hit_tokens_ub,
-                 bounded_hit_tokens(request.prompt_tokens,
-                                    request.block_size,
-                                    candidate.decode->store_prefix_blocks));
   }
   return credit;
 }

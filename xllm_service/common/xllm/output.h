@@ -24,6 +24,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "provider.pb.h"
 #include "status.h"
 
 namespace xllm_service {
@@ -126,6 +127,10 @@ struct RequestOutput {
   std::optional<uint64_t> attempt_seq;
   std::string sender_engine_uid;
   std::string sender_incarnation_id;
+  std::optional<xllm::proto::AdmissionDisposition> decode_admission_disposition;
+  std::optional<xllm::proto::AdmissionReason> decode_admission_reason;
+  std::optional<uint32_t> decode_admission_attempts;
+  std::optional<uint64_t> decode_admission_rpc_duration_ns;
 };
 
 inline std::optional<std::string> to_string(FinishReason reason) {

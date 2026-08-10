@@ -134,6 +134,11 @@ DECLARE_GAUGE(xllm_service_v2_queued_prompt_tokens);
 DECLARE_GAUGE(xllm_service_v2_queued_bytes);
 DECLARE_GAUGE(xllm_service_v2_active_requests);
 DECLARE_GAUGE(xllm_service_v2_observability_ring_events);
+DECLARE_GAUGE(xllm_service_v2_engine_kv_reporting_engines);
+DECLARE_GAUGE(xllm_service_v2_engine_kv_reporting_dp_ranks);
+DECLARE_GAUGE(xllm_service_v2_engine_kv_max_used_ratio);
+DECLARE_GAUGE(xllm_service_v2_engine_kv_min_free_blocks);
+DECLARE_GAUGE(xllm_service_v2_engine_kv_total_free_blocks);
 
 DECLARE_MULTI_COUNTER(xllm_service_v2_request_lifecycle_total);
 DECLARE_MULTI_COUNTER(xllm_service_v2_request_failure_total);

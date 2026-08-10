@@ -118,6 +118,47 @@ std::string execution_mode_label(xllm::proto::ExecutionMode mode) {
   return xllm::proto::ExecutionMode_Name(mode);
 }
 
+xllm::proto::EventReason decode_admission_event_reason(
+    xllm::proto::AdmissionReason reason) {
+  switch (reason) {
+    case xllm::proto::ADMISSION_REASON_NONE:
+      return xllm::proto::EVENT_REASON_NONE;
+    case xllm::proto::ADMISSION_REASON_CONTEXT_TOO_LARGE:
+    case xllm::proto::ADMISSION_REASON_KV_PERMANENTLY_INFEASIBLE:
+    case xllm::proto::ADMISSION_REASON_UNSUPPORTED_KV_LAYOUT:
+      return xllm::proto::EVENT_REASON_PERMANENTLY_INFEASIBLE;
+    case xllm::proto::ADMISSION_REASON_ATTEMPT_CONFLICT:
+    case xllm::proto::ADMISSION_REASON_ATTEMPT_TERMINAL:
+      return xllm::proto::EVENT_REASON_ATTEMPT_CONFLICT;
+    case xllm::proto::ADMISSION_REASON_DEADLINE_EXCEEDED:
+    case xllm::proto::ADMISSION_REASON_RESERVATION_EXPIRED:
+      return xllm::proto::EVENT_REASON_DEADLINE_EXCEEDED;
+    case xllm::proto::ADMISSION_REASON_CANCELLED_BEFORE_CREATE:
+    case xllm::proto::ADMISSION_REASON_CANCELLED:
+      return xllm::proto::EVENT_REASON_CANCELLED;
+    case xllm::proto::ADMISSION_REASON_STALE_INCARNATION:
+      return xllm::proto::EVENT_REASON_STALE_STATE;
+    case xllm::proto::ADMISSION_REASON_KV_TEMPORARILY_INSUFFICIENT:
+    case xllm::proto::ADMISSION_REASON_DECODE_CREDIT_EXHAUSTED:
+    case xllm::proto::ADMISSION_REASON_SLOT_EXHAUSTED:
+    case xllm::proto::ADMISSION_REASON_CAPACITY_CHANGED:
+    case xllm::proto::ADMISSION_REASON_TOMBSTONE_CAPACITY:
+    case xllm::proto::ADMISSION_REASON_CANCEL_FENCE_CAPACITY:
+    case xllm::proto::ADMISSION_REASON_RECOVERY_FENCE_PRESSURE:
+      return xllm::proto::EVENT_REASON_CAPACITY_EXHAUSTED;
+    case xllm::proto::ADMISSION_REASON_INVALID_REQUEST:
+    case xllm::proto::ADMISSION_REASON_ENGINE_DRAINING:
+    case xllm::proto::ADMISSION_REASON_TRANSFER_NOT_STARTED:
+    case xllm::proto::ADMISSION_REASON_HANDOFF_REJECTED:
+    case xllm::proto::ADMISSION_REASON_INTERNAL_ERROR:
+    case xllm::proto::ADMISSION_REASON_ATTEMPT_NOT_FOUND:
+    case xllm::proto::ADMISSION_REASON_UNSPECIFIED:
+      return xllm::proto::EVENT_REASON_PROVIDER_ERROR;
+    default:
+      return xllm::proto::EVENT_REASON_PROVIDER_ERROR;
+  }
+}
+
 const char* saturation_state_name(xllm_service::SaturationState state) {
   switch (state) {
     case xllm_service::SaturationState::AVAILABLE:
@@ -671,11 +712,6 @@ Scheduler::~Scheduler() {
     flow_dispatch_stopped_ = true;
   }
   flow_dispatch_cv_.notify_all();
-  {
-    std::lock_guard<std::mutex> lock(observability_wait_mutex_);
-    observability_stopped_ = true;
-  }
-  observability_cv_.notify_all();
   state_stream_cv_.notify_all();
   kv_state_cv_.notify_all();
   kv_snapshot_cv_.notify_all();
@@ -695,9 +731,6 @@ Scheduler::~Scheduler() {
   if (flow_dispatch_thread_ != nullptr && flow_dispatch_thread_->joinable()) {
     flow_dispatch_thread_->join();
   }
-  if (observability_thread_ != nullptr && observability_thread_->joinable()) {
-    observability_thread_->join();
-  }
   client_disconnect_monitor_->close();
   {
     std::lock_guard<std::mutex> lock(execution_hold_cleanup_wait_mutex_);
@@ -711,6 +744,17 @@ Scheduler::~Scheduler() {
   if (request_watchdog_thread_ != nullptr &&
       request_watchdog_thread_->joinable()) {
     request_watchdog_thread_->join();
+  }
+  // No retry worker remains after this point. Close unresolved release traces
+  // explicitly instead of exporting a dangling STARTED event at shutdown.
+  finish_resource_release_traces(/*fail_pending=*/true);
+  {
+    std::lock_guard<std::mutex> lock(observability_wait_mutex_);
+    observability_stopped_ = true;
+  }
+  observability_cv_.notify_all();
+  if (observability_thread_ != nullptr && observability_thread_->joinable()) {
+    observability_thread_->join();
   }
 }
 
@@ -817,6 +861,19 @@ bool Scheduler::schedule(std::shared_ptr<Request> request) {
 
 bool Scheduler::select_and_prepare_dispatch(
     const std::shared_ptr<Request>& request) {
+  const auto reject_route = [&](xllm::proto::EventReason reason) {
+    if (!request->trace_route_failure_recorded.exchange(
+            true, std::memory_order_acq_rel)) {
+      record_request_event(request,
+                           xllm::proto::REQUEST_EVENT_TYPE_ROUTE,
+                           xllm::proto::EVENT_RESULT_REJECTED,
+                           xllm::proto::ERROR_STAGE_ROUTING,
+                           reason,
+                           "",
+                           "");
+    }
+    return false;
+  };
   request->routing = Routing();
   request->prefill_incarnation_id.clear();
   request->decode_incarnation_id.clear();
@@ -826,21 +883,22 @@ bool Scheduler::select_and_prepare_dispatch(
   request->execution_plan.reset();
   request->execution_mode = xllm::proto::EXECUTION_MODE_UNSPECIFIED;
   if (!lb_policy_->select_instances_pair(request)) {
-    return false;
+    return reject_route(xllm::proto::EVENT_REASON_CAPACITY_EXHAUSTED);
   }
 
   if (!instance_mgr_->bind_request_instance_incarnations(request)) {
     LOG(ERROR) << "Failed to bind request to instance incarnation ids. "
                << request->routing.debug_string();
-    return false;
+    return reject_route(xllm::proto::EVENT_REASON_STALE_STATE);
   }
 
   if (!apply_native_execution_mode(request)) {
-    return false;
+    return reject_route(xllm::proto::EVENT_REASON_MODE_UNSUPPORTED);
   }
   if (!prepare_v2_execution_plan(request)) {
-    return false;
+    return reject_route(xllm::proto::EVENT_REASON_PERMANENTLY_INFEASIBLE);
   }
+  request->trace_route_failure_recorded.store(false, std::memory_order_release);
   record_kv_route_decision(request);
   DLOG(INFO) << request->routing.debug_string();
 
@@ -1910,6 +1968,208 @@ Tokenizer* Scheduler::get_tls_tokenizer() {
   return tls_tokenizer.get();
 }
 
+void Scheduler::reset_d_admission_trace(
+    const std::shared_ptr<Request>& request) {
+  if (request == nullptr) {
+    return;
+  }
+  request->trace_d_admission_started_ns.store(0, std::memory_order_release);
+  request->trace_d_admission_terminal_recorded.store(false,
+                                                     std::memory_order_release);
+}
+
+void Scheduler::begin_d_admission(const std::shared_ptr<Request>& request) {
+  if (request == nullptr ||
+      request->execution_mode != xllm::proto::EXECUTION_MODE_REMOTE_PD) {
+    return;
+  }
+  int64_t expected = 0;
+  const int64_t started_ns = monotonic_time_ns();
+  if (!request->trace_d_admission_started_ns.compare_exchange_strong(
+          expected,
+          started_ns,
+          std::memory_order_acq_rel,
+          std::memory_order_acquire)) {
+    return;
+  }
+  record_request_event(request,
+                       xllm::proto::REQUEST_EVENT_TYPE_D_ADMISSION,
+                       xllm::proto::EVENT_RESULT_STARTED,
+                       xllm::proto::ERROR_STAGE_NONE,
+                       xllm::proto::EVENT_REASON_NONE,
+                       request->routing.decode_name,
+                       request->decode_incarnation_id);
+}
+
+void Scheduler::finish_d_admission(
+    const std::shared_ptr<Request>& request,
+    xllm::proto::EventResult result,
+    xllm::proto::EventReason reason,
+    std::optional<uint32_t> engine_attempts,
+    std::optional<uint64_t> engine_rpc_duration_ns) {
+  if (request == nullptr ||
+      request->execution_mode != xllm::proto::EXECUTION_MODE_REMOTE_PD ||
+      request->trace_d_admission_started_ns.load(std::memory_order_acquire) ==
+          0 ||
+      request->trace_d_admission_terminal_recorded.exchange(
+          true, std::memory_order_acq_rel)) {
+    return;
+  }
+  record_request_event(request,
+                       xllm::proto::REQUEST_EVENT_TYPE_D_ADMISSION,
+                       result,
+                       result == xllm::proto::EVENT_RESULT_ACCEPTED
+                           ? xllm::proto::ERROR_STAGE_NONE
+                           : xllm::proto::ERROR_STAGE_D_ADMISSION,
+                       result == xllm::proto::EVENT_RESULT_ACCEPTED
+                           ? xllm::proto::EVENT_REASON_NONE
+                           : reason,
+                       request->routing.decode_name,
+                       request->decode_incarnation_id,
+                       engine_rpc_duration_ns);
+  VLOG(1) << "Decode admission terminal request_uid="
+          << request->correlation.request_uid() << ", attempt_seq="
+          << (request->correlation.has_attempt_seq()
+                  ? std::to_string(request->correlation.attempt_seq())
+                  : "absent")
+          << ", result=" << xllm::proto::EventResult_Name(result)
+          << ", reason=" << xllm::proto::EventReason_Name(reason)
+          << ", engine_attempts="
+          << (engine_attempts.has_value() ? std::to_string(*engine_attempts)
+                                          : "absent")
+          << ", engine_rpc_duration_ns="
+          << (engine_rpc_duration_ns.has_value()
+                  ? std::to_string(*engine_rpc_duration_ns)
+                  : "absent");
+}
+
+void Scheduler::finish_d_admission_from_output(
+    const std::shared_ptr<Request>& request,
+    const llm::RequestOutput& output) {
+  if (request == nullptr ||
+      request->execution_mode != xllm::proto::EXECUTION_MODE_REMOTE_PD ||
+      request->trace_d_admission_terminal_recorded.load(
+          std::memory_order_acquire)) {
+    return;
+  }
+  if (output.decode_admission_disposition.has_value() &&
+      output.decode_admission_reason.has_value() &&
+      output.decode_admission_attempts.has_value() &&
+      output.decode_admission_rpc_duration_ns.has_value()) {
+    const xllm::proto::AdmissionDisposition disposition =
+        *output.decode_admission_disposition;
+    const xllm::proto::AdmissionReason admission_reason =
+        *output.decode_admission_reason;
+    finish_d_admission(
+        request,
+        disposition == xllm::proto::ADMISSION_DISPOSITION_ACCEPTED
+            ? xllm::proto::EVENT_RESULT_ACCEPTED
+            : xllm::proto::EVENT_RESULT_REJECTED,
+        decode_admission_event_reason(admission_reason),
+        output.decode_admission_attempts,
+        output.decode_admission_rpc_duration_ns);
+    return;
+  }
+  const bool terminal_without_observation =
+      output.finished_on_prefill_instance || output.finished ||
+      (output.status.has_value() && !output.status->ok());
+  if (terminal_without_observation) {
+    finish_d_admission(request,
+                       xllm::proto::EVENT_RESULT_FAILED,
+                       xllm::proto::EVENT_REASON_MISSING_TERMINAL);
+  }
+}
+
+void Scheduler::record_resource_release(
+    const std::shared_ptr<Request>& request) {
+  if (request == nullptr) {
+    return;
+  }
+  const bool unresolved = request->execution_hold.has_hold();
+  const bool deferred =
+      !unresolved && request->correlation.has_attempt_seq() &&
+      execution_hold_cleanup_table_->contains(execution_attempt(*request));
+  if (deferred) {
+    request->trace_resource_release_started_ns.store(monotonic_time_ns(),
+                                                     std::memory_order_release);
+    std::lock_guard<std::mutex> trace_guard(resource_release_trace_mutex_);
+    if (pending_resource_release_traces_.size() >=
+        options_.execution_hold_cleanup_record_capacity()) {
+      record_request_event(request,
+                           xllm::proto::REQUEST_EVENT_TYPE_RESOURCE_RELEASE,
+                           xllm::proto::EVENT_RESULT_FAILED,
+                           xllm::proto::ERROR_STAGE_RESOURCE_RELEASE,
+                           xllm::proto::EVENT_REASON_INTERNAL_ERROR,
+                           "",
+                           "");
+      return;
+    }
+    pending_resource_release_traces_.insert_or_assign(
+        request->correlation.request_uid(), request);
+  }
+  record_request_event(request,
+                       xllm::proto::REQUEST_EVENT_TYPE_RESOURCE_RELEASE,
+                       unresolved
+                           ? xllm::proto::EVENT_RESULT_FAILED
+                           : (deferred ? xllm::proto::EVENT_RESULT_STARTED
+                                       : xllm::proto::EVENT_RESULT_SUCCEEDED),
+                       unresolved ? xllm::proto::ERROR_STAGE_RESOURCE_RELEASE
+                                  : xllm::proto::ERROR_STAGE_NONE,
+                       unresolved ? xllm::proto::EVENT_REASON_INTERNAL_ERROR
+                                  : xllm::proto::EVENT_REASON_NONE,
+                       "",
+                       "");
+}
+
+void Scheduler::finish_resource_release_traces(bool fail_pending) {
+  std::vector<std::shared_ptr<Request>> completed;
+  std::vector<std::shared_ptr<Request>> failed;
+  {
+    std::lock_guard<std::mutex> trace_guard(resource_release_trace_mutex_);
+    for (auto trace = pending_resource_release_traces_.begin();
+         trace != pending_resource_release_traces_.end();) {
+      const std::shared_ptr<Request>& request = trace->second;
+      if (execution_hold_cleanup_table_->contains(
+              execution_attempt(*request))) {
+        if (fail_pending) {
+          failed.emplace_back(request);
+          trace = pending_resource_release_traces_.erase(trace);
+          continue;
+        }
+        ++trace;
+        continue;
+      }
+      completed.emplace_back(request);
+      trace = pending_resource_release_traces_.erase(trace);
+    }
+  }
+  const int64_t finished_ns = monotonic_time_ns();
+  for (const std::shared_ptr<Request>& request : completed) {
+    const int64_t started_ns = request->trace_resource_release_started_ns.load(
+        std::memory_order_acquire);
+    record_request_event(request,
+                         xllm::proto::REQUEST_EVENT_TYPE_RESOURCE_RELEASE,
+                         xllm::proto::EVENT_RESULT_SUCCEEDED,
+                         xllm::proto::ERROR_STAGE_NONE,
+                         xllm::proto::EVENT_REASON_NONE,
+                         "",
+                         "",
+                         finished_ns >= started_ns && started_ns != 0
+                             ? std::optional<uint64_t>(static_cast<uint64_t>(
+                                   finished_ns - started_ns))
+                             : std::nullopt);
+  }
+  for (const std::shared_ptr<Request>& request : failed) {
+    record_request_event(request,
+                         xllm::proto::REQUEST_EVENT_TYPE_RESOURCE_RELEASE,
+                         xllm::proto::EVENT_RESULT_FAILED,
+                         xllm::proto::ERROR_STAGE_RESOURCE_RELEASE,
+                         xllm::proto::EVENT_REASON_MISSING_TERMINAL,
+                         "",
+                         "");
+  }
+}
+
 bool Scheduler::install_execution_hold_locked(
     const std::shared_ptr<Request>& request) {
   if (!instance_mgr_->validate_request_instance_incarnations(request)) {
@@ -2197,6 +2457,7 @@ bool Scheduler::retry_first_output_attempt_locked(
   request->prefill_stage_finished.store(false, std::memory_order_release);
   request->latest_generate_time = absl::Now();
   request->output_event_sequencer.reset();
+  reset_d_admission_trace(request);
   if (!install_execution_hold_locked(request)) {
     *failure_message = "First-output retry could not install execution hold";
     return false;
@@ -2460,6 +2721,7 @@ void Scheduler::recover_first_output_events(
     if (!retry_prepared) {
       continue;
     }
+    begin_d_admission(service_request);
     if (service_request->retry_dispatch_callback(*service_request)) {
       MULTI_COUNTER_INC(xllm_service_v2_execution_mode_total,
                         execution_mode_label(service_request->execution_mode));
@@ -2476,6 +2738,10 @@ void Scheduler::recover_first_output_events(
                            holder.incarnation_id());
       continue;
     }
+
+    finish_d_admission(service_request,
+                       xllm::proto::EVENT_RESULT_FAILED,
+                       xllm::proto::EVENT_REASON_TRANSPORT_ERROR);
 
     std::lock_guard<std::mutex> output_guard(
         service_request->output_dispatch_mutex);
@@ -2535,6 +2801,7 @@ void Scheduler::run_execution_hold_cleanup() {
         }
       }
     }
+    finish_resource_release_traces();
 
     wait_lock.lock();
   }
@@ -2690,6 +2957,7 @@ void Scheduler::run_flow_dispatch() {
         }
         if (request_active && hold_installed &&
             request->dispatch_callback != nullptr) {
+          begin_d_admission(request);
           dispatch_started = request->dispatch_callback(request);
         }
       }
@@ -2706,6 +2974,9 @@ void Scheduler::run_flow_dispatch() {
         break;
       }
       if (!dispatch_started) {
+        finish_d_admission(request,
+                           xllm::proto::EVENT_RESULT_FAILED,
+                           xllm::proto::EVENT_REASON_TRANSPORT_ERROR);
         handle_attempt_dispatch_failure(
             request_uid,
             request->correlation.has_attempt_seq()
@@ -2811,6 +3082,18 @@ void Scheduler::run_observability_exporter() {
           last_snapshot_ms == 0 ? 0 : now_ms - last_snapshot_ms;
       const std::optional<provider::ObservationSnapshot> observation =
           instance_mgr_->engine_observation_snapshot(now_ms);
+      const provider::EngineKVCapacitySnapshot engine_kv =
+          instance_mgr_->engine_kv_capacity_snapshot(now_ms);
+      GAUGE_SET(xllm_service_v2_engine_kv_reporting_engines,
+                engine_kv.reporting_engines);
+      GAUGE_SET(xllm_service_v2_engine_kv_reporting_dp_ranks,
+                engine_kv.reporting_dp_ranks);
+      GAUGE_SET(xllm_service_v2_engine_kv_max_used_ratio,
+                engine_kv.has_used_ratio ? engine_kv.max_used_ratio : 0.0);
+      GAUGE_SET(xllm_service_v2_engine_kv_min_free_blocks,
+                engine_kv.has_free_blocks ? engine_kv.min_free_blocks : 0);
+      GAUGE_SET(xllm_service_v2_engine_kv_total_free_blocks,
+                engine_kv.has_free_blocks ? engine_kv.total_free_blocks : 0);
       LOG(INFO)
           << "xllm_service_cluster_snapshot "
           << "service_incarnation_id=" << service_incarnation_id_
@@ -2826,6 +3109,13 @@ void Scheduler::run_observability_exporter() {
           << " engine_members=" << instance_mgr_->engine_member_count()
           << " engine_states=" << instance_mgr_->engine_state_count()
           << " engine_links=" << instance_mgr_->engine_link_count()
+          << " engine_kv_reporting_engines=" << engine_kv.reporting_engines
+          << " engine_kv_reporting_dp_ranks=" << engine_kv.reporting_dp_ranks
+          << " engine_kv_capacity_known="
+          << (engine_kv.has_used_ratio || engine_kv.has_free_blocks)
+          << " engine_kv_max_used_ratio=" << engine_kv.max_used_ratio
+          << " engine_kv_min_free_blocks=" << engine_kv.min_free_blocks
+          << " engine_kv_total_free_blocks=" << engine_kv.total_free_blocks
           << " snapshot_window_ms=" << snapshot_window_ms
           << " queued_requests=" << flow.queued_requests
           << " dispatched_requests=" << flow.dispatched_requests
@@ -2862,16 +3152,8 @@ void Scheduler::run_observability_exporter() {
           << " kv_predicted_transfer_bytes=" << kv.predicted_transfer_bytes
           << " kv_shadow_prefill_host_hit_tokens_ub="
           << kv.shadow_prefill_host_hit_tokens_ub
-          << " kv_shadow_prefill_ssd_hit_tokens_ub="
-          << kv.shadow_prefill_ssd_hit_tokens_ub
-          << " kv_shadow_prefill_store_hit_tokens_ub="
-          << kv.shadow_prefill_store_hit_tokens_ub
           << " kv_shadow_decode_host_hit_tokens_ub="
           << kv.shadow_decode_host_hit_tokens_ub
-          << " kv_shadow_decode_ssd_hit_tokens_ub="
-          << kv.shadow_decode_ssd_hit_tokens_ub
-          << " kv_shadow_decode_store_hit_tokens_ub="
-          << kv.shadow_decode_store_hit_tokens_ub
           << " kv_actual_hit_tokens=" << kv.actual_hit_tokens
           << " kv_actual_decode_hit_tokens=" << kv.actual_decode_hit_tokens
           << " kv_skipped_transfer_bytes=" << kv.skipped_transfer_bytes
@@ -3432,7 +3714,11 @@ void Scheduler::finish_request(const std::string& service_request_id,
       }
     }
     if (request != nullptr) {
+      finish_d_admission(request,
+                         xllm::proto::EVENT_RESULT_FAILED,
+                         xllm::proto::EVENT_REASON_MISSING_TERMINAL);
       detach_execution_hold_locked(request);
+      record_resource_release(request);
       request->queue_state.store(RequestQueueState::TERMINAL,
                                  std::memory_order_release);
     }
@@ -3525,6 +3811,9 @@ void Scheduler::clear_requests_on_failed_instance(
     }
 
     for (const std::shared_ptr<Request>& request : cleared_requests) {
+      finish_d_admission(request,
+                         xllm::proto::EVENT_RESULT_FAILED,
+                         xllm::proto::EVENT_REASON_STALE_STATE);
       const xllm::proto::ExecutionHolder holder = execution_holder(*request);
       if (holder.engine_uid() == instance_name &&
           holder.incarnation_id() == incarnation_id) {
@@ -3534,6 +3823,7 @@ void Scheduler::clear_requests_on_failed_instance(
             xllm::proto::HOLDER_CONVERGENCE_PROOF_PROCESS_TERMINATED);
       }
       detach_execution_hold_locked(request);
+      record_resource_release(request);
     }
   }
 
@@ -3683,6 +3973,7 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
   }
 
   for (const llm::RequestOutput& ready_output : sequence_result.ready_outputs) {
+    finish_d_admission_from_output(request, ready_output);
     const bool status_error =
         ready_output.status.has_value() && !ready_output.status->ok();
     const bool finished_on_prefill_instance =
@@ -3927,16 +4218,8 @@ xllm::proto::RequestEvent Scheduler::make_request_event_base(
         request->kv_route_observation->predicted_transfer_bytes);
     event.mutable_workload()->set_shadow_prefill_host_hit_tokens_ub(
         request->kv_route_observation->shadow_prefill_host_hit_tokens_ub);
-    event.mutable_workload()->set_shadow_prefill_ssd_hit_tokens_ub(
-        request->kv_route_observation->shadow_prefill_ssd_hit_tokens_ub);
-    event.mutable_workload()->set_shadow_prefill_store_hit_tokens_ub(
-        request->kv_route_observation->shadow_prefill_store_hit_tokens_ub);
     event.mutable_workload()->set_shadow_decode_host_hit_tokens_ub(
         request->kv_route_observation->shadow_decode_host_hit_tokens_ub);
-    event.mutable_workload()->set_shadow_decode_ssd_hit_tokens_ub(
-        request->kv_route_observation->shadow_decode_ssd_hit_tokens_ub);
-    event.mutable_workload()->set_shadow_decode_store_hit_tokens_ub(
-        request->kv_route_observation->shadow_decode_store_hit_tokens_ub);
   }
   const uint64_t output_tokens =
       request->trace_output_tokens.load(std::memory_order_relaxed);

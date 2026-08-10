@@ -95,3 +95,53 @@ simulated HBM 的固定容量、block 所有权、内容/checksum、OOM/碎片�
 - 真实 etcd lease 到期、watch 乱序、compare-delete 和多 Service 切主需在集群环境
   做 fault injection。
 - 生产性能、容量与长时间 soak 不由本次 CPU 正确性回归替代。
+
+## §12/§13 声称—实现对齐专项整改
+
+本节对应 `opus_sevice_review.md` §12 的 D1-D8 与 §13 的 D9-D18。结论以生产调用链、
+协议消费方和永久测试为准，不把 simulator 自证、字段存在或旧二进制结果当作闭环。
+
+| ID | 状态 | 整改与证据 |
+| --- | --- | --- |
+| D1 / D9 | FIXED | xLLM 新增生产 `BlockManagerKVResourceBackend`，直接持有并释放真实 `BlockManager` leaf 返回的 RAII `Block`；`BlockManagerPool` 为每个 DP/cache leaf 构造并暴露该适配器，因此资源契约和序列调度共享同一 free-list 与物理容量。fence/transfer/generation ledger 全部有界，耗尽时整 leaf fail closed。simulated HBM 保留为故障注入工具，不再宣称是 NPU/HBM 证明；真实 `BlockManagerImpl` 的容量、generation、transfer pin/fence 场景补入既有 block-manager 测试。轻量适配器/模拟器 15/15，并发压力 100 轮通过。 |
+| D2 / D17 | FIXED | 不可信 header 模式支持两种可复用会话：自研客户端可回传 HMAC token；标准 OpenAI SDK 使用请求体 `user`，Anthropic SDK 使用 `metadata.user_id`，并与 `Authorization/x-api-key` 共同 HMAC 派生，客户端不能仅靠猜测 user 值进入他人 namespace。缺少认证身份和 body hint 时才签发 opaque token。伪造 token fail closed。 |
+| D3 | FIXED | band 内改为 tenant→flow 两级轮转；新 flow 从当前队尾加入，不从终生计数 0 开始，派发后回队尾，空闲即擦除。新增新 flow、轮换 flow-id、取消、过期、return-to-queue 与并发账本测试。 |
+| D4 | FIXED | tenant、flow、priority 作为同一个信任单元；未开启可信 Gateway 模式时客户端 priority 一律归一为默认 band。 |
+| D5 | FIXED | ENFORCED 启动同时要求 CAR、ENFORCED mode、非零 bucket、`bytes_per_token`、Prefill token cost 和有限正 transfer-byte cost，缺任一项拒绝启动。 |
+| D6 | FIXED | `PREFILL_ONLY` 默认关闭，只有部署显式开启且 capability/输出上限均满足时才可选择。 |
+| D7 | FIXED | tenant/model/flow 的公平与容量状态在 queued/dispatched 归零后擦除；snapshot 暴露 active account 数，永久测试覆盖 churn。 |
+| D8 | FIXED | 删除没有生产者的 `adapter_identity` 参数，namespace domain 升级为 `xkvns-request-v2`；未来动态 adapter 必须先进入受信 Provider profile/contract，不能复活私有占位参数。 |
+| D10 | FIXED | V2 Engine 只发布和 Service 只消费真实存在的 HBM/HOST tier。Hierarchy host prefix leaf 与 device leaf 共享 journal，分别发布 HOST/HBM，reset 在两个 tier 都清空后才推进 epoch。SSD/STORE 字段和查询从 V2 删除并 reserved；真实 Store 数据路径属于后续版本。 |
+| D11 | FIXED | Service 聚合 fresh EngineState 的 `kv_used_ratio/kv_free_blocks`，导出 reporting engines/DP ranks、max used ratio、min/total free blocks 五个 bvar，并写入周期 cluster snapshot；硬 stale Engine 不参与容量结论。 |
+| D12 | FIXED | `ROUTE` 对容量、stale、mode 与永久不可行分别发 REJECTED；`D_ADMISSION` 由 xLLM D 侧真实 `AdmissionResult` 经 P scheduler/输出 wire 回传，包含 disposition/reason/尝试数/累计 RPC 时长，缺终态 fail closed；`RESOURCE_RELEASE` 对即时释放、deferred cleanup、cleanup 收敛和 shutdown 未收敛都形成终态。exporter 退出前排空 ring。 |
+| D13 | FIXED | HTTP/RPC 错误保留稳定错误类别、精确 contract/flow 原因和 `request_uid`；容量拒绝附当前 queue snapshot，未知请求、参数错误、deadline 与内部错误不再统一塌缩为 `Internal runtime error`。 |
+| D14 | RESOLVED BY BOUNDARY | 不把四种语义不同的 envelope 强并为一个万能状态：`ContractResult` 是跨仓 Provider contract，`KVApplyResult` 是 replica sequence，`FlowControlStatus` 是本地准入，`KVBlockResourceStatus` 是 Engine 物理资源。每个状态只在所属层流动，并在唯一边界转换为稳定 client error/EventReason；禁止跨层透传 free-form message 做控制决策。这样统一的是翻译纪律而非丢失领域语义的类型。 |
+| D15 | FIXED | Service 宏全部改为 `XLLM_SERVICE_*` 前缀，queue 私有宏在文件末尾 `#undef`；xLLM detector 显式包含 xLLM 自己的 macro header。Service 不再定义通用 `PROPERTY/CALLBACK_WITH_ERROR`。 |
+| D16 | FIXED | planner 成本、reserve、margin、near-equal 等全部开放 gflag并做范围校验；提供 `examples/v2_shadow.flags`，保持 SHADOW、alternate mode 关闭、ENFORCED 所需模型参数为 0。ENFORCED 还拒绝 development/placeholder build ID。会话 secret 只允许部署 secret 注入，不写 flagfile。 |
+| D18 | FIXED | token 升级为 `v2.<issued_at>.<session>.<hmac>`，TTL 范围 1 秒至 30 天，拒绝过期和超前超过 60 秒的 token；active key 签发、previous key 仅验证，实现有界轮转。ENFORCED 且无可信 tenant header 时强制所有副本配置同一个 shared secret；shadow/dev 的随机本地 key 只允许 sticky replica 并明确 WARNING。 |
+
+### 状态类型边界
+
+| 领域状态 | 权威层 | 唯一外译边界 | 禁止事项 |
+| --- | --- | --- | --- |
+| `ContractResult` | Provider/公共 proto | HTTP ingress、plan/dispatch adapter | 以 message 文本驱动重试或路由 |
+| `KVApplyResult` | Service KV replica/index | stream consumer 与 snapshot recovery | 作为 Engine allocator 状态返回 |
+| `FlowControlStatus` | Service 本地队列 | `admit_flow_control_locked` / client error | 穿过 RPC wire |
+| `KVBlockResourceStatus` | xLLM Engine block backend | Provider/Engine resource observation | 让 Service 感知 CANN/CUDA allocator 细节 |
+
+### CPU 与 NPU 证据边界
+
+| CPU/Torch CPU 可验证 | 必须在 NPU 验证 |
+| --- | --- |
+| block 生命周期、free-list、prefix LRU、抢占与 OOM 决策 | 真实 HBM 碎片与 `aclrtMalloc` 失败模式 |
+| `n_blocks` 字节换算与容量守恒 | 权重加载后 `aclrtGetMemInfo` 余量 |
+| Torch CPU tensor shape/stride/逐层布局 | NZ format cast 与大页分配 |
+| host mirror 和 D2H/H2D 的逻辑配对 | 实际带宽、异步拷贝/计算重叠 |
+| 跨请求 prefix 命中判定与 namespace 隔离 | TTFT 收益与多卡 DP/TP 一致性 |
+
+当前 CPU 结论仍为 `CPU_VERIFIED / NPU_PENDING`。完整无设备 runtime build 已修复 xLLM
+自身的 `shared_mutex` 锁类型和无硬件 process-group 工厂编译问题，随后停在第三方 Mooncake
+Clang thread-safety/incomplete-type 错误；这不影响重新构建的轻量 resource target 或
+xllm-service pinned/override 388/388 和三个生产 ELF build/link，但也不被包装成真实
+HBM/Torch 全 runtime 证明。xLLM 整改提交 `6c9d661e` 已先推送到远端 `service_dev`，
+Service gitlink 再固定到该提交。

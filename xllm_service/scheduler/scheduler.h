@@ -150,7 +150,7 @@ class Scheduler final {
                                     bool finished_on_prefill_instance);
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(Scheduler);
+  XLLM_SERVICE_DISALLOW_COPY_AND_ASSIGN(Scheduler);
 
   void update_master_service_heartbeat();
 
@@ -192,6 +192,18 @@ class Scheduler final {
   bool apply_native_execution_mode(const std::shared_ptr<Request>& request);
   bool prepare_v2_execution_plan(const std::shared_ptr<Request>& request);
   bool select_and_prepare_dispatch(const std::shared_ptr<Request>& request);
+  void reset_d_admission_trace(const std::shared_ptr<Request>& request);
+  void begin_d_admission(const std::shared_ptr<Request>& request);
+  void finish_d_admission(
+      const std::shared_ptr<Request>& request,
+      xllm::proto::EventResult result,
+      xllm::proto::EventReason reason,
+      std::optional<uint32_t> engine_attempts = std::nullopt,
+      std::optional<uint64_t> engine_rpc_duration_ns = std::nullopt);
+  void finish_d_admission_from_output(const std::shared_ptr<Request>& request,
+                                      const llm::RequestOutput& output);
+  void record_resource_release(const std::shared_ptr<Request>& request);
+  void finish_resource_release_traces(bool fail_pending = false);
   bool admit_flow_control_locked(const std::shared_ptr<Request>& request);
   void record_kv_route_decision(const std::shared_ptr<Request>& request);
   void record_kv_route_actual(const std::shared_ptr<Request>& request,
@@ -266,6 +278,12 @@ class Scheduler final {
   // exact process-termination evidence. Lock order is this mutex, then
   // request_mutex_, then InstanceMgr's internal cluster mutex.
   std::mutex execution_hold_cleanup_mutex_;
+
+  // Keeps only requests whose detached hold is in the bounded cleanup table,
+  // so RESOURCE_RELEASE STARTED can receive an eventual terminal event.
+  std::mutex resource_release_trace_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<Request>>
+      pending_resource_release_traces_;
 
   std::mutex execution_hold_cleanup_wait_mutex_;
   std::condition_variable execution_hold_cleanup_cv_;

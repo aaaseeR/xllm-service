@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "scheduler/flow_control_queue.h"
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -44,6 +46,10 @@ bool multiply_overflows(uint64_t left, uint64_t right) {
 std::string flow_key(const FlowControlWork& work) {
   return work.model_pool + "\n" + work.tenant_id + "\n" + work.flow_id + "\n" +
          std::to_string(work.priority_band);
+}
+
+std::string tenant_band_key(const FlowControlWork& work) {
+  return work.tenant_id + "\n" + std::to_string(work.priority_band);
 }
 
 }  // namespace
@@ -199,6 +205,7 @@ FlowControlAdmission FlowControlQueue::admit(const FlowControlWork& work,
       .enqueue_sequence = next_enqueue_sequence_++,
   };
   entries_.emplace(work.request_uid, std::move(entry));
+  activate_queued_work_locked(work);
 
   Usage& service = service_usage_;
   Usage& model = model_usage_[work.model_pool];
@@ -212,10 +219,69 @@ FlowControlAdmission FlowControlQueue::admit(const FlowControlWork& work,
   return {FlowControlStatus::OK, earliest_ms};
 }
 
+void FlowControlQueue::activate_queued_work_locked(
+    const FlowControlWork& work) {
+  RoundRobinState& tenant = tenant_round_robin_[tenant_band_key(work)];
+  if (tenant.queued_requests == 0) {
+    CHECK_NE(next_tenant_turn_, std::numeric_limits<uint64_t>::max());
+    tenant.turn = next_tenant_turn_++;
+  }
+  ++tenant.queued_requests;
+
+  RoundRobinState& flow = flow_round_robin_[flow_key(work)];
+  if (flow.queued_requests == 0) {
+    CHECK_NE(next_flow_turn_, std::numeric_limits<uint64_t>::max());
+    flow.turn = next_flow_turn_++;
+  }
+  ++flow.queued_requests;
+}
+
+void FlowControlQueue::remove_queued_work_locked(const FlowControlWork& work) {
+  const std::string tenant_key = tenant_band_key(work);
+  auto tenant = tenant_round_robin_.find(tenant_key);
+  CHECK(tenant != tenant_round_robin_.end());
+  CHECK_GT(tenant->second.queued_requests, 0u);
+  if (--tenant->second.queued_requests == 0) {
+    tenant_round_robin_.erase(tenant);
+  }
+
+  const std::string key = flow_key(work);
+  auto flow = flow_round_robin_.find(key);
+  CHECK(flow != flow_round_robin_.end());
+  CHECK_GT(flow->second.queued_requests, 0u);
+  if (--flow->second.queued_requests == 0) {
+    flow_round_robin_.erase(flow);
+  }
+}
+
+void FlowControlQueue::rotate_queued_work_after_dispatch_locked(
+    const FlowControlWork& work) {
+  const std::string tenant_key = tenant_band_key(work);
+  auto tenant = tenant_round_robin_.find(tenant_key);
+  CHECK(tenant != tenant_round_robin_.end());
+  CHECK_GT(tenant->second.queued_requests, 0u);
+  if (--tenant->second.queued_requests == 0) {
+    tenant_round_robin_.erase(tenant);
+  } else {
+    CHECK_NE(next_tenant_turn_, std::numeric_limits<uint64_t>::max());
+    tenant->second.turn = next_tenant_turn_++;
+  }
+
+  const std::string key = flow_key(work);
+  auto flow = flow_round_robin_.find(key);
+  CHECK(flow != flow_round_robin_.end());
+  CHECK_GT(flow->second.queued_requests, 0u);
+  if (--flow->second.queued_requests == 0) {
+    flow_round_robin_.erase(flow);
+  } else {
+    CHECK_NE(next_flow_turn_, std::numeric_limits<uint64_t>::max());
+    flow->second.turn = next_flow_turn_++;
+  }
+}
+
 std::optional<std::string> FlowControlQueue::select_next_locked(
     TimePoint now,
     bool allow_strict) const {
-  const Entry* selected = nullptr;
   int32_t highest_band = std::numeric_limits<int32_t>::max();
   int32_t oldest_starved_band = std::numeric_limits<int32_t>::max();
   const Entry* oldest_lower = nullptr;
@@ -258,6 +324,7 @@ std::optional<std::string> FlowControlQueue::select_next_locked(
   const int32_t target_band =
       oldest_lower == nullptr ? highest_band : oldest_starved_band;
 
+  const Entry* selected_tenant_entry = nullptr;
   for (const auto& pair : entries_) {
     const Entry& entry = pair.second;
     const auto model_it = model_usage_.find(entry.work.model_pool);
@@ -269,26 +336,76 @@ std::optional<std::string> FlowControlQueue::select_next_locked(
         entry.work.priority_band != target_band) {
       continue;
     }
+    if (selected_tenant_entry == nullptr) {
+      selected_tenant_entry = &entry;
+      continue;
+    }
+    const RoundRobinState& entry_tenant =
+        tenant_round_robin_.at(tenant_band_key(entry.work));
+    const RoundRobinState& selected_tenant =
+        tenant_round_robin_.at(tenant_band_key(selected_tenant_entry->work));
+    if (entry_tenant.turn < selected_tenant.turn ||
+        (entry_tenant.turn == selected_tenant.turn &&
+         entry.enqueue_sequence < selected_tenant_entry->enqueue_sequence)) {
+      selected_tenant_entry = &entry;
+    }
+  }
+
+  if (selected_tenant_entry == nullptr) {
+    return std::nullopt;
+  }
+  const std::string& selected_tenant_id = selected_tenant_entry->work.tenant_id;
+
+  const Entry* selected_flow_entry = nullptr;
+  for (const auto& pair : entries_) {
+    const Entry& entry = pair.second;
+    const auto model_it = model_usage_.find(entry.work.model_pool);
+    const bool model_full = model_it != model_usage_.end() &&
+                            model_it->second.dispatched_requests >=
+                                config_.max_model_dispatched_request_contexts;
+    if (entry.dispatched || entry.queue_expiry <= now || model_full ||
+        (!allow_strict && entry.work.strict) ||
+        entry.work.priority_band != target_band ||
+        entry.work.tenant_id != selected_tenant_id) {
+      continue;
+    }
+    if (selected_flow_entry == nullptr) {
+      selected_flow_entry = &entry;
+      continue;
+    }
+    const RoundRobinState& entry_flow =
+        flow_round_robin_.at(flow_key(entry.work));
+    const RoundRobinState& selected_flow =
+        flow_round_robin_.at(flow_key(selected_flow_entry->work));
+    if (entry_flow.turn < selected_flow.turn ||
+        (entry_flow.turn == selected_flow.turn &&
+         entry.enqueue_sequence < selected_flow_entry->enqueue_sequence)) {
+      selected_flow_entry = &entry;
+    }
+  }
+
+  if (selected_flow_entry == nullptr) {
+    return std::nullopt;
+  }
+  const std::string selected_flow_key = flow_key(selected_flow_entry->work);
+  const Entry* selected = nullptr;
+  for (const auto& pair : entries_) {
+    const Entry& entry = pair.second;
+    const auto model_it = model_usage_.find(entry.work.model_pool);
+    const bool model_full = model_it != model_usage_.end() &&
+                            model_it->second.dispatched_requests >=
+                                config_.max_model_dispatched_request_contexts;
+    if (entry.dispatched || entry.queue_expiry <= now || model_full ||
+        (!allow_strict && entry.work.strict) ||
+        entry.work.priority_band != target_band ||
+        flow_key(entry.work) != selected_flow_key) {
+      continue;
+    }
     if (selected == nullptr) {
       selected = &entry;
       continue;
     }
-    const uint64_t entry_count = [&]() {
-      const auto it = flow_dispatch_count_.find(flow_key(entry.work));
-      return it == flow_dispatch_count_.end() ? 0 : it->second;
-    }();
-    const uint64_t selected_count = [&]() {
-      const auto it = flow_dispatch_count_.find(flow_key(selected->work));
-      return it == flow_dispatch_count_.end() ? 0 : it->second;
-    }();
-    if (entry_count != selected_count) {
-      if (entry_count < selected_count) {
-        selected = &entry;
-      }
-      continue;
-    }
-    if (flow_key(entry.work) == flow_key(selected->work) &&
-        config_.flow_order == FlowOrder::EDF &&
+    if (config_.flow_order == FlowOrder::EDF &&
         entry.work.deadline != selected->work.deadline) {
       if (entry.work.deadline < selected->work.deadline) {
         selected = &entry;
@@ -340,17 +457,16 @@ FlowControlDispatch FlowControlQueue::take_next(TimePoint now,
   for (Usage* usage : {&service, &model, &tenant}) {
     --usage->queued_requests;
     usage->queued_prompt_tokens -= entry.work.prompt_tokens;
+    ++usage->dispatched_requests;
   }
   service.queued_bytes -= entry.work.request_bytes;
   model.queued_bytes -= entry.work.request_bytes;
-  ++service.dispatched_requests;
-  ++model.dispatched_requests;
+  rotate_queued_work_after_dispatch_locked(entry.work);
   entry.dispatched = true;
   entry.blind_probe = blind_probe;
   if (blind_probe) {
     ++blind_probes_inflight_;
   }
-  ++flow_dispatch_count_[flow_key(entry.work)];
   if (entry.work.priority_band == last_priority_band_) {
     ++consecutive_priority_dispatches_;
   } else {
@@ -362,7 +478,7 @@ FlowControlDispatch FlowControlQueue::take_next(TimePoint now,
 
 void FlowControlQueue::erase_queued_locked(
     std::unordered_map<std::string, Entry>::iterator it) {
-  const FlowControlWork& work = it->second.work;
+  const FlowControlWork work = it->second.work;
   Usage& service = service_usage_;
   Usage& model = model_usage_.at(work.model_pool);
   Usage& tenant = tenant_usage_.at(work.tenant_id);
@@ -372,14 +488,40 @@ void FlowControlQueue::erase_queued_locked(
   }
   service.queued_bytes -= work.request_bytes;
   model.queued_bytes -= work.request_bytes;
+  remove_queued_work_locked(work);
   entries_.erase(it);
+  erase_empty_usage_locked(work);
 }
 
-void FlowControlQueue::decrement_dispatched_locked(const Entry& entry) {
-  --service_usage_.dispatched_requests;
-  --model_usage_.at(entry.work.model_pool).dispatched_requests;
+void FlowControlQueue::decrement_dispatched_locked(const Entry& entry,
+                                                   bool erase_empty_usage) {
+  Usage& service = service_usage_;
+  Usage& model = model_usage_.at(entry.work.model_pool);
+  Usage& tenant = tenant_usage_.at(entry.work.tenant_id);
+  for (Usage* usage : {&service, &model, &tenant}) {
+    CHECK_GT(usage->dispatched_requests, 0u);
+    --usage->dispatched_requests;
+  }
   if (entry.blind_probe) {
     --blind_probes_inflight_;
+  }
+  if (erase_empty_usage) {
+    erase_empty_usage_locked(entry.work);
+  }
+}
+
+void FlowControlQueue::erase_empty_usage_locked(const FlowControlWork& work) {
+  const auto empty = [](const Usage& usage) {
+    return usage.queued_requests == 0 && usage.dispatched_requests == 0 &&
+           usage.queued_prompt_tokens == 0 && usage.queued_bytes == 0;
+  };
+  const auto model = model_usage_.find(work.model_pool);
+  if (model != model_usage_.end() && empty(model->second)) {
+    model_usage_.erase(model);
+  }
+  const auto tenant = tenant_usage_.find(work.tenant_id);
+  if (tenant != tenant_usage_.end() && empty(tenant->second)) {
+    tenant_usage_.erase(tenant);
   }
 }
 
@@ -390,7 +532,7 @@ FlowControlStatus FlowControlQueue::cancel(const std::string& request_uid) {
     return FlowControlStatus::UNKNOWN_REQUEST;
   }
   if (it->second.dispatched) {
-    decrement_dispatched_locked(it->second);
+    decrement_dispatched_locked(it->second, /*erase_empty_usage=*/true);
     entries_.erase(it);
   } else {
     erase_queued_locked(it);
@@ -407,7 +549,7 @@ FlowControlStatus FlowControlQueue::complete(const std::string& request_uid) {
   if (!it->second.dispatched) {
     return FlowControlStatus::INVALID_ARGUMENT;
   }
-  decrement_dispatched_locked(it->second);
+  decrement_dispatched_locked(it->second, /*erase_empty_usage=*/true);
   entries_.erase(it);
   return FlowControlStatus::OK;
 }
@@ -423,7 +565,7 @@ FlowControlStatus FlowControlQueue::return_to_queue(
   if (!entry.dispatched) {
     return FlowControlStatus::INVALID_ARGUMENT;
   }
-  decrement_dispatched_locked(entry);
+  decrement_dispatched_locked(entry, /*erase_empty_usage=*/false);
 
   Usage& service = service_usage_;
   Usage& model = model_usage_.at(entry.work.model_pool);
@@ -434,6 +576,7 @@ FlowControlStatus FlowControlQueue::return_to_queue(
   }
   service.queued_bytes += entry.work.request_bytes;
   model.queued_bytes += entry.work.request_bytes;
+  activate_queued_work_locked(entry.work);
   entry.dispatched = false;
   entry.blind_probe = false;
   return FlowControlStatus::OK;
@@ -485,6 +628,9 @@ FlowControlSnapshot FlowControlQueue::snapshot() const {
       .dispatched_context_bytes =
           service_usage_.dispatched_requests * config_.dispatched_context_bytes,
       .blind_probes_inflight = blind_probes_inflight_,
+      .active_model_accounts = model_usage_.size(),
+      .active_tenant_accounts = tenant_usage_.size(),
+      .active_queued_flows = flow_round_robin_.size(),
   };
 }
 

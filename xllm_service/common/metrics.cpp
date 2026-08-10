@@ -37,6 +37,16 @@ DEFINE_GAUGE(xllm_service_v2_active_requests,
              "Current Service-owned request contexts");
 DEFINE_GAUGE(xllm_service_v2_observability_ring_events,
              "Current buffered request events");
+DEFINE_GAUGE(xllm_service_v2_engine_kv_reporting_engines,
+             "Fresh Engine states reporting KV capacity");
+DEFINE_GAUGE(xllm_service_v2_engine_kv_reporting_dp_ranks,
+             "Fresh Engine DP ranks reporting KV capacity");
+DEFINE_GAUGE(xllm_service_v2_engine_kv_max_used_ratio,
+             "Maximum fresh Engine KV used ratio");
+DEFINE_GAUGE(xllm_service_v2_engine_kv_min_free_blocks,
+             "Minimum fresh Engine KV free blocks per DP rank");
+DEFINE_GAUGE(xllm_service_v2_engine_kv_total_free_blocks,
+             "Sum of fresh Engine KV free blocks across DP ranks");
 
 DEFINE_MULTI_COUNTER(xllm_service_v2_request_lifecycle_total,
                      "phase",

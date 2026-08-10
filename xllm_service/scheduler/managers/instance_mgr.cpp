@@ -864,6 +864,11 @@ InstanceMgr::engine_observation_snapshot(uint64_t receiver_monotonic_ms) const {
   return engine_registry_.observation_snapshot(receiver_monotonic_ms);
 }
 
+provider::EngineKVCapacitySnapshot InstanceMgr::engine_kv_capacity_snapshot(
+    uint64_t receiver_monotonic_ms) const {
+  return engine_registry_.kv_capacity_snapshot(receiver_monotonic_ms);
+}
+
 size_t InstanceMgr::engine_member_count() const {
   return engine_registry_.member_count();
 }
@@ -1045,8 +1050,8 @@ bool InstanceMgr::bind_request_instance_incarnations(
           request->kv_isolation_domain.empty()
               ? request->correlation.request_uid()
               : request->kv_isolation_domain;
-      request->kv_namespace = derive_request_kv_namespace(
-          prefill_namespace, isolation_domain, /*adapter_identity=*/"");
+      request->kv_namespace =
+          derive_request_kv_namespace(prefill_namespace, isolation_domain);
       if (request->kv_namespace.empty()) {
         LOG(ERROR) << "Failed to derive request KV isolation namespace.";
         return false;

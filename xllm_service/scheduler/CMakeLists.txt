@@ -11,6 +11,8 @@ cc_library(
     flow_control_queue.h
   SRCS
     flow_control_queue.cpp
+  DEPS
+    glog::glog
 )
 
 cc_library(
