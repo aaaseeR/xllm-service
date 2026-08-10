@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -92,7 +93,12 @@ TEST(FlowControlQueueTest, RejectsUnboundedOrDelimitedIdentityKeys) {
   invalid.flow_id = "flow\nforged";
   EXPECT_EQ(queue.admit(invalid, now, SaturationState::AVAILABLE).status,
             FlowControlStatus::INVALID_ARGUMENT);
-  EXPECT_EQ(queue.snapshot().queued_requests, 0u);
+  const FlowControlSnapshot snapshot = queue.snapshot();
+  EXPECT_EQ(snapshot.queued_requests, 0u);
+  EXPECT_EQ(snapshot.dispatched_requests, 0u);
+  EXPECT_EQ(snapshot.active_model_accounts, 0u);
+  EXPECT_EQ(snapshot.active_tenant_accounts, 0u);
+  EXPECT_EQ(snapshot.active_queued_flows, 0u);
 }
 
 TEST(FlowControlQueueTest, CapacityRejectionDoesNotPartiallyReserve) {
@@ -347,6 +353,99 @@ TEST(FlowControlQueueTest, ConcurrentAdmissionNeverExceedsHardLimit) {
     thread.join();
   }
   EXPECT_EQ(queue.snapshot().queued_requests, 8);
+}
+
+TEST(FlowControlQueueTest, LateFlowSharesDispatchWithEstablishedFlow) {
+  FlowControlConfig limits = config();
+  limits.max_queued_requests = 64;
+  limits.max_dispatched_request_contexts = 64;
+  limits.max_queued_requests_per_tenant = 64;
+  limits.max_model_queued_requests = 64;
+  limits.max_model_dispatched_request_contexts = 64;
+  limits.service_crash_request_budget = 128;
+  limits.service_memory_budget_bytes = 640000;
+  FlowControlQueue queue(limits);
+  const auto now = FlowControlQueue::Clock::now();
+  const auto flow_work = [now](std::string uid, std::string flow) {
+    FlowControlWork value = work(std::move(uid), now);
+    value.flow_id = std::move(flow);
+    return value;
+  };
+
+  for (int index = 0; index < 20; ++index) {
+    const std::string uid = "a-warm-" + std::to_string(index);
+    ASSERT_EQ(queue.admit(flow_work(uid, "flow-a"),
+                          now,
+                          SaturationState::AVAILABLE)
+                  .status,
+              FlowControlStatus::OK);
+    const FlowControlDispatch dispatch =
+        queue.take_next(now, SaturationState::AVAILABLE);
+    ASSERT_TRUE(dispatch.work.has_value());
+    ASSERT_EQ(queue.complete(uid), FlowControlStatus::OK);
+  }
+
+  for (int index = 0; index < 10; ++index) {
+    ASSERT_EQ(queue
+                  .admit(flow_work("a-" + std::to_string(index), "flow-a"),
+                         now,
+                         SaturationState::AVAILABLE)
+                  .status,
+              FlowControlStatus::OK);
+    ASSERT_EQ(queue
+                  .admit(flow_work("b-" + std::to_string(index), "flow-b"),
+                         now,
+                         SaturationState::AVAILABLE)
+                  .status,
+              FlowControlStatus::OK);
+  }
+
+  int a_dispatched = 0;
+  int b_dispatched = 0;
+  std::string order;
+  for (int index = 0; index < 20; ++index) {
+    const FlowControlDispatch dispatch =
+        queue.take_next(now, SaturationState::AVAILABLE);
+    ASSERT_TRUE(dispatch.work.has_value()) << "stalled at " << index;
+    if (dispatch.work->flow_id == "flow-a") {
+      ++a_dispatched;
+      order.push_back('A');
+    } else {
+      ++b_dispatched;
+      order.push_back('B');
+    }
+    ASSERT_EQ(queue.complete(dispatch.work->request_uid),
+              FlowControlStatus::OK);
+  }
+
+  EXPECT_EQ(a_dispatched, 10) << "dispatch order was " << order;
+  EXPECT_EQ(b_dispatched, 10) << "dispatch order was " << order;
+  size_t longest_run = 0;
+  size_t current_run = 0;
+  for (size_t index = 0; index < order.size(); ++index) {
+    current_run = index > 0 && order[index] == order[index - 1]
+                      ? current_run + 1
+                      : 1;
+    longest_run = std::max(longest_run, current_run);
+  }
+  EXPECT_LE(longest_run, 2u) << "dispatch order was " << order;
+}
+
+TEST(FlowControlQueueTest, DrainedFlowsDoNotAccumulateState) {
+  FlowControlQueue queue(config());
+  const auto now = FlowControlQueue::Clock::now();
+  for (int index = 0; index < 200; ++index) {
+    const std::string uid = "request-" + std::to_string(index);
+    FlowControlWork value = work(uid, now);
+    value.flow_id = "flow-" + std::to_string(index);
+    ASSERT_EQ(queue.admit(value, now, SaturationState::AVAILABLE).status,
+              FlowControlStatus::OK);
+    const FlowControlDispatch dispatch =
+        queue.take_next(now, SaturationState::AVAILABLE);
+    ASSERT_TRUE(dispatch.work.has_value());
+    ASSERT_EQ(queue.complete(uid), FlowControlStatus::OK);
+  }
+  EXPECT_EQ(queue.snapshot().queued_requests, 0u);
 }
 
 }  // namespace

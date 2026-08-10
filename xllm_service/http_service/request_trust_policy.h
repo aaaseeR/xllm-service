@@ -67,6 +67,7 @@ class KVSessionTokenCodec final {
 
 struct RequestTrustInput {
   bool trusted_tenant_headers_enabled = false;
+  bool trusted_client_identity_headers_enabled = false;
   std::string tenant_header;
   std::string flow_header;
   std::string kv_session_token;
@@ -85,10 +86,10 @@ struct RequestTrustDecision {
   std::string issued_kv_session_token;
 };
 
-// Tenant/flow/priority are trusted as one authorization unit. Without that
-// trust, Service issues or verifies an opaque signed session so repeated
-// prompts can reuse Engine prefix cache without accepting a forgeable tenant
-// or flow identity from the client.
+// Tenant/flow/priority and the authenticated client identity are independent
+// Gateway trust assertions. Without either trust, Service issues or verifies
+// an opaque signed session so repeated prompts can reuse Engine prefix cache
+// without accepting a forgeable identity from the client.
 std::optional<RequestTrustDecision> decide_request_trust(
     const RequestTrustInput& input,
     const KVSessionTokenCodec& session_codec);

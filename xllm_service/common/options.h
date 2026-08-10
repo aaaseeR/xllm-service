@@ -263,6 +263,9 @@ class Options {
   // The deployment, not an end client, asserts that tenant/flow headers are
   // authenticated and stripped/replaced at the Gateway trust boundary.
   XLLM_SERVICE_PROPERTY(bool, trusted_tenant_headers_enabled) = false;
+  // This gate is separate because a deployment may trust only the Gateway's
+  // authenticated client identity while keeping tenant and priority anonymous.
+  XLLM_SERVICE_PROPERTY(bool, trusted_client_identity_headers_enabled) = false;
   XLLM_SERVICE_PROPERTY(std::string, kv_session_hmac_secret);
   XLLM_SERVICE_PROPERTY(std::string, kv_session_hmac_previous_secret);
   XLLM_SERVICE_PROPERTY(uint64_t, kv_session_token_ttl_seconds) = 86400;

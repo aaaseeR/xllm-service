@@ -260,16 +260,18 @@ int main(int argc, char* argv[]) {
   }
   if (FLAGS_kv_session_token_ttl_seconds == 0 ||
       FLAGS_kv_session_token_ttl_seconds >
-          KVSessionTokenCodec::kMaxTokenTtlSeconds) {
+          xllm_service::KVSessionTokenCodec::kMaxTokenTtlSeconds) {
     LOG(ERROR) << "--kv_session_token_ttl_seconds must be in [1, "
-               << KVSessionTokenCodec::kMaxTokenTtlSeconds << "]";
+               << xllm_service::KVSessionTokenCodec::kMaxTokenTtlSeconds
+               << "]";
     return -1;
   }
   if (FLAGS_kv_route_enforced_gate_open &&
-      !FLAGS_trusted_tenant_headers_enabled &&
+      (!FLAGS_trusted_tenant_headers_enabled ||
+       FLAGS_trusted_client_identity_headers_enabled) &&
       FLAGS_kv_session_hmac_secret.empty()) {
-    LOG(ERROR) << "KV route enforcement without trusted tenant headers "
-                  "requires a shared --kv_session_hmac_secret";
+    LOG(ERROR) << "KV route enforcement with an opaque or derived session "
+                  "domain requires a shared --kv_session_hmac_secret";
     return -1;
   }
   if (FLAGS_kv_route_enforced_gate_open &&
@@ -349,6 +351,8 @@ int main(int argc, char* argv[]) {
       .native_prefill_only_output_token_cap(
           FLAGS_native_prefill_only_output_token_cap)
       .trusted_tenant_headers_enabled(FLAGS_trusted_tenant_headers_enabled)
+      .trusted_client_identity_headers_enabled(
+          FLAGS_trusted_client_identity_headers_enabled)
       .kv_session_hmac_secret(FLAGS_kv_session_hmac_secret)
       .kv_session_hmac_previous_secret(FLAGS_kv_session_hmac_previous_secret)
       .kv_session_token_ttl_seconds(FLAGS_kv_session_token_ttl_seconds)

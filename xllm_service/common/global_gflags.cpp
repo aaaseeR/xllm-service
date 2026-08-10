@@ -220,6 +220,12 @@ DEFINE_bool(trusted_tenant_headers_enabled,
             "Trust authenticated x-tenant-id/x-flow-id Gateway headers. When "
             "false, tenant headers and request priority are ignored; an "
             "opaque Service-signed session scopes cross-request KV reuse.");
+DEFINE_bool(trusted_client_identity_headers_enabled,
+            false,
+            "Trust x-authenticated-client-id injected by an authenticating "
+            "Gateway for standard-SDK user session derivation. Enable only "
+            "when the Gateway strips/replaces this header and Service cannot "
+            "be reached directly.");
 DEFINE_string(kv_session_hmac_secret,
               "",
               "Shared 32-256 byte secret for signing opaque KV session "

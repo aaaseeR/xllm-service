@@ -55,4 +55,7 @@
 
 # Do not put kv_session_hmac_secret in this file. Inject a shared 32-256 byte
 # value through the deployment secret mechanism on every Service replica.
+# Enable only behind an authenticating Gateway that strips/replaces
+# x-authenticated-client-id and prevents clients from bypassing the Gateway.
+--trusted_client_identity_headers_enabled=false
 --kv_session_token_ttl_seconds=86400

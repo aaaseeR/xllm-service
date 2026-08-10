@@ -99,6 +99,7 @@ DECLARE_uint64(native_local_prefill_token_cap);
 DECLARE_bool(native_prefill_only_enabled);
 DECLARE_uint64(native_prefill_only_output_token_cap);
 DECLARE_bool(trusted_tenant_headers_enabled);
+DECLARE_bool(trusted_client_identity_headers_enabled);
 DECLARE_string(kv_session_hmac_secret);
 DECLARE_string(kv_session_hmac_previous_secret);
 DECLARE_uint64(kv_session_token_ttl_seconds);

@@ -163,21 +163,24 @@ TEST(RequestTrustPolicyTest, StandardSdkUserIsBoundToAuthenticatedClient) {
   const KVSessionTokenCodec signer = codec();
   const auto first = decide_request_trust(
       RequestTrustInput{
-          .authenticated_client = "Bearer api-key-a",
+          .trusted_client_identity_headers_enabled = true,
+          .authenticated_client = "gateway-client-a",
           .client_session_hint = "sdk-user-7",
           .request_uid = kRequestUid,
       },
       signer);
   const auto repeated = decide_request_trust(
       RequestTrustInput{
-          .authenticated_client = "Bearer api-key-a",
+          .trusted_client_identity_headers_enabled = true,
+          .authenticated_client = "gateway-client-a",
           .client_session_hint = "sdk-user-7",
           .request_uid = "018f47b2-c198-7cc8-98d7-503f58e2a613",
       },
       signer);
   const auto other_client = decide_request_trust(
       RequestTrustInput{
-          .authenticated_client = "Bearer api-key-b",
+          .trusted_client_identity_headers_enabled = true,
+          .authenticated_client = "gateway-client-b",
           .client_session_hint = "sdk-user-7",
           .request_uid = "018f47b2-c198-7cc8-98d7-503f58e2a614",
       },
@@ -188,6 +191,41 @@ TEST(RequestTrustPolicyTest, StandardSdkUserIsBoundToAuthenticatedClient) {
   EXPECT_EQ(first->kv_isolation_domain, repeated->kv_isolation_domain);
   EXPECT_NE(first->kv_isolation_domain, other_client->kv_isolation_domain);
   EXPECT_TRUE(first->issued_kv_session_token.empty());
+}
+
+TEST(RequestTrustPolicyTest, StandardSdkUserRequiresTrustedIdentityBoundary) {
+  const KVSessionTokenCodec signer = codec();
+  const auto first = decide_request_trust(
+      RequestTrustInput{
+          .authenticated_client = "attacker-controlled-credential",
+          .client_session_hint = "victim-user",
+          .request_uid = kRequestUid,
+      },
+      signer);
+  const auto second = decide_request_trust(
+      RequestTrustInput{
+          .authenticated_client = "attacker-controlled-credential",
+          .client_session_hint = "victim-user",
+          .request_uid = "018f47b2-c198-7cc8-98d7-503f58e2a613",
+      },
+      signer);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  EXPECT_NE(first->kv_isolation_domain, second->kv_isolation_domain);
+  EXPECT_FALSE(first->issued_kv_session_token.empty());
+  EXPECT_FALSE(second->issued_kv_session_token.empty());
+
+  const auto oversized_identity = decide_request_trust(
+      RequestTrustInput{
+          .trusted_client_identity_headers_enabled = true,
+          .authenticated_client = std::string(257, 'c'),
+          .client_session_hint = "victim-user",
+          .request_uid = kRequestUid,
+      },
+      signer);
+  ASSERT_TRUE(oversized_identity.has_value());
+  EXPECT_EQ(oversized_identity->kv_isolation_domain, kRequestUid);
+  EXPECT_FALSE(oversized_identity->issued_kv_session_token.empty());
 }
 
 }  // namespace

@@ -35,7 +35,7 @@ namespace {
 
 constexpr std::string_view kTokenPrefix = "v2.";
 constexpr size_t kMaxSessionIdBytes = 64;
-constexpr size_t kMaxAuthenticatedClientBytes = 8192;
+constexpr size_t kMaxAuthenticatedClientBytes = 256;
 constexpr size_t kMaxClientSessionHintBytes = 256;
 constexpr size_t kSha256HexBytes = 64;
 
@@ -277,8 +277,10 @@ std::optional<RequestTrustDecision> decide_request_trust(
     return decision;
   }
   const std::optional<std::string> client_session =
-      session_codec.derive_client_session(input.authenticated_client,
-                                           input.client_session_hint);
+      input.trusted_client_identity_headers_enabled
+          ? session_codec.derive_client_session(input.authenticated_client,
+                                                 input.client_session_hint)
+          : std::nullopt;
   if (client_session.has_value()) {
     decision.kv_isolation_domain = *client_session;
     decision.kv_isolation_reusable = true;

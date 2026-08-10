@@ -127,7 +127,9 @@ bool schedule_request(Scheduler* scheduler,
   if (!scheduler->accepting_new_requests()) {
     reply_service_not_ready(scheduler, controller);
   } else {
-    controller->SetFailed("Schedule request failed!");
+    controller->SetFailed(
+        "SCHEDULE_REJECTED; request_uid=" +
+        request->correlation.request_uid());
   }
   return false;
 }
@@ -713,12 +715,18 @@ std::shared_ptr<Request> XllmHttpServiceImpl::generate_request(
       RequestTrustInput{
           .trusted_tenant_headers_enabled =
               options_.trusted_tenant_headers_enabled(),
+          .trusted_client_identity_headers_enabled =
+              options_.trusted_client_identity_headers_enabled(),
           .tenant_header = tenant_header,
           .flow_header = first_header_value(controller, {"x-flow-id"}),
           .kv_session_token =
               first_header_value(controller, {"x-xllm-kv-session"}),
-          .authenticated_client = first_header_value(
-              controller, {"authorization", "x-api-key", "api-key"}),
+          .authenticated_client =
+              options_.trusted_client_identity_headers_enabled()
+                  ? first_header_value(controller,
+                                       {"x-authenticated-client-id",
+                                        "x-jd-authenticated-client-id"})
+                  : "",
           .client_session_hint = req_pb->user(),
           .request_uid = request->correlation.request_uid(),
           .requested_priority = requested_priority,
