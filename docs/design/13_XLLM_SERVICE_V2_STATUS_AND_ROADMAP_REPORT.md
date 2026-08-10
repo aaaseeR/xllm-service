@@ -2,58 +2,38 @@
 
 更新时间：2026-08-10
 
-汇报口径：V2/V3 代码与 CPU 离线集群门已完成；当前状态为
-`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`
+汇报口径：V2/V3 代码与 CPU 离线集群门已完成；当前状态为 `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`
 
 ## 1. 一页结论
 
-历史线上问题不是单个 Decode 算子慢，而是流量跨过容量拐点后，瓶颈会在流控、
-Prefill、P→D 交接、Decode Admission、KV 和输出之间迁移。仅增加负载均衡规则或提高
-设备平均利用率，无法稳定解决 503、TTFT/TPOT 长尾、热点倾斜和超时后无效计算。
+历史线上问题不是单个 Decode 算子慢，而是流量跨过容量拐点后，瓶颈会在流控、Prefill、P→D 交接、Decode Admission、KV 和输出之间迁移。仅增加负载均衡规则或提高设备平均利用率，无法稳定解决 503、TTFT/TPOT 长尾、热点倾斜和超时后无效计算。
 
 xLLM 的解法是建设一套统一推理系统：
 
-- **当前已完成：** V2 请求快环与 V3 资源慢环已经进入代码，完成 CPU、Torch CPU、
-  simulated HBM 和离线多进程集群验证；真实 NPU、CANN/HBM/Link 与线上流量验证尚未完成。
-- **最终产品形态：** xLLM Service 成为多 Runtime、多硬件、多模型、多 domain 的统一推理
-  控制面；xLLM Engine 与其他 Provider 形成执行和资源数据面；KV Memory Layer 形成跨
-  HBM、DRAM、SSD 和共享存储的统一内存层。
-- **最终优化目标：** 在 TTFT、TPOT、完成时间、容量、公平性、可靠性和成本约束下，
-  最大化真正满足 SLO 的请求量，而不是追求孤立的峰值吞吐或设备利用率。
-- **终极目标：** 依托 **MASS 在线服务**持续产生真实服务数据和效果反馈，发现
-  xLLM Service 与 xLLM Engine 的问题；由 **AI 智能控制面**完成诊断、优化方案生成、
-  验证、灰度、回滚和效果学习，构建持续变强的自进化推理系统。
+- **当前已完成：** V2 请求快环与 V3 资源慢环已经进入代码，完成 CPU、Torch CPU、simulated HBM 和离线多进程集群验证；真实 NPU、CANN/HBM/Link 与线上流量验证尚未完成。
+- **最终产品形态：** xLLM Service 成为多 Runtime、多硬件、多模型、多 domain 的统一推理控制面；xLLM Engine 与其他 Provider 形成执行和资源数据面；KV Memory Layer 形成跨 HBM、DRAM、SSD 和共享存储的统一内存层。
+- **最终优化目标：** 在 TTFT、TPOT、完成时间、容量、公平性、可靠性和成本约束下，最大化真正满足 SLO 的请求量，而不是追求孤立的峰值吞吐或设备利用率。
+- **终极目标：** 依托 **MASS 在线服务**持续产生真实服务数据和效果反馈，发现 xLLM Service 与 xLLM Engine 的问题；由 **AI 智能控制面**完成诊断、优化方案生成、验证、灰度、回滚和效果学习，构建持续变强的自进化推理系统。
 
-最终要交付的不是一个“路由器”或一组固定 P/D 服务，而是一个能够感知真实业务、统一
-控制请求与资源、从线上反馈中持续学习并安全演进的推理基础设施。
+最终要交付的不是一个“路由器”或一组固定 P/D 服务，而是一个能够感知真实业务、统一控制请求与资源、从线上反馈中持续学习并安全演进的推理基础设施。
 
 ## 2. 最终形态与北极星指标
 
 最终系统由五项核心能力组成：
 
-1. **统一请求控制：** 在同一入口完成公平准入、Provider/执行模式选择、P/D 选择、
-   attempt/commit、deadline、容错与输出收敛。
-2. **统一资源控制：** Placement/Autoscale 慢环依据负载、模型热度、SLO、KV 热度和成本，
-   调整模型、副本、P/D 角色、并行规格与拓扑放置。
-3. **统一执行契约：** Service 只理解 Provider、profile、capability、资源摘要和稳定错误；
-   NPU/GPU、CANN/CUDA、allocator、Connector 和真实 HBM 由 Engine/Provider 负责。
-4. **统一 KV 内存层：** HBM、DRAM、SSD、Mooncake/共享 Store 按收益和成本协同，支持
-   Prefix 复用、恢复与放置，但不把 Service 变成会话或业务状态数据库。
-5. **MASS 驱动的自进化闭环：** 真实服务数据驱动 AI 发现问题、提出优化并验证上线，
-   持续改善 Service 调度和 Engine 执行效率。
+1. **统一请求控制：** 在同一入口完成公平准入、Provider/执行模式选择、P/D 选择、attempt/commit、deadline、容错与输出收敛。
+2. **统一资源控制：** Placement/Autoscale 慢环依据负载、模型热度、SLO、KV 热度和成本，调整模型、副本、P/D 角色、并行规格与拓扑放置。
+3. **统一执行契约：** Service 只理解 Provider、profile、capability、资源摘要和稳定错误；NPU/GPU、CANN/CUDA、allocator、Connector 和真实 HBM 由 Engine/Provider 负责。
+4. **统一 KV 内存层：** HBM、DRAM、SSD、Mooncake/共享 Store 按收益和成本协同，支持 Prefix 复用、恢复与放置，但不把 Service 变成会话或业务状态数据库。
+5. **MASS 驱动的自进化闭环：** 真实服务数据驱动 AI 发现问题、提出优化并验证上线，持续改善 Service 调度和 Engine 执行效率。
 
-北极星指标是 **SLO Goodput**：满足 TTFT、TPOT、完成时间和正确性约束的有效请求量。
-配套约束包括公平性、错误率、资源泄漏、单位请求成本和故障恢复时间；自进化能力还要衡量
-“发现问题 → 形成方案 → 证明收益 → 安全上线”的周期。
+北极星指标是 **SLO Goodput**：满足 TTFT、TPOT、完成时间和正确性约束的有效请求量。配套约束包括公平性、错误率、资源泄漏、单位请求成本和故障恢复时间；自进化能力还要衡量“发现问题 → 形成方案 → 证明收益 → 安全上线”的周期。
 
-AI 不直接绕过生产安全边界。capability、fencing、原子 admission、资源所有权、deadline
-和输出唯一性继续由确定性协议保证；AI 生成的策略、参数或代码必须经过离线回放、CPU
-端到端压测、真实 NPU 验证、线上灰度、SLO guard 和可回滚发布后才能生效。
+AI 不直接绕过生产安全边界。capability、fencing、原子 admission、资源所有权、deadline 和输出唯一性继续由确定性协议保证；AI 生成的策略、参数或代码必须经过离线回放、CPU 端到端压测、真实 NPU 验证、线上灰度、SLO guard 和可回滚发布后才能生效。
 
 ## 3. 总体框架图
 
-下图同时给出当前已落地的 V2/V3 主体与终极 MASS/AI 闭环。实线是请求或控制路径，
-虚线是状态、观测和学习反馈；AI 闭环是目标架构，不代表当前已经生产交付。
+下图同时给出当前已落地的 V2/V3 主体与终极 MASS/AI 闭环。实线是请求或控制路径，虚线是状态、观测和学习反馈；AI 闭环是目标架构，不代表当前已经生产交付。
 
 ```mermaid
 flowchart TB
@@ -109,15 +89,11 @@ flowchart TB
   GATE -.->|"已验证 Runtime 优化"| XENGINE
 ```
 
-框架边界有四条：Gateway 负责业务信任与连接；xLLM Service 负责请求快环和资源慢环；
-Engine/Store 持有真实执行、KV 和设备资源；MASS/AI 负责观察、诊断和受控优化，不能成为
-单次请求正确性的同步依赖。完整静态组件图和原请求流程图见
-[总体架构设计](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md#4-总体架构组件拓扑与平面边界)。
+框架边界有四条：Gateway 负责业务信任与连接；xLLM Service 负责请求快环和资源慢环；Engine/Store 持有真实执行、KV 和设备资源；MASS/AI 负责观察、诊断和受控优化，不能成为单次请求正确性的同步依赖。完整静态组件图和原请求流程图见 [总体架构设计](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md#4-总体架构组件拓扑与平面边界)。
 
 ## 4. 为什么要做：数据事实与业界判断
 
-历史数据用于确定优先级，不是 V2/V3 上线收益证明。完整口径见
-[GLM-5.2 线上瓶颈分析](./10_XLLM_SERVICE_GLM52_ONLINE_BOTTLENECK_ANALYSIS.md)。
+历史数据用于确定优先级，不是 V2/V3 上线收益证明。完整口径见 [GLM-5.2 线上瓶颈分析](./10_XLLM_SERVICE_GLM52_ONLINE_BOTTLENECK_ANALYSIS.md)。
 
 | 结论 | 关键证据 | 系统要求 |
 | --- | --- | --- |
@@ -126,11 +102,7 @@ Engine/Store 持有真实执行、KV 和设备资源；MASS/AI 负责观察、�
 | 超时后计算浪费严重 | 8,626 个请求超过 300s，最长 4,891s | deadline、cancel、fencing 和资源释放必须下沉到 Engine |
 | 旧观测不足以指导优化 | 8.34% 多 token 请求 TPOT=0；Prefix Cache 750,740 个成功请求命中全为 0 | 统一身份、阶段事件、有效性和预测/实际对账 |
 
-llm-d、NVIDIA Dynamo、SGLang Gateway 和 AIBrix 的共同趋势，是把请求决策、执行资源、
-异步状态/KV 与资源规划拆开，并通过稳定能力契约接入不同 Runtime。xLLM 选择沿用这条
-主线，同时强化跨 P/D attempt/commit/fencing、Engine 原子准入、逐层 PUSH、结果不明
-hold，以及 Native/vLLM 的能力非对称接入。对标细节见
-[总体架构设计](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md#11-业界推理服务框架与演进方向)。
+llm-d、NVIDIA Dynamo、SGLang Gateway 和 AIBrix 的共同趋势，是把请求决策、执行资源、异步状态/KV 与资源规划拆开，并通过稳定能力契约接入不同 Runtime。xLLM 选择沿用这条主线，同时强化跨 P/D attempt/commit/fencing、Engine 原子准入、逐层 PUSH、结果不明 hold，以及 Native/vLLM 的能力非对称接入。对标细节见 [总体架构设计](./01_XLLM_SERVICE_ARCHITECTURE_DESIGN.md#11-业界推理服务框架与演进方向)。
 
 ## 5. 当前已经交付什么
 
@@ -142,9 +114,7 @@ hold，以及 Native/vLLM 的能力非对称接入。对标细节见
 | Debug 与性能分析 | request/attempt/incarnation 统一身份；阶段事件；bvar；VLOG JSON；cluster snapshot；KV pressure、cleanup、drop 和 residual 观测 | [Observability 实现](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/observability) |
 | 交付门禁 | 511/511 Service tests、140/140 xLLM CPU contract、65/65 vLLM sidecar tests；V2/V3 离线多进程 E2E、并发压测与故障矩阵 | [离线集群硬门](./implementation/OFFLINE_E2E_GATE_STATUS.md) |
 
-当前结论是：**V2/V3 已证明代码链路、协议不变量和 CPU 离线集群行为，尚未证明真实 NPU
-性能、CANN/HBM/Link 行为与线上生产收益。** CPU 不是产品运行目标，simulated HBM 也不
-替代真实 HBM；它们用于在上 NPU 前尽可能消除控制链和资源生命周期问题。
+当前结论是：**V2/V3 已证明代码链路、协议不变量和 CPU 离线集群行为，尚未证明真实 NPU 性能、CANN/HBM/Link 行为与线上生产收益。** CPU 不是产品运行目标，simulated HBM 也不替代真实 HBM；它们用于在上 NPU 前尽可能消除控制链和资源生命周期问题。
 
 ## 6. 三项关键系统策略
 
@@ -186,34 +156,23 @@ global_request_id / trace_id
   → engine_uid / incarnation / dp-rank / link / prefix
 ```
 
-常态使用低基数指标和 cluster snapshot 观察 goodput、queue、admission、route、KV pressure、
-state freshness、cleanup 和 event drop；问题窗口按定向副本开启结构化逐请求事件。性能统一按
-`ingress + queue + route + P/prefill + transfer + D/decode + output` 分解，并标注样本有效性、
-clock domain 和分位数。诊断顺序固定为数据完整性 → 公平/队列 → 路由 → Admission/KV →
-Engine/Kernel，避免用不完整数据误调参数。详见
-[Observability Runbook](./implementation/OBSERVABILITY_RUNBOOK.md)。
+常态使用低基数指标和 cluster snapshot 观察 goodput、queue、admission、route、KV pressure、state freshness、cleanup 和 event drop；问题窗口按定向副本开启结构化逐请求事件。性能统一按 `ingress + queue + route + P/prefill + transfer + D/decode + output` 分解，并标注样本有效性、clock domain 和分位数。诊断顺序固定为数据完整性 → 公平/队列 → 路由 → Admission/KV → Engine/Kernel，避免用不完整数据误调参数。详见 [Observability Runbook](./implementation/OBSERVABILITY_RUNBOOK.md)。
 
 ## 7. MASS 驱动的自进化闭环
 
-MASS 是终极形态的业务反馈源和演进载体。它既产生真实在线请求，也提供任务完成质量、
-用户反馈和业务 SLO，使推理系统不只知道“设备是否繁忙”，还知道“服务结果是否真正有效”。
+MASS 是终极形态的业务反馈源和演进载体。它既产生真实在线请求，也提供任务完成质量、用户反馈和业务 SLO，使推理系统不只知道“设备是否繁忙”，还知道“服务结果是否真正有效”。
 
 闭环按七步运行：
 
 1. **产生：** MASS 在线服务产生真实负载、结果、SLO 和业务效果反馈。
 2. **观测：** Service、Engine、KV、网络和 Placement 以统一身份记录完整阶段、资源和成本。
-3. **诊断：** AI 关联请求与集群状态，识别容量拐点、热点、调度偏差、资源泄漏、Engine
-   scheduler/KV/通信瓶颈和数据质量问题。
+3. **诊断：** AI 关联请求与集群状态，识别容量拐点、热点、调度偏差、资源泄漏、Engine scheduler/KV/通信瓶颈和数据质量问题。
 4. **优化：** 生成调度策略、阈值、容量与放置、Provider profile、Engine 参数或代码候选。
-5. **验证：** 历史回放、CPU/Torch CPU、离线分布式高并发、故障注入、NPU 基准和 canary
-   逐层证明正确性与收益。
+5. **验证：** 历史回放、CPU/Torch CPU、离线分布式高并发、故障注入、NPU 基准和 canary 逐层证明正确性与收益。
 6. **发布：** 通过 SLO guard、稳定 bucket、审批和自动回滚受控放量。
 7. **学习：** 将新版本的实际收益、副作用和失败样本回灌，形成下一轮训练与优化证据。
 
-优化范围覆盖三层：xLLM Service 的公平、准入、P/D/KV 路由、Placement、容错与观测；
-xLLM Engine 的 batching、scheduler、KV allocator、通信、并行规格和硬件执行；以及两者之间
-的 Provider/profile/capacity 契约。AI 智能控制面先以离线分析和 shadow recommendation
-运行，成熟后再逐步开放自动调参和受控发布，始终不能越过确定性安全协议。
+优化范围覆盖三层：xLLM Service 的公平、准入、P/D/KV 路由、Placement、容错与观测；xLLM Engine 的 batching、scheduler、KV allocator、通信、并行规格和硬件执行；以及两者之间的 Provider/profile/capacity 契约。AI 智能控制面先以离线分析和 shadow recommendation 运行，成熟后再逐步开放自动调参和受控发布，始终不能越过确定性安全协议。
 
 ## 8. 演进路线与阶段门
 
@@ -225,18 +184,12 @@ xLLM Engine 的 batching、scheduler、KV allocator、通信、并行规格和�
 | V3 生产化 + V4/V5 | 放置/扩缩线上化；整请求跨域；收益可证明的有限跨域 P/D；多硬件扩展 | 故障域、合规、成本、拓扑、兼容矩阵和 Provider conformance 全部门禁 |
 | 终极：MASS + AI 自进化 | 真实服务数据驱动 Service/Engine 持续发现问题、优化、验证和发布 | 端到端数据闭环、可解释诊断、可复现收益、NPU canary、SLO guard、审批与一键回滚 |
 
-MASS 数据契约和 AI shadow 分析不需要等所有中间版本结束才开始；它们应与 NPU 线上验证
-同步建设。自动执行权限则必须按“建议 → 人审发布 → 自动调参 → 受控自治”逐级开放。
+MASS 数据契约和 AI shadow 分析不需要等所有中间版本结束才开始；它们应与 NPU 线上验证同步建设。自动执行权限则必须按“建议 → 人审发布 → 自动调参 → 受控自治”逐级开放。
 
 ## 9. 下一阶段需要推动的事项
 
-1. 建立最小 NPU 单域环境：1P1D、1 aggregated vLLM-Ascend、etcd、2 Service，先跑
-   correctness/fault matrix，再跑阶梯负载和 24h+ soak。
-2. 定义 MASS serving feedback contract：请求/任务身份、服务结果、SLO、用户反馈、隐私与
-   数据保留规则，并与现有 request/attempt/engine 观测身份打通。
-3. 建设线上数据回放和统一评估基线，使同一问题可以在历史回放、CPU 离线集群和 NPU
-   canary 中复现并比较。
-4. AI 智能控制面先交付“诊断报告 + shadow 建议”，每项优化必须给出证据、适用边界、
-   风险、预期收益、验证结果和回滚条件。
-5. 生产发布继续坚持硬门：任何 V2/V3 变更都必须通过单元/契约测试、CPU 全流程高并发、
-   分布式故障矩阵；涉及硬件或性能的变更还必须通过真实 NPU 门。
+1. 建立最小 NPU 单域环境：1P1D、1 aggregated vLLM-Ascend、etcd、2 Service，先跑 correctness/fault matrix，再跑阶梯负载和 24h+ soak。
+2. 定义 MASS serving feedback contract：请求/任务身份、服务结果、SLO、用户反馈、隐私与数据保留规则，并与现有 request/attempt/engine 观测身份打通。
+3. 建设线上数据回放和统一评估基线，使同一问题可以在历史回放、CPU 离线集群和 NPU canary 中复现并比较。
+4. AI 智能控制面先交付“诊断报告 + shadow 建议”，每项优化必须给出证据、适用边界、风险、预期收益、验证结果和回滚条件。
+5. 生产发布继续坚持硬门：任何 V2/V3 变更都必须通过单元/契约测试、CPU 全流程高并发、分布式故障矩阵；涉及硬件或性能的变更还必须通过真实 NPU 门。

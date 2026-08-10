@@ -40,11 +40,7 @@ xLLM Service 的最终目标与这条主线一致，但不照搬某个框架：V
 
 这里的三种形态不是三套系统：当前 xLLM Service 已经是推理控制面，V2 首发在现有实现上一次性补齐基础生产能力和 V2 快环能力，最终形态再把同一个控制面扩展为整个推理集群的调度与资源协调中心。
 
-> 实现状态更新（2026-08-10）：V2 请求快环和 V3 资源慢环已完成代码、CPU、Torch CPU、
-> simulated HBM 与离线多进程集群验证；当前状态是
-> `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`。本节“当前现状”保留的是
-> 设计立项时的问题基线，最新交付状态见
-> [V2/V3 现状与演进蓝图汇报](./13_XLLM_SERVICE_V2_STATUS_AND_ROADMAP_REPORT.md)。
+> 实现状态更新（2026-08-10）：V2 请求快环和 V3 资源慢环已完成代码、CPU、Torch CPU、simulated HBM 与离线多进程集群验证；当前状态是 `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`。本节“当前现状”保留的是设计立项时的问题基线，最新交付状态见 [V2/V3 现状与演进蓝图汇报](./13_XLLM_SERVICE_V2_STATUS_AND_ROADMAP_REPORT.md)。
 
 **当前现状**
 
@@ -76,16 +72,9 @@ V2 同时补齐故障与观测闭环：Engine 状态不确定时停止接收新�
 
 最终优化目标不是单独追求设备利用率或峰值吞吐，而是**在 TTFT、TPOT、完成时间、容量、公平性和成本约束下，最大化真正满足 SLO 的请求量，并持续用线上数据校准调度和放置决策。** Service 决定请求应该怎样执行，Engine/Store 决定资源是否真实存在以及能否安全执行；这一边界在所有阶段都不改变。
 
-在上述统一控制面、执行面和 KV 内存层之上，系统的**终极目标是依托 MASS 构建自进化
-推理系统**。MASS 在线服务持续产生真实请求、任务结果、业务 SLO 和用户反馈；统一观测
-把这些业务结果与 xLLM Service 的调度决策、xLLM Engine 的执行/资源事件关联起来；AI
-智能控制面据此发现 Service 与 Engine 的瓶颈或缺陷，生成策略、参数、容量、Runtime 或
-代码优化候选，并经过回放、CPU 端到端压测、真实 NPU、线上灰度、SLO guard 和回滚门后
-受控生效。上线结果再次进入 MASS serving feedback，形成持续学习闭环。
+在上述统一控制面、执行面和 KV 内存层之上，系统的**终极目标是依托 MASS 构建自进化推理系统**。MASS 在线服务持续产生真实请求、任务结果、业务 SLO 和用户反馈；统一观测把这些业务结果与 xLLM Service 的调度决策、xLLM Engine 的执行/资源事件关联起来；AI 智能控制面据此发现 Service 与 Engine 的瓶颈或缺陷，生成策略、参数、容量、Runtime 或代码优化候选，并经过回放、CPU 端到端压测、真实 NPU、线上灰度、SLO guard 和回滚门后受控生效。上线结果再次进入 MASS serving feedback，形成持续学习闭环。
 
-AI 智能控制面不是请求正确性的同步依赖，也没有权力绕过 capability、fencing、原子
-admission、资源所有权、deadline 和输出唯一性等确定性协议。自进化的含义是让诊断与优化
-越来越快、证据越来越完整、策略越来越准确，而不是让 AI 无门禁地直接修改生产系统。
+AI 智能控制面不是请求正确性的同步依赖，也没有权力绕过 capability、fencing、原子 admission、资源所有权、deadline 和输出唯一性等确定性协议。自进化的含义是让诊断与优化越来越快、证据越来越完整、策略越来越准确，而不是让 AI 无门禁地直接修改生产系统。
 
 **三者关系与演进轴**
 
@@ -94,8 +83,7 @@ admission、资源所有权、deadline 和输出唯一性等确定性协议。�
 - **请求调度轴：** V2-B0 硬准入与快速拒绝 → V2 策略感知的有界流控、优先级与租户公平 → 持续演进 SLO goodput 与成本联合优化。
 - **执行拓扑轴：** V2-B0 单域单模型、多 Provider（xLLM 动态 P/D + vLLM-Ascend 聚合）→ V2 多模型与逐请求执行模式 → V3 模型与角色自动放置 → V4 跨域整请求溢出 → V5 收益可证明的有限跨域 P/D。
 - **KV 内存轴：** V2-B0 Engine 本地 HBM → V2 精确 Prefix 位置索引 → V2.5 DRAM、SSD 与共享 Store → V2.5 跨请求恢复、复用与放置。
-- **数据与智能轴：** 统一 request/attempt/engine 观测 → MASS serving feedback 与业务效果
-  对账 → AI shadow 诊断/建议 → 人审发布与自动调参 → 有 SLO guard 和回滚的受控自治。
+- **数据与智能轴：** 统一 request/attempt/engine 观测 → MASS serving feedback 与业务效果对账 → AI shadow 诊断/建议 → 人审发布与自动调参 → 有 SLO guard 和回滚的受控自治。
 
 箭头只表示同一轴内部的能力成熟顺序，不表示四条轴之间存在全序依赖。例如 V2.5 KV 内存层与 V3 Placement 可以并行开发和独立上线，MASS 数据契约与 AI shadow 分析也可以在 NPU 线上验证阶段同步建设。四条轴共用一个不变边界：**Service 做软选择和协调，Engine/Store 持有资源与数据真相；AI 只能通过验证和发布门改变策略、配置或实现。**
 
@@ -282,9 +270,7 @@ flowchart TB
 - **V2 核心范围：** Gateway 后的 xLLM Service 请求控制面、Provider Contract、xLLM Native 与 vLLM-Ascend 执行域、etcd Registry、State/KV Stream 和统一可观测性；图中明确标为“后续”“V2.5+”“终极形态”的节点不属于 V2 门禁。
 - **后续节点：** 共享 KV 内存层和 MASS/AI 闭环是明确扩展点；V3 Placement/Autoscale 已有 CPU 离线实现但尚待 NPU/线上验证。它们都不是 V2 请求正确性的隐藏依赖。
 - **多硬件边界：** Service 只理解 Provider Descriptor、能力、profile、执行模式、资源摘要和稳定错误，不调用 CANN/CUDA、不处理 device pointer。NPU、GPU 和后续硬件差异由 Engine Runtime、allocator、Connector 和硬件 backend 暴露为经过验证的 Provider 能力。
-- **MASS/AI 边界：** MASS 提供真实在线服务与业务效果反馈；AI 智能控制面只通过 Safety &
-  Delivery Gate 输出已验证的策略、配置、容量、Runtime 或代码变更，不进入单次请求的同步
-  正确性链路，也不能覆盖 Engine/Store 的资源真相。
+- **MASS/AI 边界：** MASS 提供真实在线服务与业务效果反馈；AI 智能控制面只通过 Safety & Delivery Gate 输出已验证的策略、配置、容量、Runtime 或代码变更，不进入单次请求的同步正确性链路，也不能覆盖 Engine/Store 的资源真相。
 
 这个分层与 llm-d/Dynamo 的共同点是把请求决策、执行资源和异步状态分开；关键差异是 xLLM Service 对每个 attempt 负责跨 P/D 协调和输出提交屏障，而 Engine/Agent 对准入、KV、执行、deadline 和 fencing 保持最终权威。CPU 与 Torch CPU 测试只验证同一 Provider/Engine 契约及 simulated HBM 资源链路；上 NPU 时替换的是硬件 backend 和真实传输证据，不改变 Service 架构。
 
