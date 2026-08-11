@@ -61,6 +61,7 @@ xllm-dev service-e2e /absolute/path/to/xllm-service native Debug stress all
 - 500ms deadline、真实 SSE 客户端断流和 Agent Cancel 必须释放 Service、Runtime 与 simulated HBM 资源，随后恢复流量全成功；
 - Drain 与在飞请求重叠时，Agent 返回精确 fenced rejection，Service 排除原 route 并在有界预算内重选；Drain 不杀死已接纳请求；不能超过物理 `max_devices=3`；
 - Agent 独立 `SIGKILL` 与 Runtime 独立 `SIGKILL` 必须分别在 5 秒内恢复；故障负载只允许有界 transport failure，恢复后 3 route 全成功；
+- `SIGKILL` 故障波使用受控的 9 并发：每个物理副本最多 3 个不确定在途请求，并为一次 State/evidence 传播竞争预留 1 个失败，因此 4 个 transport failure 是硬上界；稳态、过载和恢复流量仍使用更高并发；
 - Runtime 原地恢复与 Placement 补副本并发时，Deployment 必须先按真实库存对账，复用已恢复资源且 `max_active_replicas` 始终不超过 3；
 - Agent+Runtime 组合 `SIGKILL` 期间只允许有界的 at-most-once 在途 transport failure，副本替换必须在 5 秒内收敛并恢复 3 route；
 - Leader `SIGKILL` 后 durable desired/command/status 继续收敛，恢复流量全成功；

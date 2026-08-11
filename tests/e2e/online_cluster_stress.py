@@ -2277,6 +2277,13 @@ class ClusterGate:
         high_count = 180 if self.args.mode == "smoke" else 1800
         concurrency = 32 if self.args.mode == "smoke" else 64
         steady_concurrency = 32
+        # A strict at-most-once attempt cannot be transparently replayed after
+        # SIGKILL when the Agent that owned its ledger is gone.  Keep the
+        # abrupt-loss wave at three requests per physical replica plus one
+        # stale-routing race, so the four-failure hard bound is a deterministic
+        # blast-radius assertion rather than an accidental function of the
+        # unrelated steady-state load concurrency.
+        abrupt_fault_concurrency = 9
         high_load = client.run("v3-high-load-scale-up-signal", high_count, concurrency)
         if self.args.mode == "smoke":
             self.assert_phase(high_load, minimum_routes=1)
@@ -2345,7 +2352,7 @@ class ClusterGate:
                 during_restart = client.run(
                     f"v3-{component}-only-sigkill-restart",
                     600 if self.args.mode == "smoke" else 2400,
-                    steady_concurrency,
+                    abrupt_fault_concurrency,
                 )
                 fault_response, recovery_duration_seconds = fault.result(
                     timeout=25.0
@@ -2428,7 +2435,7 @@ class ClusterGate:
             during_replacement = client.run(
                 "v3-runtime-agent-sigkill-replacement",
                 180 if self.args.mode == "smoke" else 1800,
-                steady_concurrency,
+                abrupt_fault_concurrency,
             )
             replacement_state, replacement_duration_seconds = (
                 replacement.result(timeout=40.0)
