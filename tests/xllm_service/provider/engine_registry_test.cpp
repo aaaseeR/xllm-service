@@ -362,6 +362,46 @@ TEST(EngineRegistryTest, RequiresCurrentMasterFullBeforeScheduling) {
             xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
 }
 
+TEST(EngineRegistryTest, AuthoritativeRemovalPreservesFullSnapshot) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor prefill = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderDescriptor decode = make_descriptor(
+      xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
+  const xllm::proto::ProviderEngineKey prefill_key =
+      make_provider_engine_key(prefill);
+  const xllm::proto::ProviderEngineKey decode_key =
+      make_provider_engine_key(decode);
+  ASSERT_TRUE(registry.upsert_member(prefill).ok());
+  ASSERT_TRUE(registry.upsert_member(decode).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(prefill, 1);
+  *full.add_engine_states() = make_state(decode, 1);
+  *full.add_link_states() = make_link(prefill, decode, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  ASSERT_TRUE(applied);
+  const std::optional<ObservationSnapshot> before =
+      registry.observation_snapshot(100);
+  ASSERT_TRUE(before.has_value());
+  ASSERT_EQ(before->mode, ObservationMode::NORMAL);
+
+  ASSERT_TRUE(registry.remove_member(decode_key));
+  EXPECT_TRUE(registry.has_current_full_snapshot());
+  EXPECT_EQ(registry.member_count(), 1u);
+  EXPECT_EQ(registry.state_count(), 1u);
+  EXPECT_EQ(registry.link_count(), 0u);
+  const std::optional<ObservationSnapshot> after =
+      registry.observation_snapshot(101);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_EQ(after->mode, ObservationMode::NORMAL);
+  EXPECT_TRUE(registry.is_schedulable(prefill_key, 101));
+  EXPECT_FALSE(registry.is_schedulable(decode_key, 101));
+  EXPECT_FALSE(registry.is_link_ready(prefill_key, decode_key, 101));
+}
+
 TEST(EngineRegistryTest, RoutingSnapshotIsImmutableAndMatchesPointQueries) {
   EngineRegistry registry(test_config());
   const xllm::proto::ProviderDescriptor prefill = make_descriptor(

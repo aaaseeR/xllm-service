@@ -226,7 +226,12 @@ bool EngineRegistry::remove_member(
       ++link;
     }
   }
-  full_snapshot_master_incarnation_.clear();
+  // Registry deletion is authoritative and projects an accepted full State
+  // snapshot onto a strict subset: both the removed member and its cached
+  // state/link evidence are erased atomically above. The remaining snapshot is
+  // still complete for the remaining membership. Additions and replacements
+  // continue to invalidate the full snapshot in upsert_member because their
+  // new incarnation has no State proof yet.
   return true;
 }
 
