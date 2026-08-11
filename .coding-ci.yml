@@ -72,7 +72,8 @@
         cmake --build build/v2-cpu-service --target \
           xllm_master_serving xllm_http_serving xllm_rpc_serving \
           xllm_service_mock_native_engine
-        .ci/venv/bin/python -m pytest vllm_sidecar/tests -q
+        .ci/venv/bin/python -m pytest \
+          vllm_sidecar/tests tests/e2e/test_online_cluster_stress.py -q
 
     - name: V2 and V3 offline cluster E2E hard gate
       script: |

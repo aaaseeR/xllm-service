@@ -101,7 +101,8 @@ jobs:
             --output-on-failure --no-tests=error
           cmake --build build/v2-cpu-service --target \
             xllm_master_serving xllm_http_serving xllm_rpc_serving
-          .ci/venv/bin/python -m pytest vllm_sidecar/tests -q
+          .ci/venv/bin/python -m pytest \
+            vllm_sidecar/tests tests/e2e/test_online_cluster_stress.py -q
 
       - name: Build and test pinned xLLM CPU contracts
         run: |

@@ -66,6 +66,47 @@ class GateFailure(RuntimeError):
     pass
 
 
+def is_expected_abrupt_loss_error(error: str) -> bool:
+    """Recognize only transport loss or an exact Runtime-fence proof."""
+    transport_tokens = (
+        "Connection refused",
+        "Connection reset by peer",
+        "backend instance is not available",
+    )
+    if any(token in error for token in transport_tokens):
+        return True
+
+    marker = "409 Conflict: "
+    if marker not in error:
+        return False
+    try:
+        payload = json.loads(error.split(marker, 1)[1])
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(payload, dict) or set(payload) != {
+        "accepted",
+        "replayed",
+        "state",
+        "reason",
+        "request_uid",
+        "attempt_seq",
+        "incarnation_id",
+    }:
+        return False
+    return (
+        payload["accepted"] is True
+        and payload["replayed"] is True
+        and payload["state"] == "ATTEMPT_LIFECYCLE_STATE_CANCELLED"
+        and payload["reason"] == "ADMISSION_REASON_INTERNAL_ERROR"
+        and isinstance(payload["request_uid"], str)
+        and bool(payload["request_uid"])
+        and type(payload["attempt_seq"]) is int
+        and payload["attempt_seq"] >= 0
+        and isinstance(payload["incarnation_id"], str)
+        and bool(payload["incarnation_id"])
+    )
+
+
 def wait_until(
     description: str,
     timeout: float,
@@ -713,7 +754,7 @@ class V3LoadClient:
                 return (
                     False,
                     latency_ms,
-                    f"HTTP {response.status_code}: {response.text[:200]}",
+                    f"HTTP {response.status_code}: {response.text[:1024]}",
                 )
             text = response.json()["choices"][0]["text"]
             if not text.startswith("mock-vllm replica="):
@@ -1440,9 +1481,7 @@ class ClusterGate:
                 f"{max_duration_seconds}s: {recovery_duration_seconds}s"
             )
         if any(
-            "Connection refused" not in error
-            and "Connection reset by peer" not in error
-            and "backend instance is not available" not in error
+            not is_expected_abrupt_loss_error(error)
             for error in result.error_samples
         ):
             raise GateFailure(
