@@ -41,6 +41,7 @@ limitations under the License.
 #include "proto/log_value.h"
 #include "provider/attempt_control_client.h"
 #include "provider/execution_plan_builder.h"
+#include "provider/identity_key.h"
 #include "provider/native_execution_mode_selector.h"
 #include "provider/provider_adapter.h"
 #include "rpc_service/first_event_recovery_client.h"
@@ -1018,16 +1019,7 @@ bool Scheduler::apply_native_execution_mode(
 }
 
 SaturationState Scheduler::flow_saturation_state() const {
-  const provider::ReadinessSnapshot readiness = readiness_status();
-  const bool has_capacity = has_available_instances();
-  if (readiness.reason == provider::ReadinessReason::READY) {
-    return has_capacity ? SaturationState::AVAILABLE
-                        : SaturationState::SATURATED;
-  }
-  if (readiness.reason == provider::ReadinessReason::DRAINING && has_capacity) {
-    return SaturationState::AVAILABLE;
-  }
-  return SaturationState::UNKNOWN;
+  return flow_saturation_state_.load(std::memory_order_acquire);
 }
 
 bool Scheduler::admit_flow_control_locked(
@@ -1699,7 +1691,7 @@ void Scheduler::run_kv_snapshot_recovery() {
     std::unordered_set<std::string> current_keys;
     current_keys.reserve(identities.size());
     for (const xllm::proto::KVStreamIdentity& identity : identities) {
-      current_keys.emplace(identity.SerializeAsString());
+      current_keys.emplace(provider::kv_stream_identity_key(identity));
     }
     for (auto retry = retry_after_ms.begin(); retry != retry_after_ms.end();) {
       if (current_keys.find(retry->first) == current_keys.end()) {
@@ -1718,7 +1710,7 @@ void Scheduler::run_kv_snapshot_recovery() {
          ++offset) {
       const xllm::proto::KVStreamIdentity& identity =
           identities[(start + offset) % identities.size()];
-      const std::string key = identity.SerializeAsString();
+      const std::string key = provider::kv_stream_identity_key(identity);
       const auto retry = retry_after_ms.find(key);
       if (retry != retry_after_ms.end() && now_monotonic_ms < retry->second) {
         continue;
@@ -1742,7 +1734,8 @@ void Scheduler::run_kv_snapshot_recovery() {
             }));
       }
       for (size_t index = batch_begin; index < batch_end; ++index) {
-        const std::string key = selected[index].SerializeAsString();
+        const std::string key =
+            provider::kv_stream_identity_key(selected[index]);
         if (recoveries[index - batch_begin].get()) {
           retry_after_ms.erase(key);
           continue;
@@ -2992,16 +2985,8 @@ void Scheduler::fail_output_dispatch_locked(
     failed_prefill_recovery_watchlist_.erase(request_uid);
   }
 
-  size_t output_thread_index = 0;
-  bool output_thread_found = false;
-  {
-    std::lock_guard<std::mutex> thread_guard(thread_map_mutex_);
-    const auto it = remote_requests_output_thread_map_.find(request_uid);
-    if (it != remote_requests_output_thread_map_.end()) {
-      output_thread_index = it->second;
-      output_thread_found = true;
-    }
-  }
+  const bool output_thread_found = request->output_thread_index.has_value();
+  const size_t output_thread_index = request->output_thread_index.value_or(0);
 
   OutputCallback callback = request->output_callback;
   auto fail = [this,
@@ -4143,6 +4128,9 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
       rollback_request_safety_guards_locked(request);
       return false;
     }
+    request->output_thread_index =
+        next_output_thread_index_.fetch_add(1, std::memory_order_relaxed) %
+        kOutputTheadNum_;
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
     record_request_event(request,
@@ -4153,14 +4141,6 @@ bool Scheduler::record_new_request(std::shared_ptr<ChatCallData> call_data,
                          "",
                          "",
                          elapsed_ns_since(request->trace_ingress_time));
-  }
-
-  {
-    // allocate thread for the request
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_[request->correlation.request_uid()] =
-        next_thread_idx;
-    next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
 
   arm_client_disconnect_notification(request);
@@ -4263,6 +4243,9 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
       rollback_request_safety_guards_locked(request);
       return false;
     }
+    request->output_thread_index =
+        next_output_thread_index_.fetch_add(1, std::memory_order_relaxed) %
+        kOutputTheadNum_;
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
     record_request_event(request,
@@ -4273,13 +4256,6 @@ bool Scheduler::record_new_request(std::shared_ptr<AnthropicCallData> call_data,
                          "",
                          "",
                          elapsed_ns_since(request->trace_ingress_time));
-  }
-
-  {
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_[request->correlation.request_uid()] =
-        next_thread_idx;
-    next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
 
   arm_client_disconnect_notification(request);
@@ -4355,6 +4331,9 @@ bool Scheduler::record_new_request(
       rollback_request_safety_guards_locked(request);
       return false;
     }
+    request->output_thread_index =
+        next_output_thread_index_.fetch_add(1, std::memory_order_relaxed) %
+        kOutputTheadNum_;
     requests_.emplace(request->correlation.request_uid(), request);
     COUNTER_INC(server_request_in_total);
     record_request_event(request,
@@ -4365,14 +4344,6 @@ bool Scheduler::record_new_request(
                          "",
                          "",
                          elapsed_ns_since(request->trace_ingress_time));
-  }
-
-  {
-    // allocate thread for the request
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_[request->correlation.request_uid()] =
-        next_thread_idx;
-    next_thread_idx = (++next_thread_idx) % kOutputTheadNum_;
   }
 
   arm_client_disconnect_notification(request);
@@ -4392,6 +4363,8 @@ void Scheduler::finish_request(const std::string& service_request_id,
       auto it = requests_.find(service_request_id);
       if (it != requests_.end()) {
         request = it->second;
+        request->queue_state.store(RequestQueueState::TERMINAL,
+                                   std::memory_order_release);
         requests_.erase(it);
         requests_drained_cv_.notify_all();
       }
@@ -4402,8 +4375,6 @@ void Scheduler::finish_request(const std::string& service_request_id,
                          xllm::proto::EVENT_REASON_MISSING_TERMINAL);
       detach_execution_hold_locked(request);
       record_resource_release(request);
-      request->queue_state.store(RequestQueueState::TERMINAL,
-                                 std::memory_order_release);
     }
   }
 
@@ -4436,11 +4407,6 @@ void Scheduler::finish_request(const std::string& service_request_id,
   }
   request_deadline_queue_->erase(service_request_id);
   client_disconnect_monitor_->erase(service_request_id);
-
-  {
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    remote_requests_output_thread_map_.erase(service_request_id);
-  }
 }
 
 void Scheduler::clear_requests_on_failed_instance(
@@ -4482,6 +4448,8 @@ void Scheduler::clear_requests_on_failed_instance(
           first_event_recovery_requests.emplace_back(it->second);
           ++it;
         } else if (clear_prefill || clear_decode) {
+          it->second->queue_state.store(RequestQueueState::TERMINAL,
+                                        std::memory_order_release);
           cleared_requests.emplace_back(it->second);
           it = requests_.erase(it);
         } else {
@@ -4553,15 +4521,12 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
   }
 
   std::lock_guard<std::mutex> output_guard(request->output_dispatch_mutex);
-  {
-    std::lock_guard<std::mutex> request_guard(request_mutex_);
-    const auto iterator = requests_.find(service_request_id);
-    if (iterator == requests_.end() || iterator->second != request ||
-        request->output_dispatch_closed) {
-      return GenerationDeliveryResult(
-          /*code=*/proto::GENERATION_DELIVERY_CODE_REQUEST_CLOSED,
-          /*message=*/"Request output stream is closed");
-    }
+  if (request->queue_state.load(std::memory_order_acquire) ==
+          RequestQueueState::TERMINAL ||
+      request->output_dispatch_closed) {
+    return GenerationDeliveryResult(
+        /*code=*/proto::GENERATION_DELIVERY_CODE_REQUEST_CLOSED,
+        /*message=*/"Request output stream is closed");
   }
 
   // Check the connection only while holding the same lock that protects
@@ -4700,17 +4665,7 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
     }
   }
 
-  size_t req_thread_idx = -1;
-  bool output_thread_found = false;
-  {
-    std::lock_guard<std::mutex> guard(thread_map_mutex_);
-    auto it = remote_requests_output_thread_map_.find(service_request_id);
-    if (it != remote_requests_output_thread_map_.end()) {
-      req_thread_idx = it->second;
-      output_thread_found = true;
-    }
-  }
-  if (!output_thread_found) {
+  if (!request->output_thread_index.has_value()) {
     LOG(ERROR) << "Can not found the thread for the received request output, "
                   "request id is: "
                << service_request_id;
@@ -4720,6 +4675,7 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
         /*code=*/proto::GENERATION_DELIVERY_CODE_AFFINITY_MISSING,
         /*message=*/"Output affinity thread is missing");
   }
+  const size_t req_thread_idx = *request->output_thread_index;
 
   const bool terminal_output =
       std::any_of(sequence_result.ready_outputs.begin(),
@@ -4747,13 +4703,10 @@ GenerationDeliveryResult Scheduler::handle_generation_detailed(
         }
         std::lock_guard<std::mutex> output_guard(
             request->output_dispatch_mutex);
-        {
-          std::lock_guard<std::mutex> request_guard(request_mutex_);
-          const auto iterator = requests_.find(service_request_id);
-          if (iterator == requests_.end() || iterator->second != request ||
-              request->output_callback == nullptr) {
-            return;
-          }
+        if (request->queue_state.load(std::memory_order_acquire) ==
+                RequestQueueState::TERMINAL ||
+            request->output_callback == nullptr) {
+          return;
         }
         const OutputCallback& cb = request->output_callback;
         for (llm::RequestOutput& ready_output : ready_outputs) {
@@ -5261,6 +5214,8 @@ void Scheduler::refresh_readiness() {
         .changed_monotonic_ms = now_monotonic_ms,
     };
     accepting_new_requests_.store(false, std::memory_order_release);
+    flow_saturation_state_.store(SaturationState::UNKNOWN,
+                                 std::memory_order_release);
     LOG(ERROR) << "Readiness update failed closed: " << error;
     return;
   }
@@ -5270,6 +5225,12 @@ void Scheduler::refresh_readiness() {
   readiness_snapshot_ = *snapshot;
   accepting_new_requests_.store(snapshot->accepting_new_requests,
                                 std::memory_order_release);
+  flow_saturation_state_.store(
+      saturation_state_from_readiness(
+          snapshot->reason == provider::ReadinessReason::READY,
+          snapshot->reason == provider::ReadinessReason::DRAINING,
+          input.has_compatible_capacity),
+      std::memory_order_release);
   if (changed) {
     LOG(INFO) << "Service readiness changed, accepting_new_requests="
               << snapshot->accepting_new_requests << ", reason="
@@ -5279,6 +5240,12 @@ void Scheduler::refresh_readiness() {
 
 void Scheduler::set_draining(bool draining) {
   draining_.store(draining, std::memory_order_release);
+  if (draining) {
+    // Fail closed until refresh_readiness publishes a DRAINING snapshot with
+    // explicit compatible capacity for COMPLETE_QUEUED dispatch.
+    flow_saturation_state_.store(SaturationState::UNKNOWN,
+                                 std::memory_order_release);
+  }
   flow_dispatch_cv_.notify_all();
 }
 

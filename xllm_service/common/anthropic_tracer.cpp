@@ -30,12 +30,13 @@ AnthropicTracer::AnthropicTracer(Sink sink,
       request_id_(std::move(request_id)),
       service_request_id_(std::move(service_request_id)) {}
 
+bool AnthropicTracer::enabled() const {
+  return FLAGS_enable_request_trace && static_cast<bool>(sink_);
+}
+
 void AnthropicTracer::trace(const std::string& label,
                             const std::string& data) const {
-  if (!FLAGS_enable_request_trace) {
-    return;
-  }
-  if (!sink_) {
+  if (!enabled()) {
     return;
   }
   std::string formatted = "[anthropic][" + label + "] " + data;

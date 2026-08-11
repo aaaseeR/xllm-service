@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "provider/engine_registry.h"
 
+#include <google/protobuf/unknown_field_set.h>
 #include <gtest/gtest.h>
 
 #include <limits>
@@ -446,6 +447,96 @@ TEST(EngineRegistryTest, RoutingSnapshotIsImmutableAndMatchesPointQueries) {
   // A request keeps one coherent immutable decision view even while newer
   // Registry observations are committed for subsequent requests.
   EXPECT_TRUE(before.is_link_ready(prefill_key, decode_key));
+}
+
+TEST(EngineRegistryTest, RoutingSnapshotIgnoresFutureEndpointFields) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor prefill = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderDescriptor decode = make_descriptor(
+      xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
+  ASSERT_TRUE(registry.upsert_member(prefill).ok());
+  ASSERT_TRUE(registry.upsert_member(decode).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(prefill, 1);
+  *full.add_engine_states() = make_state(decode, 1);
+  xllm::proto::LinkState* link = full.add_link_states();
+  *link = make_link(prefill, decode, 1);
+  link->mutable_prefill()
+      ->GetReflection()
+      ->MutableUnknownFields(link->mutable_prefill())
+      ->AddVarint(100, 42);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  ASSERT_TRUE(applied);
+
+  const EngineRegistryRoutingSnapshot snapshot = registry.routing_snapshot(100);
+  EXPECT_TRUE(snapshot.is_link_ready(make_provider_engine_key(prefill),
+                                     make_provider_engine_key(decode)));
+}
+
+TEST(EngineRegistryTest, PublishedViewExpiresEntriesIndependently) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor prefill = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderDescriptor decode = make_descriptor(
+      xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
+  ASSERT_TRUE(registry.upsert_member(prefill).ok());
+  ASSERT_TRUE(registry.upsert_member(decode).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(prefill, 1);
+  *full.add_engine_states() = make_state(decode, 1);
+  *full.add_link_states() = make_link(prefill, decode, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+
+  EXPECT_TRUE(registry.routing_snapshot(110).is_link_ready(
+      make_provider_engine_key(prefill), make_provider_engine_key(decode)));
+  const EngineRegistryRoutingSnapshot expired_link =
+      registry.routing_snapshot(111);
+  EXPECT_TRUE(expired_link.is_schedulable(make_provider_engine_key(prefill)));
+  EXPECT_FALSE(expired_link.is_link_ready(make_provider_engine_key(prefill),
+                                          make_provider_engine_key(decode)));
+
+  registry.refresh_routing_snapshot(111);
+  const EngineRegistryRoutingSnapshot refreshed =
+      registry.routing_snapshot(111);
+  EXPECT_TRUE(refreshed.is_schedulable(make_provider_engine_key(prefill)));
+  EXPECT_FALSE(refreshed.is_link_ready(make_provider_engine_key(prefill),
+                                       make_provider_engine_key(decode)));
+}
+
+TEST(EngineRegistryTest, MembershipRemovalProjectsPublishedView) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor prefill = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderDescriptor decode = make_descriptor(
+      xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
+  ASSERT_TRUE(registry.upsert_member(prefill).ok());
+  ASSERT_TRUE(registry.upsert_member(decode).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(prefill, 1);
+  *full.add_engine_states() = make_state(decode, 1);
+  *full.add_link_states() = make_link(prefill, decode, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+
+  const xllm::proto::ProviderEngineKey prefill_key =
+      make_provider_engine_key(prefill);
+  const xllm::proto::ProviderEngineKey decode_key =
+      make_provider_engine_key(decode);
+  ASSERT_TRUE(registry.remove_member(decode_key));
+  const EngineRegistryRoutingSnapshot projected =
+      registry.routing_snapshot(101);
+  EXPECT_TRUE(projected.is_schedulable(prefill_key));
+  EXPECT_FALSE(projected.is_schedulable(decode_key));
+  EXPECT_FALSE(projected.is_link_ready(prefill_key, decode_key));
 }
 
 TEST(EngineRegistryTest, RoutingSnapshotCoversEightByEightConcurrentReaders) {

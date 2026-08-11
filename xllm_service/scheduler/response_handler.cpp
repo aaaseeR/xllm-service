@@ -86,6 +86,37 @@ AnthropicTracer make_anthropic_tracer(
       call_data->request().service_request_id());
 }
 
+void prepare_chat_stream_frame(xllm::proto::ChatResponse* response,
+                               const std::string& request_id,
+                               int64_t created_time,
+                               const std::string& model) {
+  response->clear_choices();
+  response->clear_usage();
+  if (!response->object().empty()) {
+    return;
+  }
+  response->set_object("chat.completion.chunk");
+  response->set_id(request_id);
+  response->set_created(created_time);
+  response->set_model(model);
+}
+
+void prepare_completion_stream_frame(xllm::proto::CompletionResponse* response,
+                                     const std::string& request_id,
+                                     int64_t created_time,
+                                     const std::string& model) {
+  response->clear_choices();
+  response->clear_usage();
+  response->clear_output_tensors();
+  if (!response->object().empty()) {
+    return;
+  }
+  response->set_object("text_completion");
+  response->set_id(request_id);
+  response->set_created(created_time);
+  response->set_model(model);
+}
+
 void set_logprobs(xllm::proto::ChatChoice* choice,
                   const std::optional<std::vector<llm::LogProb>>& logprobs) {
   if (!logprobs.has_value() || logprobs->empty()) {
@@ -123,11 +154,7 @@ bool send_normal_text_chunk(std::shared_ptr<ChatCallData> call_data,
   }
 
   auto& response = call_data->response();
-  response.Clear();
-  response.set_object("chat.completion.chunk");
-  response.set_id(request_id);
-  response.set_created(created_time);
-  response.set_model(model);
+  prepare_chat_stream_frame(&response, request_id, created_time, model);
   auto* choice = response.add_choices();
   choice->set_index(index);
   auto* delta = choice->mutable_delta();
@@ -146,11 +173,7 @@ bool send_reasoning_text_chunk(std::shared_ptr<ChatCallData> call_data,
   }
 
   auto& response = call_data->response();
-  response.Clear();
-  response.set_object("chat.completion.chunk");
-  response.set_id(request_id);
-  response.set_created(created_time);
-  response.set_model(model);
+  prepare_chat_stream_frame(&response, request_id, created_time, model);
   auto* choice = response.add_choices();
   choice->set_index(index);
   auto* message = choice->mutable_delta();
@@ -168,11 +191,7 @@ bool send_tool_call_chunk(std::shared_ptr<ChatCallData> call_data,
                           int64_t created_time,
                           const std::string& model) {
   auto& response = call_data->response();
-  response.Clear();
-  response.set_object("chat.completion.chunk");
-  response.set_id(request_id);
-  response.set_created(created_time);
-  response.set_model(model);
+  prepare_chat_stream_frame(&response, request_id, created_time, model);
 
   auto* choice = response.add_choices();
   choice->set_index(index);
@@ -284,11 +303,7 @@ bool ResponseHandler::send_delta_to_client(
 
     if (first_message_sent &&
         first_message_sent->find(index) == first_message_sent->end()) {
-      response.Clear();
-      response.set_object("chat.completion.chunk");
-      response.set_id(request_id);
-      response.set_created(created_time);
-      response.set_model(model);
+      prepare_chat_stream_frame(&response, request_id, created_time, model);
       auto* choice = response.add_choices();
       choice->set_index(index);
       auto* message = choice->mutable_delta();
@@ -334,11 +349,7 @@ bool ResponseHandler::send_delta_to_client(
       } else {
         strip_special_control_tokens(&cur_text);
         if (!cur_text.empty()) {
-          response.Clear();
-          response.set_object("chat.completion.chunk");
-          response.set_id(request_id);
-          response.set_created(created_time);
-          response.set_model(model);
+          prepare_chat_stream_frame(&response, request_id, created_time, model);
           auto* choice = response.add_choices();
           choice->set_index(index);
           set_logprobs(choice, seq_output.logprobs);
@@ -370,11 +381,7 @@ bool ResponseHandler::send_delta_to_client(
         }
       }
 
-      response.Clear();
-      response.set_object("chat.completion.chunk");
-      response.set_id(request_id);
-      response.set_created(created_time);
-      response.set_model(model);
+      prepare_chat_stream_frame(&response, request_id, created_time, model);
       auto* choice = response.add_choices();
       choice->set_index(index);
       choice->mutable_delta();
@@ -391,12 +398,8 @@ bool ResponseHandler::send_delta_to_client(
   }
 
   if (include_usage && output.usage.has_value()) {
-    response.Clear();
+    prepare_chat_stream_frame(&response, request_id, created_time, model);
     const auto& usage = output.usage.value();
-    response.set_object("chat.completion.chunk");
-    response.set_id(request_id);
-    response.set_created(created_time);
-    response.set_model(model);
     *response.mutable_usage() = to_openai_usage_proto(usage);
     if (!call_data->write(response)) {
       return false;
@@ -422,11 +425,8 @@ bool ResponseHandler::send_delta_to_client(
   for (const auto& seq_output : output.outputs) {
     // send chunk with delta message
     if (!seq_output.text.empty()) {
-      response.Clear();
-      response.set_object("text_completion");
-      response.set_id(request_id);
-      response.set_created(created_time);
-      response.set_model(model);
+      prepare_completion_stream_frame(
+          &response, request_id, created_time, model);
       auto* choice = response.add_choices();
       choice->set_index(seq_output.index);
       choice->set_text(seq_output.text);
@@ -449,11 +449,8 @@ bool ResponseHandler::send_delta_to_client(
 
     // send a separate chunk with finish reason
     if (seq_output.finish_reason.has_value()) {
-      response.Clear();
-      response.set_object("text_completion");
-      response.set_id(request_id);
-      response.set_created(created_time);
-      response.set_model(model);
+      prepare_completion_stream_frame(
+          &response, request_id, created_time, model);
       auto* choice = response.add_choices();
       choice->set_index(seq_output.index);
       choice->set_text("");
@@ -467,12 +464,7 @@ bool ResponseHandler::send_delta_to_client(
   // send additional chunk for usage statistics
   if (include_usage && output.usage.has_value()) {
     const auto& usage = output.usage.value();
-    response.Clear();
-    response.set_object("text_completion");
-    response.set_id(request_id);
-    response.set_created(created_time);
-    response.set_model(model);
-    response.mutable_choices();
+    prepare_completion_stream_frame(&response, request_id, created_time, model);
     *response.mutable_usage() = to_openai_usage_proto(usage);
     if (!call_data->write(response)) {
       return false;
@@ -503,11 +495,14 @@ bool ResponseHandler::send_delta_to_client(
   for (const auto& seq_output : output.outputs) {
     const auto& index = seq_output.index;
     std::string cur_text = seq_output.text;
-    tracer.trace("stream_model_delta",
-                 "index=" + std::to_string(index) +
-                     " finished=" + (output.finished ? "true" : "false") +
-                     " finish_reason=" + seq_output.finish_reason.value_or("") +
-                     " text=" + cur_text);
+    if (tracer.enabled()) {
+      tracer.trace(
+          "stream_model_delta",
+          "index=" + std::to_string(index) +
+              " finished=" + (output.finished ? "true" : "false") +
+              " finish_reason=" + seq_output.finish_reason.value_or("") +
+              " text=" + cur_text);
+    }
 
     // Splits a chunk into reasoning (emitted now) and the remaining plain text
     // (accumulated into *normal_text). Reasoning/text encoding is delegated to
@@ -659,7 +654,9 @@ bool ResponseHandler::send_delta_to_client(
   }
 
   for (const auto& sse : sse_events) {
-    tracer.trace("stream_sse", sse);
+    if (tracer.enabled()) {
+      tracer.trace("stream_sse", sse);
+    }
     if (!call_data->write(sse)) {
       return false;
     }
@@ -820,10 +817,12 @@ bool ResponseHandler::send_result_to_client(
   std::optional<std::string> reasoning_content;
 
   if (!output.outputs.empty() && !output.outputs.front().text.empty()) {
-    tracer.trace(
-        "non_stream_model_output",
-        "finish_reason=" + output.outputs.front().finish_reason.value_or("") +
-            " text=" + output.outputs.front().text);
+    if (tracer.enabled()) {
+      tracer.trace(
+          "non_stream_model_output",
+          "finish_reason=" + output.outputs.front().finish_reason.value_or("") +
+              " text=" + output.outputs.front().text);
+    }
     auto parsed = parse_chat_output_with_xllm(
         output.outputs.front().text,
         tools,
@@ -844,13 +843,15 @@ bool ResponseHandler::send_result_to_client(
       parsed_tool_calls = std::move(parsed.tool_calls.value());
       tool_calls = &parsed_tool_calls.value();
     }
-    tracer.trace(
-        "non_stream_parsed_output",
-        "text=" + output.outputs.front().text + " has_reasoning=" +
-            (reasoning_content.has_value() ? "true" : "false") +
-            " has_tool_calls=" + (tool_calls == nullptr ? "false" : "true"));
-    if (reasoning_content.has_value()) {
-      tracer.trace("non_stream_reasoning", reasoning_content.value());
+    if (tracer.enabled()) {
+      tracer.trace(
+          "non_stream_parsed_output",
+          "text=" + output.outputs.front().text + " has_reasoning=" +
+              (reasoning_content.has_value() ? "true" : "false") +
+              " has_tool_calls=" + (tool_calls == nullptr ? "false" : "true"));
+      if (reasoning_content.has_value()) {
+        tracer.trace("non_stream_reasoning", reasoning_content.value());
+      }
     }
   }
 
@@ -865,7 +866,9 @@ bool ResponseHandler::send_result_to_client(
     LOG(ERROR) << "Anthropic response json failed: " << err_msg;
     return call_data->finish_with_error(err_msg);
   }
-  tracer.trace("non_stream_json_response", json_output);
+  if (tracer.enabled()) {
+    tracer.trace("non_stream_json_response", json_output);
+  }
   return call_data->write_and_finish(json_output);
 }
 

@@ -157,6 +157,11 @@ struct Request {
   std::unique_ptr<OutputEventSequencer> output_event_sequencer;
   bool output_dispatch_closed = false;
 
+  // Assigned exactly once before the request is published in Scheduler's
+  // active map. Output delivery then reads this immutable affinity directly,
+  // avoiding a service-wide map and mutex on every token.
+  std::optional<size_t> output_thread_index;
+
   // Set directly by the brpc connection/progressive-attachment stop callback;
   // the bounded watchdog consumes the corresponding monitor notification.
   std::atomic<bool> client_disconnected{false};

@@ -24,6 +24,19 @@ limitations under the License.
 
 namespace xllm_service {
 
+SaturationState saturation_state_from_readiness(bool ready,
+                                                bool draining,
+                                                bool has_capacity) {
+  if (ready) {
+    return has_capacity ? SaturationState::AVAILABLE
+                        : SaturationState::SATURATED;
+  }
+  if (draining && has_capacity) {
+    return SaturationState::AVAILABLE;
+  }
+  return SaturationState::UNKNOWN;
+}
+
 namespace {
 
 constexpr size_t kMaxFlowIdentityLength = 256;

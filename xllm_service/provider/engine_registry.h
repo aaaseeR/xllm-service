@@ -18,10 +18,12 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "provider.pb.h"
@@ -67,9 +69,10 @@ struct EngineRegistryMemberSnapshot {
   uint64_t lifecycle_since_monotonic_ms = 0;
 };
 
-// Immutable request-path view. Building one snapshot advances Observation once
-// under the Registry lock; all P/D candidate and link lookups afterwards are
-// local reads and never re-enter the Registry.
+// Immutable request-path view. Registry ingestion/readiness refresh builds the
+// shared Data once and atomically publishes it; copying this handle and all
+// P/D candidate/link lookups avoid the Registry lock and protobuf
+// serialization.
 class EngineRegistryRoutingSnapshot final {
  public:
   bool is_schedulable(const xllm::proto::ProviderEngineKey& key) const;
@@ -78,8 +81,39 @@ class EngineRegistryRoutingSnapshot final {
 
  private:
   friend class EngineRegistry;
-  std::set<std::string> schedulable_engines_;
-  std::set<std::string> ready_links_;
+
+  struct EngineIdentity {
+    int provider_id = 0;
+    std::string profile_digest;
+    std::string engine_uid;
+    std::string incarnation_id;
+  };
+
+  struct EngineIdentityLess {
+    using is_transparent = void;
+
+    bool operator()(const EngineIdentity& left,
+                    const EngineIdentity& right) const;
+    bool operator()(const EngineIdentity& left,
+                    const xllm::proto::ProviderEngineKey& right) const;
+    bool operator()(const xllm::proto::ProviderEngineKey& left,
+                    const EngineIdentity& right) const;
+  };
+
+  struct Data {
+    std::map<EngineIdentity, uint32_t, EngineIdentityLess> engine_indices;
+    // Exclusive per-entry expiry prevents one stale member or link from
+    // invalidating unrelated healthy routes between readiness refreshes.
+    std::vector<uint64_t> schedulable_until_monotonic_ms;
+    std::unordered_map<uint64_t, uint64_t> ready_links_until_monotonic_ms;
+  };
+
+  explicit EngineRegistryRoutingSnapshot(std::shared_ptr<const Data> data,
+                                         uint64_t receiver_monotonic_ms)
+      : data_(std::move(data)), receiver_monotonic_ms_(receiver_monotonic_ms) {}
+
+  std::shared_ptr<const Data> data_;
+  uint64_t receiver_monotonic_ms_ = 0;
 };
 
 xllm::proto::ProviderEngineKey make_provider_engine_key(
@@ -132,6 +166,9 @@ class EngineRegistry final {
   bool is_link_ready(const xllm::proto::ProviderEngineKey& prefill,
                      const xllm::proto::ProviderEngineKey& decode,
                      uint64_t receiver_monotonic_ms) const;
+  // Slow-side refresh. Request paths call routing_snapshot(), which performs
+  // only an atomic shared_ptr load and an expiry comparison.
+  void refresh_routing_snapshot(uint64_t receiver_monotonic_ms) const;
   EngineRegistryRoutingSnapshot routing_snapshot(
       uint64_t receiver_monotonic_ms) const;
   std::optional<ObservationSnapshot> observation_snapshot(
@@ -215,12 +252,18 @@ class EngineRegistry final {
                                          const std::string& engine_uid) const;
   bool has_recent_direct_success_locked(const EngineKey& key,
                                         uint64_t receiver_monotonic_ms) const;
+  void invalidate_routing_snapshot_locked() const;
+  void remove_from_routing_snapshot_locked(
+      const xllm::proto::ProviderEngineKey& key) const;
+  void publish_routing_snapshot_locked(uint64_t receiver_monotonic_ms) const;
 
   EngineRegistryConfig config_;
   bool config_valid_ = false;
   mutable std::shared_mutex mutex_;
   mutable ObservationController observation_controller_;
   mutable uint64_t last_observation_monotonic_ms_ = 0;
+  mutable std::shared_ptr<const EngineRegistryRoutingSnapshot::Data>
+      routing_snapshot_data_;
   std::map<EngineKey, xllm::proto::ProviderDescriptor> members_;
   std::map<std::string, EngineKey> current_by_engine_uid_;
   std::map<EngineKey, CachedEngineState> states_;

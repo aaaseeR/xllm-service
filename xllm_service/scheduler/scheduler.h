@@ -269,6 +269,8 @@ class Scheduler final {
   provider::ReadinessController readiness_controller_;
   provider::ReadinessSnapshot readiness_snapshot_;
   std::atomic_bool accepting_new_requests_ = false;
+  std::atomic<SaturationState> flow_saturation_state_ =
+      SaturationState::UNKNOWN;
   std::atomic_bool draining_ = false;
 
   std::string service_incarnation_id_;
@@ -398,11 +400,9 @@ class Scheduler final {
   // use threadpool to handle all RequestOuputs queue
   static constexpr size_t kOutputTheadNum_ = 128;  // magic num
   ThreadPool output_threadpools_[kOutputTheadNum_];
-  // A request will be handled in the same thread to guarantee the token's
-  // order.
-  std::unordered_map<std::string, size_t> remote_requests_output_thread_map_;
-  size_t next_thread_idx = 0;
-  std::mutex thread_map_mutex_;
+  // A request is handled by one affinity worker to preserve token order. The
+  // chosen index lives on Request and this atomic is touched only at ingress.
+  std::atomic<size_t> next_output_thread_index_{0};
 
   // used when receive token from decode instance.
   ResponseHandler response_handler_;

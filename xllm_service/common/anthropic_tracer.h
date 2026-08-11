@@ -35,6 +35,10 @@ class AnthropicTracer {
                   std::string request_id,
                   std::string service_request_id);
 
+  // Callers that would otherwise build large trace payloads should check this
+  // before formatting. trace() keeps its own guard as a safety net.
+  bool enabled() const;
+
   // Guarded by FLAGS_enable_request_trace. Formats "[anthropic][label] data",
   // forwards it to the sink and emits a LOG line in one step. No-op when the
   // flag is disabled or no sink was provided.

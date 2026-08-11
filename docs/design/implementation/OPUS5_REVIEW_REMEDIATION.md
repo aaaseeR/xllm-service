@@ -178,3 +178,42 @@ Service gitlink 再固定到该提交。
 - stress V3 的 Agent-only、Runtime-only、组合 `SIGKILL` 分别只产生 1、3、1 个有界不确定在途失败，恢复窗口为 0.113、1.255、3.918 秒；3→1 scale-down 低负载 13/13 全成功，终态所有 Runtime simulated HBM allocation/block/tensor 清零。
 
 结论仍为 `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`。固定提交独立复现消除了 §19 对作者工作区并发污染的证据疑问，但不扩大 CPU 证据边界；真实 NPU、CANN/HBM/Link、生产网络、真实部署系统和 24h+ soak 仍是上线验证门。
+
+## §20/§21 路由与输出热路径专项整改
+
+本节对应 `opus_sevice_review.md` §20 的 N2/N5 与 §21 的 P1、P2a、
+P2b、P3a、P3b。状态为
+`CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`。
+
+| Review 项 | 结论 | 实现与永久证据 |
+| --- | --- | --- |
+| §20 N2：每次路由在 Registry 独占锁内物化 O(M+P×D) 快照 | FIXED | Engine/Link 摄入和 readiness 慢路径构造一次 `shared_ptr<const Data>` 并原子发布；全部请求侧调用点只做共享句柄加载、显式身份索引和 O(1) Link 查询，不再加 Registry 锁或做 protobuf 序列化。Engine/Link 使用独立单调过期时间，避免一个陈旧成员令整个快照全空；权威删除在发布视图上原子投影，只关闭被删成员及关联 Link。8P×8D 并发 reader、独立 TTL 和删除投影测试进入 `EngineRegistryTest`。 |
+| §20 N5：protobuf wire bytes 被当作身份/相等/排序 key | FIXED | 新增 `provider/identity_key.{h,cpp}`，唯一使用协议显式字段、域隔离和长度前缀编码；Engine、Link、KV stream、KV block 的 outbox、shadow index、snapshot client、reconciler 与 retry map 全部迁移。生产目录已无 `SerializeAsString()` 身份比较。unknown-field 回归同时覆盖顶层和嵌套 Engine key，滚动升级新增字段不会让本地身份静默失配。 |
+| §21 P1：准入在 `request_mutex_` 内求 O(P×D) 容量 bool | FIXED | `refresh_readiness()` 在后台根据同一 readiness/capacity 事实发布原子 `SaturationState`；准入锁内只做一次 atomic load。drain 与 readiness 失败先发布 `UNKNOWN`，保持失败关闭；`FlowControlQueueTest.ClassifiesCachedReadinessWithoutRegistryAccess` 固化三态映射。 |
+| §21 P2a：每 token 3 次全局 request 锁 + 1 次 affinity map 锁 | FIXED | affinity worker 在请求发布前一次分配并作为不可变字段保存在 `Request`；删除全局 affinity map/mutex。终态在 active map 擦除前原子发布 `TERMINAL`，token 同步段和投递闭包以 per-request output mutex + 原子终态复核，常规 token 路径降为 1 次全局请求查找，未改变 terminal callback 的唯一性与顺序。529 项全量回归和离线高并发故障门通过。 |
+| §21 P2b：`SequenceOutput::token_ids` 是死拷贝 | FALSE POSITIVE / KEEP | `OutputEventSequencer::output_bytes()` 读取 `token_ids.size()`，用于乱序缓冲的硬字节容量核算；RPC wire 与 first-event recovery 回归也断言 token payload。删除会让大量 token-id 的事件低估内存，破坏 `output_reorder_max_bytes`。因此不按建议删除。 |
+| §21 P3a：trace 关闭后仍构造字符串 | FIXED | `AnthropicTracer::enabled()` 同时检查 flag 与 sink；raw proto/JSON、每 token delta、SSE 和非流式大字符串都在格式化前短路。enabled/disabled/empty-sink 三类测试通过。 |
+| §21 P3b：每 token 重建常量响应字段并全量 JSON 序列化 | SAFE PARTIAL | OpenAI Chat/Completion 在请求内复用 protobuf frame shell，只清理 choices、usage 和 output tensors，不再反复 Clear/复制 object/id/created/model；完整 JSON 仍由现有 `json2pb` 权威序列化，未引入手拼 JSON 兼容分支。是否进一步做预编码前缀，必须以生产 profile、转义/字段缺省 golden 和吞吐基准为门，当前不虚报为完全关闭。 |
+
+仍未把 §21 的共享 affinity worker 慢客户端队头阻塞写成已确认缺陷：brpc
+progressive write 在目标生产网络上的阻塞分布尚无证据。真实线上阶段必须用慢读、
+半关闭和网络抖动注入采样 worker queue wait；若确认存在跨请求 HOL，再改为可观测的
+有界 per-connection 异步队列，不能仅靠扩大线程数掩盖。
+
+### §20/§21 最终验证证据
+
+- ARM64 Linux Debug 全量构建与 CTest：529/529 PASS；三个 serving ELF
+  编译、动态链接 PASS。
+- vLLM Agent/sidecar 与 E2E 分类器 Python 回归：73/73 PASS。
+- 最终源码对应的 smoke：V2 `1786425918-ff631e26`、V3
+  `1786425952-4197d91b`，两份报告均 `passed=true`。
+- 最终源码对应的 stress：V2 `1786426018-0b5d3f5c`、V3
+  `1786426100-ef2c2b5d`，两份报告均 `passed=true`。V2 基线与 Leader
+  failover 后均 1200/1200；V3 Agent-only、Runtime-only、组合故障恢复分别为
+  0.196、0.956、3.779 秒，transport failure 分别为 2、4、1，均在门禁上限内。
+- V2 simulated HBM 128 blocks 最终 `used_blocks=0`、
+  `active_allocations=0`；V3 全部 active/terminated Runtime 最终
+  `used_blocks=0`、`active_allocations=0`、`tensor_zero=true`。
+
+以上不替代真实 NPU/CANN/HBM、跨机 Link、生产慢客户端和 24h+ soak；这些项继续
+保持 `NPU_AND_ONLINE_PENDING`。

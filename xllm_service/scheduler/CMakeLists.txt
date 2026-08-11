@@ -73,6 +73,7 @@ cc_library(
     :deepseek_v4_cpp_chat_template
     :first_event_recovery_client
     :flow_control_queue
+    :identity_key
     :kv_shadow_index
     :kv_route_metrics
     :kv_snapshot_client

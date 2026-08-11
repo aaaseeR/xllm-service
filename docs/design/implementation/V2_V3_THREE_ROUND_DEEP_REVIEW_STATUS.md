@@ -17,7 +17,7 @@ limitations under the License.
 
 ## 结论
 
-截至 2026-08-11，V2/V3 已连续完成两组三轮、共六轮代码、并发状态机、分布式容错和离线线上模拟审查，并按 Opus §19 在固定提交 `c474f73b245688df262714f34f19ecd8d05b0cdb` 的干净 worktree 完成第三方要求的 smoke×3 + stress×1 独立复现。发现的问题均已修复并进入永久回归门。当前结论为 `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`：CPU、Torch CPU、simulated HBM 和真实多进程协议链路已验证，真实 NPU、CANN/HBM/Link、生产网络与长时流量尚未验证，不能据此宣称硬件生产 `VERIFIED`。
+截至 2026-08-11，V2/V3 已连续完成两组三轮、共六轮代码、并发状态机、分布式容错和离线线上模拟审查，并按 Opus §19 在固定提交 `c474f73b245688df262714f34f19ecd8d05b0cdb` 的干净 worktree 完成第三方要求的 smoke×3 + stress×1 独立复现；随后又完成 Opus §20/§21 的协议演进与热路径专项整改，并以最终源码重跑 smoke+stress。发现的问题均已修复或按证据明确保留边界。当前结论为 `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`：CPU、Torch CPU、simulated HBM 和真实多进程协议链路已验证，真实 NPU、CANN/HBM/Link、生产网络与长时流量尚未验证，不能据此宣称硬件生产 `VERIFIED`。
 
 ## 三轮审查
 
@@ -42,6 +42,23 @@ limitations under the License.
 - **N2 已确认并修复**：请求路径不再在 P×D 循环中反复获取 `EngineRegistry` 独占锁和推进 Observation。每次路由决策只构建一次不可变 `EngineRegistryRoutingSnapshot`，锁内一次性物化 schedulable Engine 与 ready Link，候选生成、P×D 配对、SLO/load/KV 路由和请求 incarnation 复核全部改为锁外快照查询。新增 8P×8D、64 Link、8 并发 reader 的规模回归，连续 50 轮累计 100/100 PASS。
 - **N3 已确认并修复**：新增 `--engine_direct_evidence_ttl_ms`，并在 Master 启动和 `EngineRegistry` 构造两层失败关闭；要求 soft State TTL 不超过 hard State TTL，direct-evidence TTL 不超过 hard State 与 heartbeat TTL。离线 E2E 显式设置 1000 ms，避免测试依赖隐式默认值。
 - **N4 已补权威复现**：从已推送的固定提交 `c474f73b245688df262714f34f19ecd8d05b0cdb` 建立 detached、无修改 worktree，连续执行 smoke×3 + stress×1，共 8 份 V2/V3 报告全部 `passed=true`。复现过程中先后暴露并修复三类问题：固定 32 并发故障波与 at-most-once 不确定窗口不匹配；权威 3→1 scale-down 错误清除 FULL 标记导致剩余健康副本短暂 `RECOVERY_HOLD`；Runtime 健康 fence 与 Agent attach 并发返回的精确 `CANCELLED + INTERNAL_ERROR` 409 终态证明被门禁误判。前两项分别固化受控故障 blast radius 与 `AuthoritativeRemovalPreservesFullSnapshot` 产品回归，后一项只按完整身份/状态 JSON 严格识别，普通或截断 409 仍失败关闭。此前并发编辑期间产生的失败报告不作为实现证据。
+
+## Opus §20/§21 复核与处理
+
+- **§20 N2 已完成终局结构**：Registry 摄入/readiness 慢路径重建不可变路由
+  Data 并原子发布；请求路由只加载共享视图，以显式 Engine identity 索引和 Link
+  pair 查表，不再锁 Registry、不再按请求物化 O(M+P×D) 集合。独立 entry TTL 与
+  删除投影避免局部陈旧或 V3 scale-down 扩大成全集群路由空窗。
+- **§20 N5 已修复**：Provider Engine/Link 与 KV stream/block 的身份、相等和
+  排序统一到 `provider/identity_key` 的显式字段契约；生产路径已无 protobuf wire
+  bytes 身份 key。unknown field 的顶层/嵌套兼容回归通过。
+- **§21 P1/P2a/P3a 已修复**：准入只读后台原子饱和度；请求 affinity 索引内嵌
+  Request，常规每 token 全局锁从 4 次降为 1 次；关闭 trace 时在字符串/JSON
+  构造前短路。
+- **§21 P2b 是误报**：`token_ids` 被 OutputEventSequencer 用于乱序缓冲字节硬上限，
+  不能删除。**P3b 为安全部分完成**：复用 protobuf frame shell 和请求内常量，
+  仍保留唯一 `json2pb` 正确性路径；预编码 JSON 前缀等待生产 profile/golden。
+- **慢客户端 affinity HOL 仍待线上量化**，当前没有把未证明假设写成已知缺陷。
 
 ## 关键修复与远端代码
 
@@ -75,12 +92,16 @@ limitations under the License.
 
 ## 回归门
 
-- xllm-service ARM64 Linux Debug 全量 CPU CTest：523/523 PASS。
+- xllm-service ARM64 Linux Debug 全量 CPU CTest：529/529 PASS。
 - 新增 CallData 唯一终态/串行输出与 Link ABA 三个高风险用例，累计重复 300/300 PASS；vLLM Agent deadline attach 与转换后 body 容量三个边界用例累计重复 60/60 PASS。
 - FlowControlQueue、AttemptControlClient、ClientDisconnectMonitor、RequestDeadlineQueue、PlacementReconciler、ProviderPlacementActuator、HTTP/Registry deployment actuator 共 63 个高风险用例，`until-fail:20` 累计 1260/1260 PASS。
 - 全量门暴露 `KVStateStreamClientTest` 将“RPC 超时映射”和“非法输入不出网”混合后依赖服务端调度的竞态；已拆成两个独立语义测试，目标用例连续 100/100 PASS 后再取得全量 517/517。
 - vLLM Agent/sidecar 与离线故障分类器 Python 回归：73/73 PASS；三个 Service ARM64 Linux Debug 生产 ELF build/link PASS；非法 Engine TTL 组合在建立集群连接前退出并给出精确错误。
 - xLLM ARM64 Linux Debug 的 V2/V3 公共 CPU contract 10 个二进制共 141/141 PASS，含 attempt、registration、Provider/RequestEvent wire 和 simulated HBM；CTest 可发现 1069 项，但 `tests/all` 在第三方 Mooncake `PutOperation` incomplete-type/Clang 编译边界被阻断，因此不再把“发现 1069”误写为“全量 1069 PASS”。双仓 `git diff --check` 与 xllm-service 全仓 pre-commit PASS。
+- §20/§21 最终源码 smoke 报告：V2 `1786425918-ff631e26`、V3
+  `1786425952-4197d91b`；stress 报告：V2 `1786426018-0b5d3f5c`、
+  V3 `1786426100-ef2c2b5d`，四份均 `passed=true`。V2/V3 最终 simulated
+  HBM 均零 active allocation、零 used block，V3 tensor 清零。
 
 Opus §18 遗留的格式门作用域、V3 runbook 登记和跨层日志转义三项已在前序提交闭环；本轮重新核对 `.coding-ci.yml` 全仓 pre-commit、`OBSERVABILITY_RUNBOOK.md` Placement 指标/事件目录和共享 `proto/log_value.h` 契约，未发生回退。
 

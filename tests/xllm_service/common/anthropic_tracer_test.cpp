@@ -33,6 +33,7 @@ TEST(AnthropicTracerTest, FormatsTraceWhenEnabled) {
       "req-1",
       "svc-1");
 
+  EXPECT_TRUE(tracer.enabled());
   tracer.trace("stream_sse", "hello");
 
   ASSERT_EQ(received.size(), 1u);
@@ -47,6 +48,7 @@ TEST(AnthropicTracerTest, DoesNotCallSinkWhenDisabled) {
       "req-1",
       "svc-1");
 
+  EXPECT_FALSE(tracer.enabled());
   tracer.trace("stream_sse", "hello");
 
   EXPECT_TRUE(received.empty());
@@ -58,6 +60,7 @@ TEST(AnthropicTracerTest, NoCrashWhenSinkIsEmpty) {
 
   // Mirrors the service.cpp path where request == nullptr or the trace
   // callback is unset: the call must be a safe no-op.
+  EXPECT_FALSE(tracer.enabled());
   EXPECT_NO_FATAL_FAILURE(tracer.trace("raw_http_request", "payload"));
 }
 

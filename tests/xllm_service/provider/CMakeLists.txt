@@ -2,6 +2,16 @@ include(cc_test)
 
 cc_test(
   NAME
+    identity_key_test
+  SRCS
+    identity_key_test.cpp
+  DEPS
+    :identity_key
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     engine_registry_test
   SRCS
     engine_registry_test.cpp

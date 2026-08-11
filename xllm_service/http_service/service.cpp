@@ -1312,9 +1312,11 @@ void XllmHttpServiceImpl::AnthropicMessages(
     return;
   }
   auto tracer = make_anthropic_tracer(service_request);
-  tracer.trace("raw_http_request", attachment);
-  tracer.trace("anthropic_request_pb", proto_json(*anthropic_req_pb));
-  tracer.trace("chat_request_after_adapt", proto_json(*req_pb));
+  if (tracer.enabled()) {
+    tracer.trace("raw_http_request", attachment);
+    tracer.trace("anthropic_request_pb", proto_json(*anthropic_req_pb));
+    tracer.trace("chat_request_after_adapt", proto_json(*req_pb));
+  }
   service_request->messages = std::move(messages);
   service_request->tools = parse_tools_from_proto(req_pb->tools());
   if (req_pb->has_tool_choice()) {

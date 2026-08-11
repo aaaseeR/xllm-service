@@ -20,6 +20,8 @@ limitations under the License.
 #include <set>
 #include <utility>
 
+#include "provider/identity_key.h"
+
 namespace xllm_service::provider {
 namespace {
 
@@ -57,16 +59,7 @@ LinkReconciler::LinkReconciler(LinkReconcilerConfig config)
 std::string LinkReconciler::link_key(
     const xllm::proto::ProviderEngineKey& prefill,
     const xllm::proto::ProviderEngineKey& decode) {
-  const std::string prefill_wire = prefill.SerializeAsString();
-  const std::string decode_wire = decode.SerializeAsString();
-  std::string key;
-  key.reserve(sizeof(uint64_t) + prefill_wire.size() + decode_wire.size());
-  const uint64_t prefill_size = static_cast<uint64_t>(prefill_wire.size());
-  key.append(reinterpret_cast<const char*>(&prefill_size),
-             sizeof(prefill_size));
-  key.append(prefill_wire);
-  key.append(decode_wire);
-  return key;
+  return provider_link_identity_key(prefill, decode);
 }
 
 uint64_t LinkReconciler::retry_delay_ms(uint32_t consecutive_failures) const {

@@ -22,6 +22,8 @@ limitations under the License.
 #include <string_view>
 #include <utility>
 
+#include "provider/identity_key.h"
+
 namespace xllm_service::provider {
 namespace {
 
@@ -51,7 +53,7 @@ bool valid_rpc_address(const std::string& address) {
 }
 
 std::string engine_key(const xllm::proto::ProviderEngineKey& key) {
-  return key.SerializeAsString();
+  return provider_engine_identity_key(key);
 }
 
 std::string engine_key(const xllm::proto::EngineState& state) {
@@ -64,16 +66,7 @@ std::string engine_key(const xllm::proto::EngineState& state) {
 }
 
 std::string link_key(const xllm::proto::LinkState& state) {
-  const std::string prefill = engine_key(state.prefill());
-  const std::string decode = engine_key(state.decode());
-  std::string key;
-  key.reserve(sizeof(uint64_t) + prefill.size() + decode.size());
-  const uint64_t prefill_size = static_cast<uint64_t>(prefill.size());
-  key.append(reinterpret_cast<const char*>(&prefill_size),
-             sizeof(prefill_size));
-  key.append(prefill);
-  key.append(decode);
-  return key;
+  return provider_link_identity_key(state.prefill(), state.decode());
 }
 
 bool link_references_engine(const xllm::proto::LinkState& link,

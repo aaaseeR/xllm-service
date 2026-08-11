@@ -72,6 +72,24 @@ FlowControlWork work(std::string uid,
   };
 }
 
+TEST(FlowControlQueueTest, ClassifiesCachedReadinessWithoutRegistryAccess) {
+  EXPECT_EQ(saturation_state_from_readiness(
+                /*ready=*/true, /*draining=*/false, /*has_capacity=*/true),
+            SaturationState::AVAILABLE);
+  EXPECT_EQ(saturation_state_from_readiness(
+                /*ready=*/true, /*draining=*/false, /*has_capacity=*/false),
+            SaturationState::SATURATED);
+  EXPECT_EQ(saturation_state_from_readiness(
+                /*ready=*/false, /*draining=*/true, /*has_capacity=*/true),
+            SaturationState::AVAILABLE);
+  EXPECT_EQ(saturation_state_from_readiness(
+                /*ready=*/false, /*draining=*/true, /*has_capacity=*/false),
+            SaturationState::UNKNOWN);
+  EXPECT_EQ(saturation_state_from_readiness(
+                /*ready=*/false, /*draining=*/false, /*has_capacity=*/true),
+            SaturationState::UNKNOWN);
+}
+
 TEST(FlowControlQueueTest, RejectsInvalidCrashAndMemoryBudgets) {
   FlowControlConfig invalid = config();
   invalid.service_crash_request_budget = 19;

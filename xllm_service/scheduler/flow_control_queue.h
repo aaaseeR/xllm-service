@@ -34,6 +34,14 @@ enum class SaturationState {
   UNKNOWN = 2,
 };
 
+// Converts the latest readiness/capacity observation into the tri-state used
+// by admission and dispatch. Keeping this classification independent from the
+// registry lets Scheduler cache it and keeps O(P*D) route enumeration off the
+// request lock.
+SaturationState saturation_state_from_readiness(bool ready,
+                                                bool draining,
+                                                bool has_capacity);
+
 enum class FlowOrder {
   FCFS = 0,
   EDF = 1,

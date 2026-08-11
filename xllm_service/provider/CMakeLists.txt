@@ -13,6 +13,17 @@ cc_library(
 
 cc_library(
   NAME
+    identity_key
+  HDRS
+    identity_key.h
+  SRCS
+    identity_key.cpp
+  DEPS
+    proto_xllm
+)
+
+cc_library(
+  NAME
     canonical_request_builder
   HDRS
     canonical_request_builder.h
@@ -80,6 +91,7 @@ cc_library(
   SRCS
     state_stream_outbox.cpp
   DEPS
+    :identity_key
     :provider_contract
     proto_xllm
 )
@@ -92,6 +104,7 @@ cc_library(
   SRCS
     kv_shadow_index.cpp
   DEPS
+    :identity_key
     proto_xllm
 )
 
@@ -151,6 +164,7 @@ cc_library(
   SRCS
     link_reconciler.cpp
   DEPS
+    :identity_key
     :provider_contract
     proto_xllm
 )

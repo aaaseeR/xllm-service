@@ -40,6 +40,7 @@ limitations under the License.
 #include "common/xllm/output.h"
 #include "common/xllm/status.h"
 #include "disagg_pd.pb.h"
+#include "provider/identity_key.h"
 #include "provider/provider_contract.h"
 #include "provider/provider_route_selector.h"
 #include "scheduler/scheduler.h"
@@ -108,14 +109,6 @@ xllm_service::provider::LinkReconcilerConfig link_reconciler_config(
       .retry_max_ms = options.engine_link_retry_max_ms(),
       .ready_recheck_ms = options.engine_link_ready_recheck_ms(),
   };
-}
-
-bool same_provider_engine_key(const xllm::proto::ProviderEngineKey& left,
-                              const xllm::proto::ProviderEngineKey& right) {
-  return left.provider_id() == right.provider_id() &&
-         left.profile_digest() == right.profile_digest() &&
-         left.engine_uid() == right.engine_uid() &&
-         left.incarnation_id() == right.incarnation_id();
 }
 
 bool is_instance_schedulable(
@@ -1627,12 +1620,14 @@ void InstanceMgr::reconcile_provider_links() {
       if (prefill != instances_.end() && decode != instances_.end() &&
           prefill->second.provider_descriptor.has_value() &&
           decode->second.provider_descriptor.has_value() &&
-          same_provider_engine_key(provider::make_provider_engine_key(
-                                       *prefill->second.provider_descriptor),
-                                   attempt.prefill) &&
-          same_provider_engine_key(provider::make_provider_engine_key(
-                                       *decode->second.provider_descriptor),
-                                   attempt.decode)) {
+          provider::same_provider_engine_identity(
+              provider::make_provider_engine_key(
+                  *prefill->second.provider_descriptor),
+              attempt.prefill) &&
+          provider::same_provider_engine_identity(
+              provider::make_provider_engine_key(
+                  *decode->second.provider_descriptor),
+              attempt.decode)) {
         target_rpc_address = decode->second.rpc_address;
         prefill_info = prefill->second;
         pair_is_current = true;
@@ -2412,6 +2407,10 @@ bool InstanceMgr::has_available_instances() const {
 
 bool InstanceMgr::has_available_instances_at(uint64_t now_monotonic_ms) const {
   std::shared_lock<std::shared_mutex> lock(cluster_mutex_);
+  // This is the readiness/reconciliation slow path. It is the only periodic
+  // route-view builder; request routing below consumes the atomically
+  // published immutable view without entering EngineRegistry.
+  engine_registry_.refresh_routing_snapshot(now_monotonic_ms);
   const provider::EngineRegistryRoutingSnapshot routing_snapshot =
       engine_registry_.routing_snapshot(now_monotonic_ms);
   std::vector<provider::ProviderRouteCandidate> prefill_candidates =

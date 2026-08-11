@@ -18,7 +18,9 @@ limitations under the License.
 #include <google/protobuf/util/message_differencer.h>
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <tuple>
@@ -39,23 +41,24 @@ bool has_capability(const xllm::proto::ProviderDescriptor& descriptor,
                    capability) != descriptor.capabilities().end();
 }
 
-std::string routing_engine_key(
-    const xllm::proto::ProviderEngineKey& engine_key) {
-  return engine_key.SerializeAsString();
+uint64_t link_index_key(uint32_t prefill_index, uint32_t decode_index) {
+  return (static_cast<uint64_t>(prefill_index) << 32) | decode_index;
 }
 
-std::string routing_link_key(const xllm::proto::ProviderEngineKey& prefill,
-                             const xllm::proto::ProviderEngineKey& decode) {
-  const std::string prefill_key = routing_engine_key(prefill);
-  const std::string decode_key = routing_engine_key(decode);
-  std::string key;
-  key.reserve(sizeof(uint64_t) + prefill_key.size() + decode_key.size());
-  const uint64_t prefill_size = static_cast<uint64_t>(prefill_key.size());
-  key.append(reinterpret_cast<const char*>(&prefill_size),
-             sizeof(prefill_size));
-  key.append(prefill_key);
-  key.append(decode_key);
-  return key;
+uint64_t saturating_add(uint64_t left, uint64_t right) {
+  return right > std::numeric_limits<uint64_t>::max() - left
+             ? std::numeric_limits<uint64_t>::max()
+             : left + right;
+}
+
+uint64_t valid_until_from_age(uint64_t now_monotonic_ms,
+                              uint64_t current_age_ms,
+                              uint64_t hard_ttl_ms) {
+  if (current_age_ms > hard_ttl_ms) {
+    return 0;
+  }
+  return saturating_add(
+      saturating_add(now_monotonic_ms, hard_ttl_ms - current_age_ms), 1);
 }
 
 }  // namespace
@@ -70,17 +73,73 @@ xllm::proto::ProviderEngineKey make_provider_engine_key(
   return key;
 }
 
+bool EngineRegistryRoutingSnapshot::EngineIdentityLess::operator()(
+    const EngineIdentity& left,
+    const EngineIdentity& right) const {
+  return std::forward_as_tuple(left.provider_id,
+                               left.profile_digest,
+                               left.engine_uid,
+                               left.incarnation_id) <
+         std::forward_as_tuple(right.provider_id,
+                               right.profile_digest,
+                               right.engine_uid,
+                               right.incarnation_id);
+}
+
+bool EngineRegistryRoutingSnapshot::EngineIdentityLess::operator()(
+    const EngineIdentity& left,
+    const xllm::proto::ProviderEngineKey& right) const {
+  return std::forward_as_tuple(left.provider_id,
+                               left.profile_digest,
+                               left.engine_uid,
+                               left.incarnation_id) <
+         std::forward_as_tuple(right.provider_id(),
+                               right.profile_digest(),
+                               right.engine_uid(),
+                               right.incarnation_id());
+}
+
+bool EngineRegistryRoutingSnapshot::EngineIdentityLess::operator()(
+    const xllm::proto::ProviderEngineKey& left,
+    const EngineIdentity& right) const {
+  return std::forward_as_tuple(left.provider_id(),
+                               left.profile_digest(),
+                               left.engine_uid(),
+                               left.incarnation_id()) <
+         std::forward_as_tuple(right.provider_id,
+                               right.profile_digest,
+                               right.engine_uid,
+                               right.incarnation_id);
+}
+
 bool EngineRegistryRoutingSnapshot::is_schedulable(
     const xllm::proto::ProviderEngineKey& key) const {
-  return schedulable_engines_.find(routing_engine_key(key)) !=
-         schedulable_engines_.end();
+  if (data_ == nullptr) {
+    return false;
+  }
+  const auto identity = data_->engine_indices.find(key);
+  return identity != data_->engine_indices.end() &&
+         identity->second < data_->schedulable_until_monotonic_ms.size() &&
+         receiver_monotonic_ms_ <
+             data_->schedulable_until_monotonic_ms[identity->second];
 }
 
 bool EngineRegistryRoutingSnapshot::is_link_ready(
     const xllm::proto::ProviderEngineKey& prefill,
     const xllm::proto::ProviderEngineKey& decode) const {
-  return ready_links_.find(routing_link_key(prefill, decode)) !=
-         ready_links_.end();
+  if (data_ == nullptr) {
+    return false;
+  }
+  const auto prefill_identity = data_->engine_indices.find(prefill);
+  const auto decode_identity = data_->engine_indices.find(decode);
+  if (prefill_identity == data_->engine_indices.end() ||
+      decode_identity == data_->engine_indices.end()) {
+    return false;
+  }
+  const auto link = data_->ready_links_until_monotonic_ms.find(
+      link_index_key(prefill_identity->second, decode_identity->second));
+  return link != data_->ready_links_until_monotonic_ms.end() &&
+         receiver_monotonic_ms_ < link->second;
 }
 
 EngineRegistry::EngineRegistry(EngineRegistryConfig config)
@@ -193,6 +252,10 @@ ContractResult EngineRegistry::upsert_member(
   members_.emplace(key.value(), descriptor);
   current_by_engine_uid_.insert_or_assign(engine_uid, key.value());
   full_snapshot_master_incarnation_.clear();
+  // An already-published view remains safe for the old membership: a newly
+  // added/replaced identity is absent and therefore fail-closed, while
+  // unchanged members retain their independently expiring proofs. The next
+  // FULL State batch publishes the expanded view.
   return ContractResult::success();
 }
 
@@ -232,6 +295,7 @@ bool EngineRegistry::remove_member(
   // still complete for the remaining membership. Additions and replacements
   // continue to invalidate the full snapshot in upsert_member because their
   // new incarnation has no State proof yet.
+  remove_from_routing_snapshot_locked(wire_key);
   return true;
 }
 
@@ -241,7 +305,10 @@ ContractResult EngineRegistry::set_registry_visibility(bool registry_known) {
                 "Engine Registry configuration is invalid");
   }
   std::unique_lock lock(mutex_);
-  registry_known_ = registry_known;
+  if (registry_known_ != registry_known) {
+    registry_known_ = registry_known;
+    invalidate_routing_snapshot_locked();
+  }
   return ContractResult::success();
 }
 
@@ -263,6 +330,7 @@ ContractResult EngineRegistry::set_state_stream_master(
     // new counter caught up. Drop old-epoch proofs and require the new master
     // to establish its own Link state before reopening strict P/D routing.
     links_.clear();
+    invalidate_routing_snapshot_locked();
   }
   return ContractResult::success();
 }
@@ -320,6 +388,7 @@ ContractResult EngineRegistry::record_engine_state(
                                .lifecycle_since_monotonic_ms = lifecycle_since,
                            });
   *applied = true;
+  publish_routing_snapshot_locked(receiver_monotonic_ms);
   return ContractResult::success();
 }
 
@@ -356,6 +425,7 @@ ContractResult EngineRegistry::record_link_state(
                               .received_monotonic_ms = receiver_monotonic_ms,
                           });
   *applied = true;
+  publish_routing_snapshot_locked(receiver_monotonic_ms);
   return ContractResult::success();
 }
 
@@ -656,6 +726,7 @@ ContractResult EngineRegistry::apply_state_batch(
 
   last_snapshot_seq_ = batch.snapshot_seq();
   *applied = true;
+  publish_routing_snapshot_locked(receiver_monotonic_ms);
   return ContractResult::success();
 }
 
@@ -686,6 +757,7 @@ ContractResult EngineRegistry::record_direct_evidence(
   if (!timestamp.has_value() || receiver_monotonic_ms > *timestamp) {
     timestamp = receiver_monotonic_ms;
   }
+  publish_routing_snapshot_locked(receiver_monotonic_ms);
   return ContractResult::success();
 }
 
@@ -986,26 +1058,135 @@ bool EngineRegistry::is_link_ready(
                               *observation);
 }
 
-EngineRegistryRoutingSnapshot EngineRegistry::routing_snapshot(
+void EngineRegistry::invalidate_routing_snapshot_locked() const {
+  std::atomic_store_explicit(
+      &routing_snapshot_data_,
+      std::shared_ptr<const EngineRegistryRoutingSnapshot::Data>{},
+      std::memory_order_release);
+}
+
+void EngineRegistry::remove_from_routing_snapshot_locked(
+    const xllm::proto::ProviderEngineKey& key) const {
+  const std::shared_ptr<const EngineRegistryRoutingSnapshot::Data> current =
+      std::atomic_load_explicit(&routing_snapshot_data_,
+                                std::memory_order_acquire);
+  if (current == nullptr) {
+    return;
+  }
+  auto projected =
+      std::make_shared<EngineRegistryRoutingSnapshot::Data>(*current);
+  const auto removed = projected->engine_indices.find(key);
+  if (removed == projected->engine_indices.end()) {
+    return;
+  }
+  const uint32_t removed_index = removed->second;
+  if (removed_index < projected->schedulable_until_monotonic_ms.size()) {
+    projected->schedulable_until_monotonic_ms[removed_index] = 0;
+  }
+  for (auto link = projected->ready_links_until_monotonic_ms.begin();
+       link != projected->ready_links_until_monotonic_ms.end();) {
+    const uint32_t prefill_index = static_cast<uint32_t>(link->first >> 32);
+    const uint32_t decode_index = static_cast<uint32_t>(link->first);
+    if (prefill_index == removed_index || decode_index == removed_index) {
+      link = projected->ready_links_until_monotonic_ms.erase(link);
+    } else {
+      ++link;
+    }
+  }
+  projected->engine_indices.erase(removed);
+  std::atomic_store_explicit(
+      &routing_snapshot_data_,
+      std::shared_ptr<const EngineRegistryRoutingSnapshot::Data>(projected),
+      std::memory_order_release);
+}
+
+void EngineRegistry::publish_routing_snapshot_locked(
     uint64_t receiver_monotonic_ms) const {
-  EngineRegistryRoutingSnapshot snapshot;
-  std::unique_lock lock(mutex_);
   receiver_monotonic_ms =
       normalize_observation_time_locked(receiver_monotonic_ms);
   const std::optional<ObservationSnapshot> observation =
       update_observation_locked(receiver_monotonic_ms);
+  auto data = std::make_shared<EngineRegistryRoutingSnapshot::Data>();
   if (!observation.has_value()) {
-    return snapshot;
+    std::atomic_store_explicit(
+        &routing_snapshot_data_,
+        std::shared_ptr<const EngineRegistryRoutingSnapshot::Data>(data),
+        std::memory_order_release);
+    return;
   }
+
+  uint32_t engine_index = 0;
+  for (const auto& [key, descriptor] : members_) {
+    static_cast<void>(key);
+    const xllm::proto::ProviderEngineKey wire_key =
+        make_provider_engine_key(descriptor);
+    data->engine_indices.emplace(
+        EngineRegistryRoutingSnapshot::EngineIdentity{
+            .provider_id = static_cast<int>(wire_key.provider_id()),
+            .profile_digest = wire_key.profile_digest(),
+            .engine_uid = wire_key.engine_uid(),
+            .incarnation_id = wire_key.incarnation_id(),
+        },
+        engine_index++);
+  }
+  data->schedulable_until_monotonic_ms.assign(data->engine_indices.size(), 0);
+  std::map<EngineKey, uint64_t> engine_valid_until;
 
   for (const auto& [key, descriptor] : members_) {
     const xllm::proto::ProviderEngineKey wire_key =
         make_provider_engine_key(descriptor);
-    if (is_schedulable_locked(
+    if (!is_schedulable_locked(
             key, wire_key.engine_uid(), receiver_monotonic_ms, *observation)) {
-      snapshot.schedulable_engines_.emplace(routing_engine_key(wire_key));
+      continue;
     }
+    const auto identity = data->engine_indices.find(wire_key);
+    if (identity == data->engine_indices.end()) {
+      continue;
+    }
+    uint64_t direct_valid_until = 0;
+    if (has_recent_direct_success_locked(key, receiver_monotonic_ms)) {
+      const auto evidence = direct_evidence_.find(key);
+      direct_valid_until = saturating_add(
+          saturating_add(*evidence->second.last_success_monotonic_ms,
+                         config_.direct_evidence_ttl_ms),
+          1);
+    }
+
+    uint64_t valid_until = 0;
+    if (observation->mode == ObservationMode::REGISTRY_BLIND) {
+      valid_until = saturating_add(observation->mode_entered_monotonic_ms,
+                                   config_.observation.registry_blind_grace_ms);
+    } else if (observation->mode == ObservationMode::STATE_BLIND) {
+      uint64_t grace_valid_until = 0;
+      if (observation->within_grace) {
+        grace_valid_until =
+            saturating_add(observation->mode_entered_monotonic_ms,
+                           config_.observation.state_blind_grace_ms);
+      }
+      valid_until = std::max(grace_valid_until, direct_valid_until);
+    } else {
+      const CachedEngineState& cached = states_.find(key)->second;
+      const uint64_t state_age =
+          effective_age_ms(cached.state.state_age_ms_at_publish(),
+                           cached.received_monotonic_ms,
+                           receiver_monotonic_ms);
+      const uint64_t heartbeat_age =
+          effective_age_ms(cached.state.heartbeat_age_ms_at_publish(),
+                           cached.received_monotonic_ms,
+                           receiver_monotonic_ms);
+      const uint64_t state_valid_until = std::min(
+          valid_until_from_age(
+              receiver_monotonic_ms, state_age, config_.state_hard_ttl_ms),
+          valid_until_from_age(receiver_monotonic_ms,
+                               heartbeat_age,
+                               config_.heartbeat_hard_ttl_ms));
+      valid_until = std::max(state_valid_until, direct_valid_until);
+    }
+    data->schedulable_until_monotonic_ms[identity->second] = valid_until;
+    engine_valid_until.emplace(key, valid_until);
   }
+
+  data->ready_links_until_monotonic_ms.reserve(links_.size());
   for (const auto& [link_key, cached_link] : links_) {
     const xllm::proto::ProviderEngineKey& prefill = cached_link.state.prefill();
     const xllm::proto::ProviderEngineKey& decode = cached_link.state.decode();
@@ -1015,10 +1196,57 @@ EngineRegistryRoutingSnapshot EngineRegistry::routing_snapshot(
                              decode.engine_uid(),
                              receiver_monotonic_ms,
                              *observation)) {
-      snapshot.ready_links_.emplace(routing_link_key(prefill, decode));
+      const auto prefill_identity = data->engine_indices.find(prefill);
+      const auto decode_identity = data->engine_indices.find(decode);
+      const auto prefill_valid_until =
+          engine_valid_until.find(link_key.prefill);
+      const auto decode_valid_until = engine_valid_until.find(link_key.decode);
+      if (prefill_identity == data->engine_indices.end() ||
+          decode_identity == data->engine_indices.end() ||
+          prefill_valid_until == engine_valid_until.end() ||
+          decode_valid_until == engine_valid_until.end()) {
+        continue;
+      }
+      uint64_t valid_until =
+          std::min(prefill_valid_until->second, decode_valid_until->second);
+      if (observation->mode == ObservationMode::NORMAL) {
+        const uint64_t link_age =
+            effective_age_ms(cached_link.state.age_ms_at_publish(),
+                             cached_link.received_monotonic_ms,
+                             receiver_monotonic_ms);
+        valid_until = std::min(
+            valid_until,
+            valid_until_from_age(
+                receiver_monotonic_ms, link_age, config_.link_hard_ttl_ms));
+      }
+      data->ready_links_until_monotonic_ms.emplace(
+          link_index_key(prefill_identity->second, decode_identity->second),
+          valid_until);
     }
   }
-  return snapshot;
+
+  std::atomic_store_explicit(
+      &routing_snapshot_data_,
+      std::shared_ptr<const EngineRegistryRoutingSnapshot::Data>(data),
+      std::memory_order_release);
+}
+
+void EngineRegistry::refresh_routing_snapshot(
+    uint64_t receiver_monotonic_ms) const {
+  std::unique_lock lock(mutex_);
+  publish_routing_snapshot_locked(receiver_monotonic_ms);
+}
+
+EngineRegistryRoutingSnapshot EngineRegistry::routing_snapshot(
+    uint64_t receiver_monotonic_ms) const {
+  std::shared_ptr<const EngineRegistryRoutingSnapshot::Data> data =
+      std::atomic_load_explicit(&routing_snapshot_data_,
+                                std::memory_order_acquire);
+  if (data != nullptr) {
+    return EngineRegistryRoutingSnapshot(std::move(data),
+                                         receiver_monotonic_ms);
+  }
+  return EngineRegistryRoutingSnapshot(nullptr, receiver_monotonic_ms);
 }
 
 std::optional<ObservationSnapshot> EngineRegistry::observation_snapshot(

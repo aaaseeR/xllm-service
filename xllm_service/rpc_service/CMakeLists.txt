@@ -61,6 +61,7 @@ cc_library(
   SRCS
     kv_snapshot_client.cpp
   DEPS
+    :identity_key
     :provider_contract
     proto_xllm
 )

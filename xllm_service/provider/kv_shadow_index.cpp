@@ -19,6 +19,8 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
+#include "provider/identity_key.h"
+
 namespace xllm_service::provider {
 namespace {
 
@@ -63,10 +65,7 @@ bool valid_event(const xllm::proto::KVEvent& event) {
 
 bool same_stream(const xllm::proto::KVStreamIdentity& left,
                  const xllm::proto::KVStreamIdentity& right) {
-  return left.engine().SerializeAsString() ==
-             right.engine().SerializeAsString() &&
-         left.model_revision() == right.model_revision() &&
-         left.kv_namespace() == right.kv_namespace();
+  return same_kv_stream_identity(left, right, /*include_cache_epoch=*/false);
 }
 
 }  // namespace
@@ -85,13 +84,11 @@ KVShadowIndex::KVShadowIndex(KVShadowIndexConfig config)
 
 std::string KVShadowIndex::stream_key(
     const xllm::proto::KVStreamIdentity& identity) {
-  xllm::proto::KVStreamIdentity ordering_domain = identity;
-  ordering_domain.set_cache_epoch(0);
-  return ordering_domain.SerializeAsString();
+  return kv_stream_identity_key(identity, /*include_cache_epoch=*/false);
 }
 
 std::string KVShadowIndex::entry_key(const xllm::proto::KVBlockEntry& entry) {
-  return entry.SerializeAsString();
+  return kv_block_identity_key(entry);
 }
 
 std::string KVShadowIndex::lookup_key(const std::string& block_hash,
@@ -707,7 +704,7 @@ std::vector<xllm::proto::KVStreamIdentity> KVShadowIndex::snapshot_required()
             identities.end(),
             [](const xllm::proto::KVStreamIdentity& left,
                const xllm::proto::KVStreamIdentity& right) {
-              return left.SerializeAsString() < right.SerializeAsString();
+              return kv_stream_identity_less(left, right);
             });
   return identities;
 }

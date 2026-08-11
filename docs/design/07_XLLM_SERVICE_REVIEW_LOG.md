@@ -1848,3 +1848,34 @@ interval、数值 NaN/Inf/bool 及未启动 Agent 的 stop 路径均 fail closed
 heartbeat 鉴权 401 也会立即 fence、撤销 lease 并退出，避免 Registry 持续发布不可用
 实例。最终 CPU 门禁为 xLLM 默认六目标 97/97、Service 293/293、Agent/sidecar
 60/60，三个 Service ARM64 Debug ELF 验证通过。
+
+## 35. Opus §20/§21 协议演进与热路径整改（2026-08-11）
+
+本轮确认 §20 N2/N5 与 §21 P1/P2a/P3a 成立并完成结构修复。EngineRegistry
+路由视图改为状态摄入/readiness 慢路径重建、`shared_ptr<const Data>` 原子发布；
+请求侧只做共享句柄加载和 typed identity/link 查表。每个 Engine/Link 独立过期，
+权威删除直接投影当前发布视图，避免一个临近 TTL 的成员或 V3 scale-down 让健康
+路由整体短暂消失。Provider 与 KV 身份统一按协议显式字段、域隔离和长度前缀编码，
+生产路径不再把 protobuf 序列化字节用于身份、相等或排序；unknown field 回归证明
+滚动升级新增字段不会静默打断 Link/KV 匹配。
+
+准入路径改为读取 readiness 后台发布的原子饱和度，不再在 `request_mutex_` 内
+枚举 P×D。输出 affinity 在请求发布前一次分配并保存在 Request，删除全局 affinity
+map/mutex；终态先原子发布再擦除 active map，常规 token 路径只保留一次全局请求
+查找。Anthropic trace 的 flag/sink 判断前移到所有大字符串、proto JSON 和 token
+delta 构造之前。OpenAI 流式响应复用 protobuf frame shell 与请求内常量，但仍由
+唯一 `json2pb` 路径产生完整 JSON；未在没有 profile/golden 的情况下引入手拼前缀。
+
+§21 P2b 的“`SequenceOutput::token_ids` 只写不读”与代码事实不符：
+`OutputEventSequencer::output_bytes()` 用其长度执行乱序事件字节容量硬限制，RPC 与
+first-event recovery 测试也消费 payload。删除会低估内存，因此结论为
+`FALSE POSITIVE / KEEP`。共享 affinity worker 的慢客户端 HOL 仍没有生产网络证据，
+保留为线上慢读/半关闭压测项，不提前定义为 bug。
+
+最终证据：ARM64 Linux Debug 529/529 CTest、Python 73/73、三个 serving ELF
+build/link 通过；最终源码的 smoke V2/V3 报告 `1786425918-ff631e26`、
+`1786425952-4197d91b` 与 stress V2/V3 报告 `1786426018-0b5d3f5c`、
+`1786426100-ef2c2b5d` 全部 `passed=true`。V2 1200/1200 基线和 Leader
+failover 1200/1200，V3 Agent/Runtime/组合故障均在门禁内有界恢复，所有 active/
+terminated Runtime 的 simulated HBM 最终零 allocation、零 used block、tensor 清零。
+结论保持 `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`。

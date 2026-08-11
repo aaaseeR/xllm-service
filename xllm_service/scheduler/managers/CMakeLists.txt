@@ -15,6 +15,7 @@ cc_library(
     :common
     :engine_registry
     :etcd_client
+    :identity_key
     :kv_route_planner
     :link_reconciler
     :provider_contract

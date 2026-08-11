@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 
 #include "disagg_pd.pb.h"
+#include "provider/identity_key.h"
 #include "provider/provider_contract.h"
 
 namespace xllm_service {
@@ -62,8 +63,8 @@ std::string validate_response(const KVSnapshotPageQuery& query,
   if (page.contract_version() != provider::kProviderContractVersion ||
       !xllm::proto::KVSnapshotStatus_IsValid(page.status()) ||
       page.status() == xllm::proto::KV_SNAPSHOT_STATUS_UNSPECIFIED ||
-      page.identity().SerializeAsString() !=
-          query.request.identity().SerializeAsString()) {
+      !provider::same_kv_stream_identity(page.identity(),
+                                         query.request.identity())) {
     return "KV snapshot response identity is invalid";
   }
   if (page.status() == xllm::proto::KV_SNAPSHOT_STATUS_OK &&
