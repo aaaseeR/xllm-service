@@ -39,6 +39,25 @@ bool has_capability(const xllm::proto::ProviderDescriptor& descriptor,
                    capability) != descriptor.capabilities().end();
 }
 
+std::string routing_engine_key(
+    const xllm::proto::ProviderEngineKey& engine_key) {
+  return engine_key.SerializeAsString();
+}
+
+std::string routing_link_key(const xllm::proto::ProviderEngineKey& prefill,
+                             const xllm::proto::ProviderEngineKey& decode) {
+  const std::string prefill_key = routing_engine_key(prefill);
+  const std::string decode_key = routing_engine_key(decode);
+  std::string key;
+  key.reserve(sizeof(uint64_t) + prefill_key.size() + decode_key.size());
+  const uint64_t prefill_size = static_cast<uint64_t>(prefill_key.size());
+  key.append(reinterpret_cast<const char*>(&prefill_size),
+             sizeof(prefill_size));
+  key.append(prefill_key);
+  key.append(decode_key);
+  return key;
+}
+
 }  // namespace
 
 xllm::proto::ProviderEngineKey make_provider_engine_key(
@@ -51,6 +70,19 @@ xllm::proto::ProviderEngineKey make_provider_engine_key(
   return key;
 }
 
+bool EngineRegistryRoutingSnapshot::is_schedulable(
+    const xllm::proto::ProviderEngineKey& key) const {
+  return schedulable_engines_.find(routing_engine_key(key)) !=
+         schedulable_engines_.end();
+}
+
+bool EngineRegistryRoutingSnapshot::is_link_ready(
+    const xllm::proto::ProviderEngineKey& prefill,
+    const xllm::proto::ProviderEngineKey& decode) const {
+  return ready_links_.find(routing_link_key(prefill, decode)) !=
+         ready_links_.end();
+}
+
 EngineRegistry::EngineRegistry(EngineRegistryConfig config)
     : config_(config), observation_controller_(config.observation) {
   config_valid_ =
@@ -58,7 +90,10 @@ EngineRegistry::EngineRegistry(EngineRegistryConfig config)
       config_.state_soft_ttl_ms > 0 && config_.state_hard_ttl_ms > 0 &&
       config_.state_soft_ttl_ms <= config_.state_hard_ttl_ms &&
       config_.heartbeat_hard_ttl_ms > 0 && config_.link_hard_ttl_ms > 0 &&
-      config_.direct_evidence_ttl_ms > 0 && observation_controller_.valid();
+      config_.direct_evidence_ttl_ms > 0 &&
+      config_.direct_evidence_ttl_ms <= config_.state_hard_ttl_ms &&
+      config_.direct_evidence_ttl_ms <= config_.heartbeat_hard_ttl_ms &&
+      observation_controller_.valid();
 }
 
 bool EngineRegistry::EngineKey::operator<(const EngineKey& other) const {
@@ -886,6 +921,41 @@ bool EngineRegistry::is_schedulable(
       key.value(), wire_key.engine_uid(), receiver_monotonic_ms, *observation);
 }
 
+bool EngineRegistry::is_link_ready_locked(
+    const EngineKey& prefill_key,
+    const std::string& prefill_engine_uid,
+    const EngineKey& decode_key,
+    const std::string& decode_engine_uid,
+    uint64_t receiver_monotonic_ms,
+    const ObservationSnapshot& observation) const {
+  if (!is_schedulable_locked(prefill_key,
+                             prefill_engine_uid,
+                             receiver_monotonic_ms,
+                             observation) ||
+      !is_schedulable_locked(
+          decode_key, decode_engine_uid, receiver_monotonic_ms, observation)) {
+    return false;
+  }
+  const auto link =
+      links_.find(LinkKey{.prefill = prefill_key, .decode = decode_key});
+  if (link == links_.end() ||
+      link->second.state.prefill().engine_uid() != prefill_engine_uid ||
+      link->second.state.decode().engine_uid() != decode_engine_uid ||
+      link->second.state.lifecycle() != xllm::proto::LINK_LIFECYCLE_READY ||
+      !link->second.state.has_age_ms_at_publish()) {
+    return false;
+  }
+  if (link->second.state.age_ms_at_publish() > config_.link_hard_ttl_ms) {
+    return false;
+  }
+  if (observation.mode != ObservationMode::NORMAL) {
+    return true;
+  }
+  return effective_age_ms(link->second.state.age_ms_at_publish(),
+                          link->second.received_monotonic_ms,
+                          receiver_monotonic_ms) <= config_.link_hard_ttl_ms;
+}
+
 bool EngineRegistry::is_link_ready(
     const xllm::proto::ProviderEngineKey& prefill,
     const xllm::proto::ProviderEngineKey& decode,
@@ -900,35 +970,50 @@ bool EngineRegistry::is_link_ready(
       normalize_observation_time_locked(receiver_monotonic_ms);
   const std::optional<ObservationSnapshot> observation =
       update_observation_locked(receiver_monotonic_ms);
-  if (!observation.has_value() ||
-      !is_schedulable_locked(prefill_key.value(),
+  if (!observation.has_value()) {
+    return false;
+  }
+  return is_link_ready_locked(prefill_key.value(),
+                              prefill.engine_uid(),
+                              decode_key.value(),
+                              decode.engine_uid(),
+                              receiver_monotonic_ms,
+                              *observation);
+}
+
+EngineRegistryRoutingSnapshot EngineRegistry::routing_snapshot(
+    uint64_t receiver_monotonic_ms) const {
+  EngineRegistryRoutingSnapshot snapshot;
+  std::unique_lock lock(mutex_);
+  receiver_monotonic_ms =
+      normalize_observation_time_locked(receiver_monotonic_ms);
+  const std::optional<ObservationSnapshot> observation =
+      update_observation_locked(receiver_monotonic_ms);
+  if (!observation.has_value()) {
+    return snapshot;
+  }
+
+  for (const auto& [key, descriptor] : members_) {
+    const xllm::proto::ProviderEngineKey wire_key =
+        make_provider_engine_key(descriptor);
+    if (is_schedulable_locked(
+            key, wire_key.engine_uid(), receiver_monotonic_ms, *observation)) {
+      snapshot.schedulable_engines_.emplace(routing_engine_key(wire_key));
+    }
+  }
+  for (const auto& [link_key, cached_link] : links_) {
+    const xllm::proto::ProviderEngineKey& prefill = cached_link.state.prefill();
+    const xllm::proto::ProviderEngineKey& decode = cached_link.state.decode();
+    if (is_link_ready_locked(link_key.prefill,
                              prefill.engine_uid(),
-                             receiver_monotonic_ms,
-                             *observation) ||
-      !is_schedulable_locked(decode_key.value(),
+                             link_key.decode,
                              decode.engine_uid(),
                              receiver_monotonic_ms,
                              *observation)) {
-    return false;
+      snapshot.ready_links_.emplace(routing_link_key(prefill, decode));
+    }
   }
-  const auto link = links_.find(
-      LinkKey{.prefill = prefill_key.value(), .decode = decode_key.value()});
-  if (link == links_.end() ||
-      link->second.state.prefill().engine_uid() != prefill.engine_uid() ||
-      link->second.state.decode().engine_uid() != decode.engine_uid() ||
-      link->second.state.lifecycle() != xllm::proto::LINK_LIFECYCLE_READY ||
-      !link->second.state.has_age_ms_at_publish()) {
-    return false;
-  }
-  if (link->second.state.age_ms_at_publish() > config_.link_hard_ttl_ms) {
-    return false;
-  }
-  if (observation->mode != ObservationMode::NORMAL) {
-    return true;
-  }
-  return effective_age_ms(link->second.state.age_ms_at_publish(),
-                          link->second.received_monotonic_ms,
-                          receiver_monotonic_ms) <= config_.link_hard_ttl_ms;
+  return snapshot;
 }
 
 std::optional<ObservationSnapshot> EngineRegistry::observation_snapshot(

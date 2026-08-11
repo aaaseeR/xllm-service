@@ -283,6 +283,12 @@ class AttemptLedger:
                 or record.terminal_at is not None
             ):
                 return False
+            now = self._clock()
+            if now >= record.deadline:
+                record.state = "ATTEMPT_LIFECYCLE_STATE_EXPIRED"
+                record.reason = "ADMISSION_REASON_DEADLINE_EXCEEDED"
+                record.terminal_at = now
+                return False
             record.upstream = upstream
             record.state = "ATTEMPT_LIFECYCLE_STATE_RUNNING"
             return True

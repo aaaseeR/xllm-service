@@ -60,7 +60,9 @@ xllm-dev service-e2e /absolute/path/to/xllm-service native Debug stress all
 - create 成功但响应丢失时只 Query，不重复副作用；最终 CREATE=4（包含一次故障替换）、TERMINATE=2；
 - 500ms deadline、真实 SSE 客户端断流和 Agent Cancel 必须释放 Service、Runtime 与 simulated HBM 资源，随后恢复流量全成功；
 - Drain 与在飞请求重叠时，Agent 返回精确 fenced rejection，Service 排除原 route 并在有界预算内重选；Drain 不杀死已接纳请求；不能超过物理 `max_devices=3`；
-- Agent+Runtime `SIGKILL` 期间只允许一个 at-most-once 在途 transport failure，替换后恢复 3 route 全成功；
+- Agent 独立 `SIGKILL` 与 Runtime 独立 `SIGKILL` 必须分别在 5 秒内恢复；故障负载只允许有界 transport failure，恢复后 3 route 全成功；
+- Runtime 原地恢复与 Placement 补副本并发时，Deployment 必须先按真实库存对账，复用已恢复资源且 `max_active_replicas` 始终不超过 3；
+- Agent+Runtime 组合 `SIGKILL` 期间只允许有界的 at-most-once 在途 transport failure，副本替换必须在 5 秒内收敛并恢复 3 route；
 - Leader `SIGKILL` 后 durable desired/command/status 继续收敛，恢复流量全成功；
 - 每个 Runtime 使用独立 Torch CPU simulated HBM，至少两个副本被实际使用，终态全部清零；
 - 报告必须包含请求分布、P50/P95/P99、故障、资源、低基数指标和 durable etcd 证据。

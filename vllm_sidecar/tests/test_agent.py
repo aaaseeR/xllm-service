@@ -443,8 +443,8 @@ def test_agent_bounds_aggregate_inflight_body_bytes() -> None:
         "127.0.0.1:0",
         f"http://127.0.0.1:{upstream.server_address[1]}",
         max_inflight_requests=2,
-        max_request_body_bytes=128,
-        inflight_body_capacity_bytes=128,
+        max_request_body_bytes=256,
+        inflight_body_capacity_bytes=256,
     )
     agent.start()
     agent.activate("inc-1")
@@ -474,7 +474,7 @@ def test_agent_bounds_aggregate_inflight_body_bytes() -> None:
             )
             assert rejected.status_code == 503
             assert agent.ledger.query("bytes-2", 0, "inc-1").state == (
-                "ATTEMPT_LIFECYCLE_STATE_ABSENT"
+                "ATTEMPT_LIFECYCLE_STATE_FAILED"
             )
             DelayedUpstreamHandler.release.set()
             assert first.result(timeout=2.0).status_code == 200
@@ -484,6 +484,100 @@ def test_agent_bounds_aggregate_inflight_body_bytes() -> None:
         upstream.shutdown()
         upstream.server_close()
         upstream_thread.join(timeout=2.0)
+
+
+def test_agent_capacity_accounts_for_injected_request_identity() -> None:
+    DelayedUpstreamHandler.received.clear()
+    DelayedUpstreamHandler.release.clear()
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), DelayedUpstreamHandler)
+    upstream.daemon_threads = True
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+
+    agent = _agent(
+        "127.0.0.1:0",
+        f"http://127.0.0.1:{upstream.server_address[1]}",
+        max_inflight_requests=2,
+        max_request_body_bytes=160,
+        inflight_body_capacity_bytes=160,
+    )
+    agent.start()
+    agent.activate("inc-1")
+    base = "http://" + agent.listen_address
+    headers = {
+        "Content-Type": "application/json",
+        "X-Internal-Token": _TOKEN,
+        "X-Attempt-Seq": "0",
+        "X-Incarnation-ID": "inc-1",
+        "X-Remaining-Deadline-Ms": "2000",
+    }
+    first_body = json.dumps(
+        {"model": "m", "prompt": "x" * 20}, separators=(",", ":")
+    ).encode()
+    second_body = json.dumps(
+        {"model": "m", "prompt": ""}, separators=(",", ":")
+    ).encode()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(
+                requests.post,
+                base + "/v1/completions",
+                data=first_body,
+                headers={**headers, "X-Request-UID": "a" * 60},
+                timeout=2.0,
+            )
+            assert DelayedUpstreamHandler.received.wait(timeout=1.0)
+            rejected = requests.post(
+                base + "/v1/completions",
+                data=second_body,
+                headers={**headers, "X-Request-UID": "b" * 60},
+                timeout=2.0,
+            )
+            assert rejected.status_code == 503
+            assert rejected.json()["error"] == "Agent body capacity limit"
+            assert agent.ledger.query("b" * 60, 0, "inc-1").state == (
+                "ATTEMPT_LIFECYCLE_STATE_FAILED"
+            )
+            DelayedUpstreamHandler.release.set()
+            assert first.result(timeout=2.0).status_code == 200
+    finally:
+        DelayedUpstreamHandler.release.set()
+        agent.stop()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join(timeout=2.0)
+
+
+def test_agent_rejects_injected_body_larger_than_per_request_limit() -> None:
+    agent = _agent(
+        "127.0.0.1:0",
+        "http://127.0.0.1:1",
+        max_request_body_bytes=64,
+        inflight_body_capacity_bytes=128,
+    )
+    agent.start()
+    agent.activate("inc-1")
+    base = "http://" + agent.listen_address
+    try:
+        response = requests.post(
+            base + "/v1/completions",
+            data=b'{"model":"m"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Token": _TOKEN,
+                "X-Request-UID": "c" * 60,
+                "X-Attempt-Seq": "0",
+                "X-Incarnation-ID": "inc-1",
+                "X-Remaining-Deadline-Ms": "2000",
+            },
+            timeout=2.0,
+        )
+        assert response.status_code == 413
+        assert agent.ledger.query("c" * 60, 0, "inc-1").state == (
+            "ATTEMPT_LIFECYCLE_STATE_FAILED"
+        )
+    finally:
+        agent.stop()
 
 
 def test_cancel_fence_capacity_never_returns_false_ack() -> None:

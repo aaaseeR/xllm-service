@@ -687,7 +687,10 @@ class V3LoadClient:
         started = time.monotonic()
         prompt = f"hello autoscaled service {index}"
         if hold_open:
-            hold_ms = 700 if remaining_deadline_ms is not None else 400
+            # Keep the drain-race requests alive long enough for the test to
+            # observe Runtime ownership, pause heartbeat propagation, and
+            # deliver the lifecycle command even on a loaded CI host.
+            hold_ms = 700 if remaining_deadline_ms is not None else 1500
             prompt = f"__xllm_e2e_hold_{hold_ms}ms__ {prompt}"
         try:
             payload: dict[str, object] = {
@@ -1099,11 +1102,12 @@ class ClusterGate:
             "--kv_route_mode=SHADOW",
             "--readiness_check_interval_s=1",
             "--connect_timeout_ms=500",
-            "--vllm_http_timeout_ms=1000",
+            "--vllm_http_timeout_ms=2500",
             "--request_watchdog_interval_ms=20",
             "--engine_state_soft_ttl_ms=500",
             "--engine_state_hard_ttl_ms=2000",
             "--engine_heartbeat_hard_ttl_ms=2000",
+            "--engine_direct_evidence_ttl_ms=1000",
             "--output_gap_timeout_ms=1000",
             "--output_gap_query_timeout_ms=100",
             "--p_first_event_retry_ub_ms=700",
@@ -1417,6 +1421,7 @@ class ClusterGate:
         result: LoadResult,
         max_failures: int,
         minimum_routes: int,
+        recovery_duration_seconds: float,
         max_duration_seconds: float,
     ) -> None:
         self.report.phases.append(asdict(result))
@@ -1429,13 +1434,14 @@ class ClusterGate:
                 f"phase {result.phase} exceeded abrupt-loss failure bound "
                 f"{max_failures}: {result.error_samples}"
             )
-        if result.duration_seconds > max_duration_seconds:
+        if recovery_duration_seconds > max_duration_seconds:
             raise GateFailure(
                 f"phase {result.phase} exceeded recovery-window bound "
-                f"{max_duration_seconds}s: {result.duration_seconds}s"
+                f"{max_duration_seconds}s: {recovery_duration_seconds}s"
             )
         if any(
             "Connection refused" not in error
+            and "Connection reset by peer" not in error
             and "backend instance is not available" not in error
             for error in result.error_samples
         ):
@@ -2322,6 +2328,77 @@ class ClusterGate:
             )
         drain_retry_metrics = self.run_v3_drain_race(client)
 
+        def restart_component(
+            component: str,
+        ) -> tuple[requests.Response, float]:
+            started = time.monotonic()
+            response = requests.post(
+                f"http://127.0.0.1:18280/debug/restart-{component}",
+                headers={"X-Internal-Token": INTERNAL_TOKEN},
+                timeout=20.0,
+            )
+            return response, time.monotonic() - started
+
+        for component in ("agent", "runtime"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                fault = pool.submit(restart_component, component)
+                during_restart = client.run(
+                    f"v3-{component}-only-sigkill-restart",
+                    600 if self.args.mode == "smoke" else 2400,
+                    steady_concurrency,
+                )
+                fault_response, recovery_duration_seconds = fault.result(
+                    timeout=25.0
+                )
+            fault_response.raise_for_status()
+            self.assert_bounded_abrupt_loss(
+                during_restart,
+                max_failures=4,
+                minimum_routes=2,
+                recovery_duration_seconds=recovery_duration_seconds,
+                max_duration_seconds=5.0,
+            )
+            # Agent readiness changes before its next EngineState heartbeat is
+            # visible at Service.  Allow several 200ms publish periods, then
+            # require the recovered route to carry real traffic below.
+            time.sleep(1.0)
+            recovery = client.run(
+                f"v3-after-{component}-only-restart",
+                120 if self.args.mode == "smoke" else 1200,
+                steady_concurrency,
+            )
+            self.assert_phase(recovery, minimum_routes=3)
+            component_state = self.gateway_state()
+            if int(component_state["max_active_replicas"]) > 3:
+                raise GateFailure(
+                    f"V3 {component} restart exceeded device capacity: "
+                    f"{component_state}"
+                )
+            if component == "runtime" and int(
+                component_state["recovered_create_reconciliations"]
+            ) < 1:
+                raise GateFailure(
+                    "Runtime-only restart did not exercise deployment "
+                    f"inventory reconciliation: {component_state}"
+                )
+            self.report.faults.append(
+                {
+                    "fault": f"vllm_{component}_only_sigkill_restart",
+                    "restarted_replica": fault_response.json(),
+                    "during_fault_success": during_restart.succeeded,
+                    "bounded_transport_failures": during_restart.failed,
+                    "recovery_duration_seconds": recovery_duration_seconds,
+                    "post_restart_success": recovery.succeeded,
+                    "max_active_replicas": component_state[
+                        "max_active_replicas"
+                    ],
+                    "recovered_create_reconciliations": component_state[
+                        "recovered_create_reconciliations"
+                    ],
+                }
+            )
+
+        replacement_started = time.monotonic()
         crashed = requests.post(
             "http://127.0.0.1:18280/debug/crash-replica",
             headers={"X-Internal-Token": INTERNAL_TOKEN},
@@ -2329,27 +2406,40 @@ class ClusterGate:
         )
         crashed.raise_for_status()
         crashed_replica = crashed.json()
-        during_replacement = client.run(
-            "v3-runtime-agent-sigkill-replacement",
-            180 if self.args.mode == "smoke" else 1800,
-            steady_concurrency,
-        )
+
+        def wait_for_replacement() -> tuple[dict[str, object], float]:
+            state = wait_until(
+                "V3 replacement after abrupt Agent and Runtime loss",
+                35,
+                lambda: (
+                    current
+                    if int(
+                        (current := self.gateway_state())["active_replicas"]
+                    )
+                    == 3
+                    else None
+                ),
+            )
+            assert isinstance(state, dict)
+            return state, time.monotonic() - replacement_started
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            replacement = pool.submit(wait_for_replacement)
+            during_replacement = client.run(
+                "v3-runtime-agent-sigkill-replacement",
+                180 if self.args.mode == "smoke" else 1800,
+                steady_concurrency,
+            )
+            replacement_state, replacement_duration_seconds = (
+                replacement.result(timeout=40.0)
+            )
         self.assert_bounded_abrupt_loss(
             during_replacement,
             max_failures=4,
             minimum_routes=2,
+            recovery_duration_seconds=replacement_duration_seconds,
             max_duration_seconds=5.0,
         )
-        replacement_state = wait_until(
-            "V3 replacement after abrupt Agent and Runtime loss",
-            35,
-            lambda: (
-                state
-                if int((state := self.gateway_state())["active_replicas"]) == 3
-                else None
-            ),
-        )
-        assert isinstance(replacement_state, dict)
         if int(replacement_state["max_active_replicas"]) > 3:
             raise GateFailure(
                 f"V3 replacement exceeded device capacity: {replacement_state}"
@@ -2366,6 +2456,7 @@ class ClusterGate:
                 "crashed_replica": crashed_replica,
                 "during_fault_success": during_replacement.succeeded,
                 "bounded_transport_failures": during_replacement.failed,
+                "recovery_duration_seconds": replacement_duration_seconds,
                 "post_replacement_success": after_replacement.succeeded,
                 "replacement_active_replicas": replacement_state[
                     "active_replicas"

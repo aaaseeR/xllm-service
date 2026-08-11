@@ -281,6 +281,19 @@ int main(int argc, char* argv[]) {
                   "--observability_build_id";
     return -1;
   }
+  if (FLAGS_engine_state_soft_ttl_ms == 0 ||
+      FLAGS_engine_state_hard_ttl_ms == 0 ||
+      FLAGS_engine_heartbeat_hard_ttl_ms == 0 ||
+      FLAGS_engine_direct_evidence_ttl_ms == 0 ||
+      FLAGS_engine_state_soft_ttl_ms > FLAGS_engine_state_hard_ttl_ms ||
+      FLAGS_engine_direct_evidence_ttl_ms > FLAGS_engine_state_hard_ttl_ms ||
+      FLAGS_engine_direct_evidence_ttl_ms >
+          FLAGS_engine_heartbeat_hard_ttl_ms) {
+    LOG(ERROR) << "Engine observation TTLs must be positive, soft State TTL "
+                  "must not exceed hard State TTL, and direct evidence TTL "
+                  "must not exceed either hard State or heartbeat TTL";
+    return -1;
+  }
 
   xllm_service::Options options;
   options.server_host(FLAGS_server_host)
@@ -369,6 +382,7 @@ int main(int argc, char* argv[]) {
       .engine_state_soft_ttl_ms(FLAGS_engine_state_soft_ttl_ms)
       .engine_state_hard_ttl_ms(FLAGS_engine_state_hard_ttl_ms)
       .engine_heartbeat_hard_ttl_ms(FLAGS_engine_heartbeat_hard_ttl_ms)
+      .engine_direct_evidence_ttl_ms(FLAGS_engine_direct_evidence_ttl_ms)
       .output_reorder_max_events(FLAGS_output_reorder_max_events)
       .output_reorder_max_bytes(FLAGS_output_reorder_max_bytes)
       .request_watchdog_interval_ms(FLAGS_request_watchdog_interval_ms)

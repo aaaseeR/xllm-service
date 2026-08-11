@@ -118,6 +118,7 @@ DECLARE_int32(instance_delete_probe_timeout_ms);
 DECLARE_uint64(engine_state_soft_ttl_ms);
 DECLARE_uint64(engine_state_hard_ttl_ms);
 DECLARE_uint64(engine_heartbeat_hard_ttl_ms);
+DECLARE_uint64(engine_direct_evidence_ttl_ms);
 
 DECLARE_int32(instance_delete_probe_attempts);
 

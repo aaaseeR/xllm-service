@@ -26,6 +26,7 @@ limitations under the License.
 #include <json2pb/pb_to_json.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -412,7 +413,11 @@ class CustomProgressiveReader final : public brpc::ProgressiveReader {
   // may block the HTTP parsing on the socket.
   butil::Status OnReadOnePart(const void* data, size_t length) override {
     terminal_marker_.observe(data, length);
-    call_data_->write(std::string(static_cast<const char*>(data), length));
+    if (!call_data_->write(
+            std::string(static_cast<const char*>(data), length))) {
+      return butil::Status(EPIPE,
+                           "client response stream reached a terminal state");
+    }
     return butil::Status::OK();
   }
 

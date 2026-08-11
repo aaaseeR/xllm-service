@@ -99,6 +99,8 @@ class GatewayState:
         self._heartbeat_failed = 0
         self._heartbeat_forwarding_enabled = True
         self._max_active_replicas = 0
+        self._recovered_engine_uid: str | None = None
+        self._recovered_create_reconciliations = 0
 
     @property
     def master_key(self) -> str:
@@ -202,6 +204,62 @@ class GatewayState:
         value = self._etcd_get(key)
         return json.loads(value) if value else None
 
+    def _spawn_runtime(
+        self, ordinal: int, runtime_port: int
+    ) -> subprocess.Popen[bytes]:
+        repository = Path(self.args.repository_root)
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+            }
+        )
+        return subprocess.Popen(
+            [
+                sys.executable,
+                str(repository / "tests/e2e/mock_vllm_runtime.py"),
+                f"--port={runtime_port}",
+                f"--ordinal={ordinal}",
+                f"--delay-ms={self.args.runtime_delay_ms}",
+            ],
+            cwd=repository,
+            env=environment,
+            start_new_session=True,
+        )
+
+    def _spawn_sidecar(
+        self, ordinal: int, agent_port: int, runtime_port: int
+    ) -> subprocess.Popen[bytes]:
+        repository = Path(self.args.repository_root)
+        address = f"127.0.0.1:{agent_port}"
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "vllm_sidecar.sidecar",
+                "--etcd-endpoints=127.0.0.1:2379",
+                f"--etcd-namespace={self.args.etcd_namespace}",
+                f"--vllm-url=http://127.0.0.1:{runtime_port}",
+                f"--metrics-url=http://127.0.0.1:{runtime_port}/metrics",
+                f"--register-addr={address}",
+                f"--agent-listen={address}",
+                f"--provider-config={self.args.provider_config}",
+                f"--xllm-service-url=http://127.0.0.1:{self.args.port}",
+                f"--internal-token={self.args.internal_token}",
+                f"--instance-name=offline-vllm-{ordinal}",
+                "--lease-ttl=3",
+                "--keepalive-interval=0.2",
+                "--heartbeat-interval=0.2",
+                "--health-timeout=2.0",
+                "--agent-ingress-timeout=10",
+                "--log-level=INFO",
+            ],
+            cwd=repository,
+            start_new_session=True,
+        )
+
     def _start_replica(self, intent: dict[str, object]) -> Replica:
         # The Placement ordinal is a globally unique cycle/operation identity,
         # not a compact replica index. The deployment system owns assignment
@@ -211,27 +269,7 @@ class GatewayState:
         agent_port = self.args.agent_base_port + ordinal
         runtime_port = self.args.runtime_base_port + ordinal
         address = f"127.0.0.1:{agent_port}"
-        repository = Path(self.args.repository_root)
-        runtime_environment = dict(os.environ)
-        runtime_environment.update(
-            {
-                "OMP_NUM_THREADS": "1",
-                "MKL_NUM_THREADS": "1",
-                "OPENBLAS_NUM_THREADS": "1",
-            }
-        )
-        runtime = subprocess.Popen(
-            [
-                sys.executable,
-                str(repository / "tests/e2e/mock_vllm_runtime.py"),
-                f"--port={runtime_port}",
-                f"--ordinal={ordinal}",
-                f"--delay-ms={self.args.runtime_delay_ms}",
-            ],
-            cwd=repository,
-            env=runtime_environment,
-            start_new_session=True,
-        )
+        runtime = self._spawn_runtime(ordinal, runtime_port)
         try:
             wait_until(
                 10,
@@ -240,31 +278,7 @@ class GatewayState:
                 ).status_code
                 == 200,
             )
-            sidecar = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "vllm_sidecar.sidecar",
-                    "--etcd-endpoints=127.0.0.1:2379",
-                    f"--etcd-namespace={self.args.etcd_namespace}",
-                    f"--vllm-url=http://127.0.0.1:{runtime_port}",
-                    f"--metrics-url=http://127.0.0.1:{runtime_port}/metrics",
-                    f"--register-addr={address}",
-                    f"--agent-listen={address}",
-                    f"--provider-config={self.args.provider_config}",
-                    f"--xllm-service-url=http://127.0.0.1:{self.args.port}",
-                    f"--internal-token={self.args.internal_token}",
-                    f"--instance-name=offline-vllm-{ordinal}",
-                    "--lease-ttl=3",
-                    "--keepalive-interval=0.2",
-                    "--heartbeat-interval=0.2",
-                    "--health-timeout=2.0",
-                    "--agent-ingress-timeout=10",
-                    "--log-level=INFO",
-                ],
-                cwd=repository,
-                start_new_session=True,
-            )
+            sidecar = self._spawn_sidecar(ordinal, agent_port, runtime_port)
         except Exception:
             stop_process(runtime)
             raise
@@ -331,8 +345,30 @@ class GatewayState:
                 replay["replayed"] = True
                 return replay, False
             action = str(intent["action"])
-            self._action_counts[action] = self._action_counts.get(action, 0) + 1
             if action == "CREATE":
+                if (
+                    len(self._replicas) >= self.args.max_replicas
+                    and self._recovered_engine_uid in self._replicas
+                ):
+                    replica = self._replicas[self._recovered_engine_uid]
+                    self._recovered_engine_uid = None
+                    self._recovered_create_reconciliations += 1
+                    response = self._response(
+                        intent,
+                        "SUCCEEDED",
+                        replica.engine_uid,
+                        replica.engine_incarnation,
+                        "READY",
+                        message=(
+                            "recovered deployment resource already satisfies "
+                            "the requested capacity"
+                        ),
+                    )
+                    self._operations[operation_id] = response
+                    return response, False
+                self._action_counts[action] = (
+                    self._action_counts.get(action, 0) + 1
+                )
                 replica = self._start_replica(intent)
                 self._replicas[replica.engine_uid] = replica
                 self._max_active_replicas = max(
@@ -351,8 +387,13 @@ class GatewayState:
                 self._lost_create_response = True
                 return response, lose
             if action == "TERMINATE":
+                self._action_counts[action] = (
+                    self._action_counts.get(action, 0) + 1
+                )
                 engine_uid = str(intent["engine_uid"])
                 replica = self._replicas.pop(engine_uid, None)
+                if self._recovered_engine_uid == engine_uid:
+                    self._recovered_engine_uid = None
                 if replica is not None:
                     self._terminate_replica(replica)
                 response = self._response(
@@ -404,6 +445,9 @@ class GatewayState:
             return {
                 "active_replicas": len(self._replicas),
                 "max_active_replicas": self._max_active_replicas,
+                "recovered_create_reconciliations": (
+                    self._recovered_create_reconciliations
+                ),
                 "replicas": [
                     {
                         "ordinal": replica.ordinal,
@@ -434,6 +478,8 @@ class GatewayState:
                 raise RuntimeError("no active replica can be crashed")
             engine_uid = sorted(self._replicas)[0]
             replica = self._replicas.pop(engine_uid)
+            if self._recovered_engine_uid == engine_uid:
+                self._recovered_engine_uid = None
             resource = self._capture_runtime(replica)
             resource["abrupt_process_loss"] = True
             resource["engine_uid"] = replica.engine_uid
@@ -443,6 +489,85 @@ class GatewayState:
             kill_process(replica.runtime)
             return {
                 "engine_uid": replica.engine_uid,
+                "engine_incarnation": replica.engine_incarnation,
+                "ordinal": replica.ordinal,
+            }
+
+    def restart_agent(self) -> dict[str, object]:
+        with self._lock:
+            if not self._replicas:
+                raise RuntimeError("no active Agent can be restarted")
+            engine_uid = sorted(self._replicas)[0]
+            replica = self._replicas[engine_uid]
+            old_incarnation = replica.engine_incarnation
+            kill_process(replica.sidecar)
+            replica.sidecar = self._spawn_sidecar(
+                replica.ordinal, replica.agent_port, replica.runtime_port
+            )
+            metadata = wait_until(
+                12,
+                lambda: (
+                    current
+                    if (current := self._registration(engine_uid)) is not None
+                    and str(current.get("incarnation_id", ""))
+                    != old_incarnation
+                    else None
+                ),
+            )
+            assert isinstance(metadata, dict)
+            replica.engine_incarnation = str(metadata["incarnation_id"])
+            wait_until(
+                12,
+                lambda: requests.get(
+                    f"http://{engine_uid}/readyz", timeout=0.3
+                ).status_code
+                == 200,
+            )
+            return {
+                "engine_uid": engine_uid,
+                "old_incarnation": old_incarnation,
+                "new_incarnation": replica.engine_incarnation,
+                "ordinal": replica.ordinal,
+            }
+
+    def restart_runtime(self) -> dict[str, object]:
+        with self._lock:
+            if not self._replicas:
+                raise RuntimeError("no active Runtime can be restarted")
+            engine_uid = sorted(self._replicas)[-1]
+            replica = self._replicas[engine_uid]
+            kill_process(replica.runtime)
+            wait_until(
+                5,
+                lambda: requests.get(
+                    f"http://{engine_uid}/readyz", timeout=0.3
+                ).status_code
+                == 503,
+            )
+            replica.runtime = self._spawn_runtime(
+                replica.ordinal, replica.runtime_port
+            )
+            wait_until(
+                10,
+                lambda: requests.get(
+                    f"http://127.0.0.1:{replica.runtime_port}/health",
+                    timeout=0.3,
+                ).status_code
+                == 200,
+            )
+            wait_until(
+                12,
+                lambda: requests.get(
+                    f"http://{engine_uid}/readyz", timeout=0.3
+                ).status_code
+                == 200,
+            )
+            metadata = self._registration(engine_uid)
+            if metadata is not None:
+                replica.engine_incarnation = str(metadata["incarnation_id"])
+            self._recovered_engine_uid = engine_uid
+            return {
+                "engine_uid": engine_uid,
                 "engine_incarnation": replica.engine_incarnation,
                 "ordinal": replica.ordinal,
             }
@@ -513,12 +638,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
             )
             self._write(status, response)
             return
-        if path == "/debug/crash-replica":
+        if path in (
+            "/debug/crash-replica",
+            "/debug/restart-agent",
+            "/debug/restart-runtime",
+        ):
             if self.headers.get("X-Internal-Token") != self.gateway.args.internal_token:
                 self._json(401, {"error": "unauthorized"})
                 return
             try:
-                self._json(200, self.gateway.crash_replica())
+                if path == "/debug/restart-agent":
+                    result = self.gateway.restart_agent()
+                elif path == "/debug/restart-runtime":
+                    result = self.gateway.restart_runtime()
+                else:
+                    result = self.gateway.crash_replica()
+                self._json(200, result)
             except RuntimeError as error:
                 self._json(409, {"error": str(error)})
             return
@@ -581,6 +716,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent-base-port", type=int, default=18300)
     parser.add_argument("--runtime-base-port", type=int, default=19300)
     parser.add_argument("--runtime-delay-ms", type=int, default=10)
+    parser.add_argument("--max-replicas", type=int, default=3)
     return parser.parse_args()
 
 

@@ -166,13 +166,19 @@ std::vector<ProviderLinkAttempt> LinkReconciler::begin_due_attempts(
     if (attempts.size() == max_attempts) {
       break;
     }
-    if (entry.in_flight || entry.next_attempt_ms > now_monotonic_ms) {
+    if (entry.in_flight_attempt_id != 0 ||
+        entry.next_attempt_ms > now_monotonic_ms) {
       continue;
     }
-    entry.in_flight = true;
+    if (next_attempt_id_ == 0) {
+      break;
+    }
+    const uint64_t attempt_id = next_attempt_id_++;
+    entry.in_flight_attempt_id = attempt_id;
     attempts.emplace_back(ProviderLinkAttempt{
         .prefill = entry.state.prefill(),
         .decode = entry.state.decode(),
+        .attempt_id = attempt_id,
     });
   }
   return attempts;
@@ -191,17 +197,18 @@ ContractResult LinkReconciler::complete_attempt(
   state_change->Clear();
   std::lock_guard lock(mutex_);
   const auto found = entries_.find(link_key(attempt.prefill, attempt.decode));
-  if (found == entries_.end() || !found->second.in_flight) {
+  if (attempt.attempt_id == 0 || found == entries_.end() ||
+      found->second.in_flight_attempt_id != attempt.attempt_id) {
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
                 "Link attempt is stale or was not started");
   }
   Entry& entry = found->second;
   if (entry.state.state_seq() == std::numeric_limits<uint64_t>::max()) {
-    entry.in_flight = false;
+    entry.in_flight_attempt_id = 0;
     return fail(xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE,
                 "Link state sequence is exhausted");
   }
-  entry.in_flight = false;
+  entry.in_flight_attempt_id = 0;
   entry.state.set_state_seq(entry.state.state_seq() + 1);
   entry.state.set_age_ms_at_publish(0);
   if (handshake_result.empty()) {

@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -64,6 +65,21 @@ struct EngineRegistryMemberSnapshot {
   bool heartbeat_fresh = false;
   bool schedulable = false;
   uint64_t lifecycle_since_monotonic_ms = 0;
+};
+
+// Immutable request-path view. Building one snapshot advances Observation once
+// under the Registry lock; all P/D candidate and link lookups afterwards are
+// local reads and never re-enter the Registry.
+class EngineRegistryRoutingSnapshot final {
+ public:
+  bool is_schedulable(const xllm::proto::ProviderEngineKey& key) const;
+  bool is_link_ready(const xllm::proto::ProviderEngineKey& prefill,
+                     const xllm::proto::ProviderEngineKey& decode) const;
+
+ private:
+  friend class EngineRegistry;
+  std::set<std::string> schedulable_engines_;
+  std::set<std::string> ready_links_;
 };
 
 xllm::proto::ProviderEngineKey make_provider_engine_key(
@@ -116,6 +132,8 @@ class EngineRegistry final {
   bool is_link_ready(const xllm::proto::ProviderEngineKey& prefill,
                      const xllm::proto::ProviderEngineKey& decode,
                      uint64_t receiver_monotonic_ms) const;
+  EngineRegistryRoutingSnapshot routing_snapshot(
+      uint64_t receiver_monotonic_ms) const;
   std::optional<ObservationSnapshot> observation_snapshot(
       uint64_t receiver_monotonic_ms) const;
   EngineKVCapacitySnapshot kv_capacity_snapshot(
@@ -187,6 +205,12 @@ class EngineRegistry final {
                              const std::string& engine_uid,
                              uint64_t receiver_monotonic_ms,
                              const ObservationSnapshot& observation) const;
+  bool is_link_ready_locked(const EngineKey& prefill_key,
+                            const std::string& prefill_engine_uid,
+                            const EngineKey& decode_key,
+                            const std::string& decode_engine_uid,
+                            uint64_t receiver_monotonic_ms,
+                            const ObservationSnapshot& observation) const;
   bool has_unrefuted_cached_state_locked(const EngineKey& key,
                                          const std::string& engine_uid) const;
   bool has_recent_direct_success_locked(const EngineKey& key,

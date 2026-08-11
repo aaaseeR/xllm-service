@@ -134,6 +134,25 @@ def test_new_incarnation_fences_and_closes_old_attempt() -> None:
     assert ledger.incarnation_id() == "inc-2"
 
 
+def test_attach_atomically_rejects_execution_after_deadline() -> None:
+    clock = Clock()
+    ledger = AttemptLedger(
+        max_records=4,
+        terminal_ttl_seconds=10.0,
+        clock=clock,
+    )
+    ledger.activate("inc-1")
+    assert ledger.begin("late", 0, "inc-1", 10).accepted
+
+    clock.now += 0.010
+    upstream = Closable()
+    assert not ledger.attach(AttemptKey("late", 0), "inc-1", upstream)
+    result = ledger.query("late", 0, "inc-1")
+    assert result.state == "ATTEMPT_LIFECYCLE_STATE_EXPIRED"
+    assert result.reason == "ADMISSION_REASON_DEADLINE_EXCEEDED"
+    assert not upstream.closed
+
+
 def test_old_incarnation_cannot_mutate_reused_attempt_key() -> None:
     ledger = AttemptLedger(max_records=4, terminal_ttl_seconds=10.0)
     ledger.activate("inc-1")

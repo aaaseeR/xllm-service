@@ -24,6 +24,7 @@ limitations under the License.
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 
@@ -172,19 +173,28 @@ class StreamCallData : public CallData {
 
   // For non stream response
   bool write_and_finish(const std::string& attachment /*json string*/) {
+    if (finished_.exchange(true, std::memory_order_acq_rel)) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(output_mutex_);
     if (trace_callback_) trace_callback_(attachment);
     controller_->response_attachment() = attachment;
-    finished_.store(true, std::memory_order_release);
     return true;
   }
 
   bool write_and_finish(Response& response) {
+    if (finished_.exchange(true, std::memory_order_acq_rel)) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(output_mutex_);
     butil::IOBufAsZeroCopyOutputStream json_output(
         &controller_->response_attachment());
     std::string err_msg;
     if (!json2pb::ProtoMessageToJson(
             response, &json_output, json_options_, &err_msg)) {
-      return finish_with_error(err_msg);
+      controller_->response_attachment().clear();
+      controller_->SetFailed(err_msg);
+      return true;
     }
 
     if (trace_callback_) {
@@ -193,41 +203,20 @@ class StreamCallData : public CallData {
       trace_callback_(str);
     }
 
-    finished_.store(true, std::memory_order_release);
     return true;
   }
 
   bool finish_with_error(const std::string& error_message) {
-    if (!stream_) {
-      controller_->SetFailed(error_message);
-      finished_.store(true, std::memory_order_release);
-      return true;
-    }
     if (finished_.exchange(true, std::memory_order_acq_rel)) {
       return true;
     }
-
-    nlohmann::json payload;
-    std::string error_event;
-    if (stream_protocol_ == StreamProtocol::kAnthropic) {
-      payload = {
-          {"type", "error"},
-          {"error", {{"type", "api_error"}, {"message", error_message}}}};
-      error_event = "event: error\ndata: " + payload.dump() + "\n\n";
-    } else {
-      payload = {
-          {"error", {{"message", error_message}, {"type", "server_error"}}}};
-      error_event = "data: " + payload.dump() + "\n\n";
-    }
-    const bool error_written = write_stream_payload(error_event);
-    if (stream_protocol_ == StreamProtocol::kAnthropic) {
-      return error_written;
-    }
-    return write_stream_payload("data: [DONE]\n\n") && error_written;
+    std::lock_guard<std::mutex> lock(output_mutex_);
+    return write_error_locked(error_message);
   }
 
   // For stream response
   bool write(const butil::IOBuf& attachment_iobuf) {
+    std::lock_guard<std::mutex> lock(output_mutex_);
     if (finished_.load(std::memory_order_acquire)) {
       return false;
     }
@@ -236,6 +225,7 @@ class StreamCallData : public CallData {
 
   // For stream response
   bool write(const std::string& attachment) {
+    std::lock_guard<std::mutex> lock(output_mutex_);
     if (finished_.load(std::memory_order_acquire)) {
       return false;
     }
@@ -243,6 +233,7 @@ class StreamCallData : public CallData {
   }
 
   bool write(Response& response) {
+    std::lock_guard<std::mutex> lock(output_mutex_);
     if (finished_.load(std::memory_order_acquire)) {
       return false;
     }
@@ -270,6 +261,7 @@ class StreamCallData : public CallData {
     if (finished_.exchange(true, std::memory_order_acq_rel)) {
       return true;
     }
+    std::lock_guard<std::mutex> lock(output_mutex_);
     if (stream_protocol_ == StreamProtocol::kAnthropic) {
       return stream_sink_ != nullptr &&
              connection_status_.load(std::memory_order_acquire) == 0;
@@ -307,6 +299,30 @@ class StreamCallData : public CallData {
   bool finished() const { return finished_.load(std::memory_order_acquire); }
 
  private:
+  bool write_error_locked(const std::string& error_message) {
+    if (!stream_) {
+      controller_->SetFailed(error_message);
+      return true;
+    }
+
+    nlohmann::json payload;
+    std::string error_event;
+    if (stream_protocol_ == StreamProtocol::kAnthropic) {
+      payload = {
+          {"type", "error"},
+          {"error", {{"type", "api_error"}, {"message", error_message}}}};
+      error_event = "event: error\ndata: " + payload.dump() + "\n\n";
+    } else {
+      payload = {
+          {"error", {{"message", error_message}, {"type", "server_error"}}}};
+      error_event = "data: " + payload.dump() + "\n\n";
+    }
+    const bool error_written = write_stream_payload(error_event);
+    if (stream_protocol_ == StreamProtocol::kAnthropic) {
+      return error_written;
+    }
+    return write_stream_payload("data: [DONE]\n\n") && error_written;
+  }
   void run_done_once() {
     if (!done_called_.exchange(true, std::memory_order_acq_rel)) {
       done_->Run();
@@ -348,6 +364,10 @@ class StreamCallData : public CallData {
 
   std::atomic<bool> finished_{false};
   std::atomic<bool> done_called_{false};
+  // Backend response callbacks, deadline watchdogs, and disconnect callbacks
+  // can run on different bthreads/worker threads. Keep each response frame and
+  // its terminal state transition in one serialized critical section.
+  mutable std::mutex output_mutex_;
   json2pb::Pb2JsonOptions json_options_;
   std::function<void(const std::string&)> trace_callback_;
   std::shared_ptr<StreamOutputSink> stream_sink_;

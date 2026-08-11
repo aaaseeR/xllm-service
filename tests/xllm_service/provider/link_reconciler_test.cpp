@@ -179,6 +179,34 @@ TEST(LinkReconcilerTest, IncarnationReplacementRejectsStaleCompletion) {
   EXPECT_EQ(reconciler.size(), 1u);
 }
 
+TEST(LinkReconcilerTest, SameIncarnationReaddRejectsAbaCompletion) {
+  LinkReconciler reconciler(test_config());
+  std::vector<xllm::proto::LinkState> changes;
+  ASSERT_TRUE(reconciler.replace_desired({make_link()}, 0, &changes).ok());
+  const auto stale_attempt = reconciler.begin_due_attempts(0, 1);
+  ASSERT_EQ(stale_attempt.size(), 1u);
+
+  ASSERT_TRUE(reconciler.replace_desired({}, 1, &changes).ok());
+  ASSERT_TRUE(reconciler.replace_desired({make_link()}, 2, &changes).ok());
+  const auto current_attempt = reconciler.begin_due_attempts(2, 1);
+  ASSERT_EQ(current_attempt.size(), 1u);
+  ASSERT_NE(stale_attempt[0].attempt_id, current_attempt[0].attempt_id);
+
+  xllm::proto::LinkState ignored;
+  EXPECT_FALSE(
+      reconciler.complete_attempt(stale_attempt[0], true, "late", 3, &ignored)
+          .ok());
+  EXPECT_EQ(ignored.ByteSizeLong(), 0u);
+
+  xllm::proto::LinkState ready;
+  ASSERT_TRUE(
+      reconciler
+          .complete_attempt(current_attempt[0], true, "current", 3, &ready)
+          .ok());
+  EXPECT_EQ(ready.lifecycle(), xllm::proto::LINK_LIFECYCLE_READY);
+  EXPECT_EQ(ready.last_handshake_result(), "current");
+}
+
 TEST(LinkReconcilerTest, CapacityDuplicatesAndInvalidContractsFailClosed) {
   LinkReconcilerConfig config = test_config();
   config.max_links = 1;

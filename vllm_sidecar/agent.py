@@ -455,6 +455,7 @@ class AgentRuntime:
                 )
                 return
             try:
+                body_reservation = [body_length]
                 result = self._ledger.begin(
                     request_uid, attempt_seq, incarnation_id, remaining_ms
                 )
@@ -486,9 +487,10 @@ class AgentRuntime:
                     incarnation_id,
                     remaining_ms,
                     self._max_request_body_bytes,
+                    body_reservation,
                 )
             finally:
-                self._body_capacity.release(body_length)
+                self._body_capacity.release(body_reservation[0])
         finally:
             self._inflight.release()
 
@@ -500,6 +502,7 @@ class AgentRuntime:
         incarnation_id: str | None,
         remaining_ms: int | None,
         max_body_bytes: int,
+        body_reservation: list[int] | None = None,
     ) -> None:
         raw_body = self._read_body(handler, max_body_bytes)
         if raw_body is None:
@@ -522,6 +525,31 @@ class AgentRuntime:
                 )
             self._write_json(handler, 400, {"error": "invalid inference JSON"})
             return
+        if len(body) > max_body_bytes:
+            if key is not None:
+                self._ledger.finish(
+                    key,
+                    incarnation_id or "",
+                    "ATTEMPT_LIFECYCLE_STATE_FAILED",
+                    "ADMISSION_REASON_INVALID_REQUEST",
+                )
+            self._write_json(handler, 413, {"error": "request body too large"})
+            return
+        if body_reservation is not None and len(body) > body_reservation[0]:
+            additional_bytes = len(body) - body_reservation[0]
+            if not self._body_capacity.try_reserve(additional_bytes):
+                if key is not None:
+                    self._ledger.finish(
+                        key,
+                        incarnation_id or "",
+                        "ATTEMPT_LIFECYCLE_STATE_FAILED",
+                        "ADMISSION_REASON_INTERNAL_ERROR",
+                    )
+                self._write_json(
+                    handler, 503, {"error": "Agent body capacity limit"}
+                )
+                return
+            body_reservation[0] += additional_bytes
         headers = {
             name: value
             for name, value in handler.headers.items()
@@ -553,7 +581,19 @@ class AgentRuntime:
                 key, incarnation_id or "", upstream
             ):
                 upstream.close()
-                self._write_json(handler, 409, {"error": "attempt was cancelled"})
+                current = self._ledger.query(
+                    key.request_uid, key.attempt_seq, incarnation_id or ""
+                )
+                status = (
+                    504
+                    if current.state == "ATTEMPT_LIFECYCLE_STATE_EXPIRED"
+                    else 409
+                )
+                self._write_json(
+                    handler,
+                    status,
+                    _attempt_json(current, key, incarnation_id or ""),
+                )
                 return
             if not upstream.request(
                 handler.command,
@@ -709,13 +749,17 @@ class AgentRuntime:
         handler: BaseHTTPRequestHandler, status: int, body: dict
     ) -> None:
         payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        handler.send_response(status)
-        handler.send_header("Content-Type", "application/json")
-        handler.send_header("Content-Length", str(len(payload)))
-        handler.send_header("Connection", "close")
-        handler.end_headers()
-        handler.wfile.write(payload)
-        handler.close_connection = True
+        try:
+            handler.send_response(status)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(payload)))
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            handler.wfile.write(payload)
+        except (OSError, ValueError):
+            pass
+        finally:
+            handler.close_connection = True
 
 
 def split_address(address: str) -> tuple[str, int]:

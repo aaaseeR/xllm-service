@@ -295,6 +295,11 @@ DEFINE_uint64(engine_heartbeat_hard_ttl_ms,
               10000,
               "Heartbeat age that makes an Engine unschedulable.");
 
+DEFINE_uint64(engine_direct_evidence_ttl_ms,
+              3000,
+              "Maximum age of a successful direct Engine probe used to "
+              "bridge a stale State Stream observation.");
+
 DEFINE_int32(instance_delete_probe_attempts,
              2,
              "Deprecated V1 compatibility flag; V2 never probes to override "

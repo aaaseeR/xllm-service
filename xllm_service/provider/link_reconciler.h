@@ -42,6 +42,7 @@ struct DesiredProviderLink {
 struct ProviderLinkAttempt {
   xllm::proto::ProviderEngineKey prefill;
   xllm::proto::ProviderEngineKey decode;
+  uint64_t attempt_id = 0;
 };
 
 // Bounded, incarnation-scoped P/D handshake state machine. It contains no
@@ -71,8 +72,8 @@ class LinkReconciler final {
   struct Entry {
     xllm::proto::LinkState state;
     uint64_t next_attempt_ms = 0;
+    uint64_t in_flight_attempt_id = 0;
     uint32_t consecutive_failures = 0;
-    bool in_flight = false;
   };
 
   static std::string link_key(const xllm::proto::ProviderEngineKey& prefill,
@@ -83,6 +84,7 @@ class LinkReconciler final {
   bool config_valid_ = false;
   mutable std::mutex mutex_;
   std::map<std::string, Entry> entries_;
+  uint64_t next_attempt_id_ = 1;
 };
 
 }  // namespace xllm_service::provider

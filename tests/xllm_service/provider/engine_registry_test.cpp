@@ -362,6 +362,120 @@ TEST(EngineRegistryTest, RequiresCurrentMasterFullBeforeScheduling) {
             xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
 }
 
+TEST(EngineRegistryTest, RoutingSnapshotIsImmutableAndMatchesPointQueries) {
+  EngineRegistry registry(test_config());
+  const xllm::proto::ProviderDescriptor prefill = make_descriptor(
+      xllm::proto::ENGINE_ROLE_PREFILL, "p", "p-inc", "p-profile");
+  const xllm::proto::ProviderDescriptor decode = make_descriptor(
+      xllm::proto::ENGINE_ROLE_DECODE, "d", "d-inc", "d-profile");
+  const xllm::proto::ProviderEngineKey prefill_key =
+      make_provider_engine_key(prefill);
+  const xllm::proto::ProviderEngineKey decode_key =
+      make_provider_engine_key(decode);
+  ASSERT_TRUE(registry.upsert_member(prefill).ok());
+  ASSERT_TRUE(registry.upsert_member(decode).ok());
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  *full.add_engine_states() = make_state(prefill, 1);
+  *full.add_engine_states() = make_state(decode, 1);
+  *full.add_link_states() = make_link(prefill, decode, 1);
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  ASSERT_TRUE(applied);
+
+  const EngineRegistryRoutingSnapshot before = registry.routing_snapshot(100);
+  EXPECT_TRUE(before.is_schedulable(prefill_key));
+  EXPECT_TRUE(before.is_schedulable(decode_key));
+  EXPECT_TRUE(before.is_link_ready(prefill_key, decode_key));
+
+  ASSERT_TRUE(
+      registry
+          .record_link_state(
+              make_link(
+                  prefill, decode, 2, xllm::proto::LINK_LIFECYCLE_DEGRADED),
+              101,
+              &applied)
+          .ok());
+  ASSERT_TRUE(applied);
+  const EngineRegistryRoutingSnapshot after = registry.routing_snapshot(101);
+  EXPECT_TRUE(after.is_schedulable(prefill_key));
+  EXPECT_TRUE(after.is_schedulable(decode_key));
+  EXPECT_FALSE(after.is_link_ready(prefill_key, decode_key));
+
+  // A request keeps one coherent immutable decision view even while newer
+  // Registry observations are committed for subsequent requests.
+  EXPECT_TRUE(before.is_link_ready(prefill_key, decode_key));
+}
+
+TEST(EngineRegistryTest, RoutingSnapshotCoversEightByEightConcurrentReaders) {
+  EngineRegistry registry(test_config());
+  std::vector<xllm::proto::ProviderDescriptor> prefills;
+  std::vector<xllm::proto::ProviderDescriptor> decodes;
+  prefills.reserve(8);
+  decodes.reserve(8);
+  for (size_t index = 0; index < 8; ++index) {
+    const std::string suffix = std::to_string(index);
+    prefills.emplace_back(make_descriptor(xllm::proto::ENGINE_ROLE_PREFILL,
+                                          "p-" + suffix,
+                                          "p-inc-" + suffix,
+                                          "p-profile-" + suffix));
+    decodes.emplace_back(make_descriptor(xllm::proto::ENGINE_ROLE_DECODE,
+                                         "d-" + suffix,
+                                         "d-inc-" + suffix,
+                                         "d-profile-" + suffix));
+    ASSERT_TRUE(registry.upsert_member(prefills.back()).ok());
+    ASSERT_TRUE(registry.upsert_member(decodes.back()).ok());
+  }
+  set_registry_view(&registry, "master");
+  xllm::proto::StateBatch full =
+      make_batch("master", 1, xllm::proto::STATE_BATCH_KIND_FULL);
+  for (const auto& descriptor : prefills) {
+    *full.add_engine_states() = make_state(descriptor, 1);
+  }
+  for (const auto& descriptor : decodes) {
+    *full.add_engine_states() = make_state(descriptor, 1);
+  }
+  for (const auto& prefill : prefills) {
+    for (const auto& decode : decodes) {
+      *full.add_link_states() = make_link(prefill, decode, 1);
+    }
+  }
+  bool applied = false;
+  ASSERT_TRUE(registry.apply_state_batch(full, 100, &applied).ok());
+  ASSERT_TRUE(applied);
+
+  std::vector<int> succeeded(8, 0);
+  std::vector<std::thread> readers;
+  readers.reserve(succeeded.size());
+  for (size_t reader = 0; reader < succeeded.size(); ++reader) {
+    readers.emplace_back([&registry, &prefills, &decodes, &succeeded, reader] {
+      for (size_t iteration = 0; iteration < 20; ++iteration) {
+        const EngineRegistryRoutingSnapshot snapshot =
+            registry.routing_snapshot(100);
+        for (const auto& prefill : prefills) {
+          if (!snapshot.is_schedulable(make_provider_engine_key(prefill))) {
+            return;
+          }
+          for (const auto& decode : decodes) {
+            if (!snapshot.is_link_ready(make_provider_engine_key(prefill),
+                                        make_provider_engine_key(decode))) {
+              return;
+            }
+          }
+        }
+      }
+      succeeded[reader] = 1;
+    });
+  }
+  for (std::thread& reader : readers) {
+    reader.join();
+  }
+  for (int result : succeeded) {
+    EXPECT_EQ(result, 1);
+  }
+}
+
 TEST(EngineRegistryTest, UsesReceiverMonotonicAgeAndNeverRegressesState) {
   EngineRegistry registry(test_config());
   const xllm::proto::ProviderDescriptor descriptor = make_descriptor(
@@ -641,6 +755,12 @@ TEST(EngineRegistryTest, CapacityAndInvalidConfigurationFailClosed) {
   config.state_soft_ttl_ms = 21;
   EngineRegistry invalid(config);
   EXPECT_EQ(invalid.upsert_member(first).error(),
+            xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
+
+  config = test_config();
+  config.direct_evidence_ttl_ms = config.state_hard_ttl_ms + 1;
+  EngineRegistry invalid_direct_evidence(config);
+  EXPECT_EQ(invalid_direct_evidence.upsert_member(first).error(),
             xllm::proto::PROVIDER_CONTRACT_ERROR_INVALID_STATE);
 }
 
