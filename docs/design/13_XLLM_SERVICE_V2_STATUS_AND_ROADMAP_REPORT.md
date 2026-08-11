@@ -112,7 +112,7 @@ llm-d、NVIDIA Dynamo、SGLang Gateway 和 AIBrix 的共同趋势，是把请求
 | 执行与资源安全 | Native/vLLM Provider 契约；D 原子 admission；结果不明 hold；Query/Cancel；incarnation fencing；真实 BlockManager 适配和 simulated HBM | [Engine 契约实现](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm/tree/service_dev/xllm/core) |
 | 资源控制慢环 | leader-fenced desired/command/status；1→3→1 扩缩；load/warmup/drain；response lost、leader kill 和恢复 | [V3 Placement 实现](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/placement) |
 | Debug 与性能分析 | request/attempt/incarnation 统一身份；阶段事件；bvar；VLOG JSON；cluster snapshot；KV pressure、cleanup、drop 和 residual 观测 | [Observability 实现](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/xllm_service/observability) |
-| 交付门禁 | 517/517 Service CPU tests、xLLM 当前 1069 个 CPU CTest 全量 PASS；V2/V3 离线多进程 E2E、并发压测与 deadline/断流/过载/进程丢失/扩缩容/Leader failover 故障矩阵 | [离线集群硬门](./implementation/OFFLINE_E2E_GATE_STATUS.md)、[三轮深度审查](./implementation/V2_V3_THREE_ROUND_DEEP_REVIEW_STATUS.md) |
+| 交付门禁 | 523/523 Service CPU tests、73/73 Python 回归、xLLM V2/V3 公共 CPU contract 141/141；固定提交 smoke×3 + stress×1 离线多进程 E2E，以及 deadline/断流/过载/进程丢失/扩缩容/Leader failover 故障矩阵 | [离线集群硬门](./implementation/OFFLINE_E2E_GATE_STATUS.md)、[三轮深度审查](./implementation/V2_V3_THREE_ROUND_DEEP_REVIEW_STATUS.md) |
 
 当前结论是：**V2/V3 已证明代码链路、协议不变量和 CPU 离线集群行为，尚未证明真实 NPU 性能、CANN/HBM/Link 行为与线上生产收益。** CPU 不是产品运行目标，simulated HBM 也不替代真实 HBM；它们用于在上 NPU 前尽可能消除控制链和资源生命周期问题。
 

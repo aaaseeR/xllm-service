@@ -163,7 +163,7 @@ limitations under the License.
 | G2 首输出前 attempt 替换 | 8 项 fake monotonic budget 覆盖次数、首输出、deadline、累计 device time、时钟回退、禁用和非法配置；production 接线覆盖旧 hold Cancel fence、递增 attempt、重选 P/D、sequencer/hold 重建、旧 attempt fencing 和 attempt-scoped dispatch failure | N/A，纯控制/RPC | 待真实两组 P/D 故障注入 | PASS（CPU 核心与生产接线）；完整 Scheduler loopback 待补 |
 | G2 主动客户端断连 | 5 项覆盖预留容量、幂等有界通知、弱引用回收、并发 exactly-once 和 close；brpc callback 接入 request watchdog 同一终止路径；离线多进程真实 SSE 客户端断流验证 Agent Cancel、Service/Runtime/simulated HBM 收敛 | Torch CPU simulated HBM 终态清零 | 待真实 NPU 客户端断流与 KV 回收 | PASS（CPU 与离线集群） |
 | G2 Service 关键竞态稳定性 | 首事件 loopback、断连、重试预算、delivery wire 和 pre-dispatch hold 回滚共 22 项各重复 100 轮，共 2200 次 | N/A | N/A | PASS |
-| 双仓回归 | Service 当前全量 517/517，三个生产二进制 build/link verify；xLLM 当前发现 1069 个 CPU CTest 且全量命令 PASS；63 个并发/状态机高风险用例重复 20 轮累计 1260/1260 | Torch CPU queue、所有权与 simulated HBM；V2/V3 离线多进程 stress 资源终态全零 | N/A | PASS（CPU 与离线集群） |
+| 双仓回归 | Service 当前全量 523/523，Python 73/73，三个生产二进制 build/link verify；xLLM V2/V3 公共 CPU contract 141/141；63 个并发/状态机高风险用例重复 20 轮累计 1260/1260 | Torch CPU queue、所有权与 simulated HBM；固定提交 V2/V3 smoke×3 + stress×1 资源终态全零 | xLLM 完整 `tests/all` 仍受第三方 Mooncake Clang 编译边界阻断 | PASS（CPU contract 与离线集群） |
 
 ## 完善情况
 

@@ -47,12 +47,12 @@ Harness 使用真实 socket、etcd lease/watch、brpc/HTTP 和系统信号；moc
 
 | Gate | 负载 | 结果 |
 | --- | --- | --- |
-| V2 smoke | baseline 120/120、SSE 16/16；50 ms deadline 60.6 ms 终止并恢复 16/16；过载 40 成功/56 结构化拒绝并恢复 32/32；Prefill `SIGKILL` 64/64；短/长 etcd 与 failover 安全阶段全成功 | PASS，报告 `1786381540-9005052f` |
-| V2 stress | baseline 1200/1200、SSE 160/160；50 ms deadline 68.4 ms；不可满足 deadline 64/64 结构化拒绝；过载 80 成功/880 结构化拒绝；Prefill `SIGKILL` 640/640；短 etcd 120/120；Leader failover 后 1200/1200 | PASS，simulated HBM 高水位 128 blocks，终态 allocation/block 全零；报告 `1786381349-34fd2d1b` |
-| V3 smoke | 1→3→1、deadline/真实断流、Drain race、Agent+Runtime 突然丢失与替换、Leader failover | PASS，报告 `1786381573-aa3ddd30`，所有硬断言成立 |
-| V3 stress | 单副本高压 446 成功/1354 结构化 backpressure；三副本后 1800/1800；deadline 3/3 预期终止；Drain 重选 12/12；突然丢失 1798/1800 且仅 2 个允许的在途 transport failure；替换后 1200/1200；failover 后 1800/1800 | PASS，实际使用 4 个 incarnation，所有 simulated HBM 终态 allocation/block/tensor 全零；报告 `1786381432-31030c4b` |
+| V2 smoke | baseline 120/120、SSE 16/16；短 deadline 终止并恢复 16/16；过载 40 成功/56 结构化拒绝并恢复 32/32；Prefill `SIGKILL` 64/64；短/长 etcd 与 failover 安全阶段全成功 | 固定提交 smoke×3 全 PASS，报告 `1786416644-09dcb9e4`、`1786416722-46dd9ef1`、`1786416801-42ab30d5` |
+| V2 stress | baseline 1200/1200、SSE 160/160；不可满足 deadline 64/64 结构化拒绝；过载 72 成功/888 结构化拒绝；Prefill `SIGKILL` 640/640；短 etcd 120/120；Leader failover 后 1200/1200 | PASS，simulated HBM 高水位 128 blocks，终态 allocation/block 全零；报告 `1786416919-203ed2c9` |
+| V3 smoke | 1→3→1、deadline/真实断流、Drain race、Agent-only、Runtime-only、Agent+Runtime 突然丢失与替换、Leader failover | 固定提交 smoke×3 全 PASS，报告 `1786416680-9e889524`、`1786416758-62411124`、`1786416834-eb2a85ee` |
+| V3 stress | 单副本高压 431 成功/1369 结构化 backpressure；三副本后 1800/1800；deadline 3/3 预期终止；Drain 重选 12/12；Agent-only 2399/2400、Runtime-only 2397/2400、组合故障 1799/1800，恢复后均全成功；scale-down 13/13；failover 后 1800/1800 | PASS，实际使用 4 个 incarnation，所有 simulated HBM 终态 allocation/block/tensor 全零；报告 `1786417002-b366fc4c` |
 
-同一轮全仓回归为 xllm-service 517/517 CPU CTest 和 xLLM 当前 1069 个 CPU CTest 全量 PASS；63 个并发/状态机高风险用例重复 20 轮累计 1260/1260 PASS，KV State timeout/非法请求测试拆分后目标用例连续 100 轮通过。三轮审查、修复位置和异常复核见 [三轮深度审查状态](./V2_V3_THREE_ROUND_DEEP_REVIEW_STATUS.md)。
+以上报告全部来自已推送固定提交 `c474f73b245688df262714f34f19ecd8d05b0cdb` 的干净 detached worktree。同一轮回归为 xllm-service 523/523 CPU CTest、Python 73/73 和 xLLM V2/V3 公共 CPU contract 141/141；xLLM 1069 项 CTest 发现数不再被误报为完整通过数，完整 `tests/all` 当前受第三方 Mooncake Clang 编译边界阻断。63 个并发/状态机高风险用例重复 20 轮累计 1260/1260 PASS，KV State timeout/非法请求测试拆分后目标用例连续 100 轮通过。三轮审查、修复位置和异常复核见 [三轮深度审查状态](./V2_V3_THREE_ROUND_DEEP_REVIEW_STATUS.md)。
 
 ## 尚未覆盖和关闭条件
 

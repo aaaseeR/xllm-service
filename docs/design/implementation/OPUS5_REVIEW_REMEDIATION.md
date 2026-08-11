@@ -160,3 +160,21 @@ Clang thread-safety/incomplete-type 错误；这不影响重新构建的轻量 r
 xllm-service pinned/override 391/391 和三个生产 ELF build/link，但也不被包装成真实
 HBM/Torch 全 runtime 证明。xLLM 整改提交 `6c9d661e` 已先推送到远端 `service_dev`，
 Service gitlink 再固定到该提交。
+
+## §19 第九轮复核闭环
+
+| §19 项 | 结论 | 整改与固定提交证据 |
+| --- | --- | --- |
+| N2 路由 P×D 独占锁 | FIXED | `EngineRegistryRoutingSnapshot` 在一次 Registry 临界区物化 schedulable Engine 与 ready Link，请求候选、配对、SLO/load/KV 路由改为锁外只读；8P×8D、64 Link、8 并发 reader 的永久规模回归累计 100/100 PASS。 |
+| N3 direct-evidence TTL 不可配置 | FIXED | 新增 `--engine_direct_evidence_ttl_ms`，Master 启动与 Registry 构造两层失败关闭；direct evidence TTL 必须为正且不超过 hard State/heartbeat TTL。非法组合实测在连接 etcd 前以状态 255 退出。 |
+| N4 固定提交独立 E2E | FIXED | 从已推送提交 `c474f73b245688df262714f34f19ecd8d05b0cdb` 建立无修改 detached worktree，执行 smoke×3 + stress×1，8 份 V2/V3 报告全部 `passed=true`。复现还暴露并修复 scale-down 清除 FULL readiness、故障波 blast radius 与 Runtime-fence 409 精确分类问题。 |
+
+### §19 最终回归证据
+
+- xllm-service ARM64 Linux Debug 全量 CTest：523/523 PASS；三个生产 serving ELF 编译、动态链接 PASS。
+- vLLM Agent/sidecar 与离线故障分类器：73/73 PASS；普通、截断、字段不完整或其他状态的 409 均不会被故障门放行。
+- xLLM V2/V3 公共 CPU contract 10 个二进制：141/141 PASS，包含 simulated HBM 15/15；CTest 可发现 1069 项，但完整 `tests/all` 受第三方 Mooncake `PutOperation` incomplete-type/Clang 编译边界阻断，不再把发现数表述为全量通过数。
+- 固定提交报告：smoke V2 `1786416644-09dcb9e4`、`1786416722-46dd9ef1`、`1786416801-42ab30d5`，smoke V3 `1786416680-9e889524`、`1786416758-62411124`、`1786416834-eb2a85ee`，stress V2 `1786416919-203ed2c9`、stress V3 `1786417002-b366fc4c`。
+- stress V3 的 Agent-only、Runtime-only、组合 `SIGKILL` 分别只产生 1、3、1 个有界不确定在途失败，恢复窗口为 0.113、1.255、3.918 秒；3→1 scale-down 低负载 13/13 全成功，终态所有 Runtime simulated HBM allocation/block/tensor 清零。
+
+结论仍为 `CPU_AND_OFFLINE_CLUSTER_VERIFIED / NPU_AND_ONLINE_PENDING`。固定提交独立复现消除了 §19 对作者工作区并发污染的证据疑问，但不扩大 CPU 证据边界；真实 NPU、CANN/HBM/Link、生产网络、真实部署系统和 24h+ soak 仍是上线验证门。

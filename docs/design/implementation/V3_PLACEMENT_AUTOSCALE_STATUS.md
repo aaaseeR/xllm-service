@@ -75,8 +75,8 @@ limitations under the License.
 | 离线多进程集群 | `online_cluster_stress.py --scenario v3 --mode smoke/stress` | PASS；单副本过载与结构化 backpressure、1→3→1、响应丢失、deadline、真实 SSE 断流、Drain race、Agent+Runtime `SIGKILL`/替换、Leader `SIGKILL`、Torch HBM 清零 |
 | V2 HBM/KV 与 flow 回归 | KV Shadow、flow control 既有 CPU suite | PASS |
 | Serving 链接门 | master、RPC、HTTP 三个 serving binary | PASS |
-| 全仓 Service CPU | 沙箱 `xllm-dev service-test ... native Debug` | 517/517 PASS |
-| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | 当前发现 1069 个 CTest，全量 PASS |
+| 全仓 Service CPU | 沙箱 `xllm-dev service-test ... native Debug` | 523/523 PASS |
+| xLLM CPU/provider 协议 | `xllm-dev xllm-test ... native Debug` | V2/V3 公共 contract 10 个二进制共 141/141 PASS；1069 为 CTest 发现数，完整 `tests/all` 受第三方 Mooncake 编译边界阻断 |
 | xLLM simulated HBM/allocator | `simulated_hbm_test` | 15/15 PASS |
 
 ## 线上前不可误报的边界

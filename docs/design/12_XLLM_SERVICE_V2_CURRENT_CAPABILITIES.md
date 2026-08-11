@@ -109,7 +109,7 @@ DECODE/RESOURCE_RELEASE/REQUEST_END`。事件 ring 丢失可见但不能反压�
 
 ## 6. 验证证据与未完成项
 
-本次本地 Linux CPU 门为 Service 517/517；三个 ARM64 Debug serving ELF 均完成编译和动态链接检查。xLLM 当前发现 1069 个 CPU CTest，全量命令 PASS，覆盖公共 contract、attempt、registration、Provider wire、RequestEvent 和 simulated HBM。V2 stress 进一步覆盖短 deadline、有界过载、Prefill `SIGKILL`、etcd 短/长故障、Leader failover 与资源归零；精确命令由仓库 [Coding CI](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/.coding-ci.yml) 和 [离线 E2E 硬门](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/README.md) 固化。
+本次本地 Linux CPU 门为 Service 523/523；三个 ARM64 Debug serving ELF 均完成编译和动态链接检查。xLLM 的 V2/V3 公共 CPU contract 10 个二进制共 141/141 PASS，覆盖 attempt、registration、Provider wire、RequestEvent 和 simulated HBM。CTest 可发现 1069 项，但完整 `tests/all` 在第三方 Mooncake 的 Clang incomplete-type 编译边界被阻断，不把发现数冒充通过数。V2 stress 进一步覆盖短 deadline、有界过载、Prefill `SIGKILL`、etcd 短/长故障、Leader failover 与资源归零；精确命令由仓库 [Coding CI](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/.coding-ci.yml) 和 [离线 E2E 硬门](http://xingyun.jd.com/codingRoot/xLLM_AI/xllm-service/tree/service_dev/tests/e2e/README.md) 固化。
 
 达到生产 `VERIFIED` 仍缺：
 

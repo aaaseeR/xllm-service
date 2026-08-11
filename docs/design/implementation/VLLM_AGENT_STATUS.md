@@ -75,7 +75,7 @@ limitations under the License.
 | local deadline | fake clock ledger 与延迟 upstream loopback；超时返回 terminal `EXPIRED` | NPU abort 到资源释放时延 | PASS / PENDING |
 | HTTP proxy | Chat/Completion payload/request ID、内部 token、未知推理路径防旁路、请求数/单 body/聚合 body 上限、body timeout、Cancel/deadline 在响应头前 shutdown socket；离线多进程真实 SSE、客户端断流、Agent+Runtime `SIGKILL` 和资源收敛 | 真实 NPU SSE/abort；Anthropic 尚未开放 | PASS / PENDING |
 | EngineState | per-DP label、缺 rank `PARTIAL`、ratio 聚合、state sequence/identity、fence pressure 发布 `DRAINING` | 真实 vLLM-Ascend metrics | PASS / PENDING |
-| Service hold | aggregated commit/terminal invariant；Agent 精确身份/accepted terminal parser；Submit header 绑定目标 incarnation 与内部 token；SSE 显式终态门禁；V3 stress 覆盖 deadline、断流、Drain、突发丢失、替换和 Leader failover，全仓 Service 517/517 | 真实 NPU Submit ACK/网络组合故障 | PASS / PENDING |
+| Service hold | aggregated commit/terminal invariant；Agent 精确身份/accepted terminal parser；Submit header 绑定目标 incarnation 与内部 token；SSE 显式终态门禁；V3 stress 覆盖 deadline、断流、Drain、突发丢失、替换和 Leader failover，全仓 Service 523/523 | 真实 NPU Submit ACK/网络组合故障 | PASS / PENDING |
 
 ## 完善情况
 
